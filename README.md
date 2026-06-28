@@ -1,5 +1,12 @@
 # lukk
 
+[![Latest Version](https://img.shields.io/packagist/v/lukk/lukk.svg?style=flat-square)](https://packagist.org/packages/lukk/lukk)
+[![Tests](https://img.shields.io/github/actions/workflow/status/stsepelin/lukk/tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/stsepelin/lukk/actions/workflows/tests.yml)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg?style=flat-square)](https://github.com/stsepelin/lukk/actions/workflows/tests.yml)
+[![PHP Version](https://img.shields.io/packagist/php-v/lukk/lukk.svg?style=flat-square)](https://packagist.org/packages/lukk/lukk)
+[![License](https://img.shields.io/packagist/l/lukk/lukk.svg?style=flat-square)](LICENSE.md)
+[![Total Downloads](https://img.shields.io/packagist/dt/lukk/lukk.svg?style=flat-square)](https://packagist.org/packages/lukk/lukk)
+
 Minimal-dependency JWT authentication for **first-party Laravel apps** (Laravel 12/13) — "first-party" meaning *you own both the client and the API*, so there's no third party to delegate to and no OAuth ceremony to perform.
 
 > **Unofficial, independent package.** Not affiliated with, endorsed by, or maintained by the Laravel team. "Laravel", "Sanctum", and "Fortify" are referenced only to describe compatibility and design influence; they are trademarks of their respective owners.
