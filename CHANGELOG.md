@@ -1,0 +1,58 @@
+# Changelog
+
+All notable changes to `lukk` will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-06-28
+
+### Added
+
+Core token model:
+
+- Short-lived HS256 access JWTs with full claim set (`iss/aud/sub/fid/jti/iat/nbf/exp`, `typ=at+jwt`).
+- Optional asymmetric signing (RS256 / ES256) behind the same `TokenIssuer`/`TokenVerifier` contracts, for split auth-service / verify-only-API deployments: a `kid`-addressed key set, signing-key rotation with an overlap window (a retired key keeps verifying its live tokens), a `GET /auth/jwks` endpoint (JWK Set built without any extra dependency), and a `lukk:keygen` command. The algorithm is pinned from config and never read from the token header — the RS256↔HS256 confusion defense.
+- Opaque, rotating refresh tokens (sha256 at rest) with reuse detection and family-cascade revoke.
+- Concurrency grace window so single-flight refreshes don't trip reuse detection.
+- Cache-backed denylist (by `jti`/`fid`) for instant revocation.
+
+Guard & endpoints:
+
+- `JwtGuard` request guard (`lukk-jwt` driver) and resource controllers: `POST /auth/login` + `/refresh`, `POST /auth/logout`, and `DELETE /auth/sessions` (revoke all) / `DELETE /auth/sessions/others` (revoke all but the caller, via `RevokeOtherSessions`).
+
+Extensibility:
+
+- Swappable contracts (`TokenIssuer`, `TokenVerifier`, `RefreshTokenRepository`, `Denylist`, response contracts).
+- Static `Lukk` hub (`authenticateUsing`, `useRefreshTokenModel`, `actingAs`) and `HasRefreshTokens` trait.
+- `Lukk::tokenClaimsUsing()` to add custom claims (e.g. roles) to the access token; standard claims cannot be overridden.
+- Multiple audiences: `LUKK_AUDIENCE` is comma-separated, so one token can be minted for several services; each verifies when its own audience is listed (a single audience stays a string). Enables a split auth-service / verify-only-API topology — see `docs/deployment.md`.
+
+Security:
+
+- `RefreshTokenReused` security event on reuse/revoked family kill.
+- `Cache-Control: no-store` on token responses and constant-time login (no user enumeration).
+- The access-token verifier enforces the `typ=at+jwt` header, so a 2FA / step-up *challenge* token (same key, iss and aud) can never be presented as a bearer access token.
+- A coarse per-IP login cap (`rate_limits.login.ip_max_attempts`) on top of the per-account failure limiter, bounding password spraying across many emails.
+- Passkeys require `rp_id` and `origins` to be configured (fail loud rather than silently weak origin validation); passkey verification failures return a 4xx, never an uncaught 500.
+- In cookie mode the `__Host-` refresh cookie is `SameSite=Strict` (and cleared with matching attributes on logout).
+- An unknown / expired / revoked / reused refresh token returns a clean `401` (self-rendering `InvalidRefreshToken`), never an uncaught 500, without leaking which reason.
+- Config is **deep-merged** from the package defaults, so a published config that predates a nested key is backfilled — preventing a missing rate-limit key from resolving to `0` (which would lock out every login).
+- Unified, configurable rate limits under `lukk.rate_limits` — `login`, `two_factor`, `refresh`, and `passkeys`, each `{ max_attempts, decay_seconds }`. Login keeps a dedicated failures-only limiter (keyed on normalized email + IP, clears on success); the rest are named limiters (`lukk-refresh` / `lukk-passkeys` / `lukk-2fa`) you can also override via `RateLimiter::for()`. Two-factor additionally throttles per account (`sub`).
+
+Multi-factor (opt-in):
+
+- Two-factor authentication (TOTP + recovery codes), opt-in via `features.two_factor` + `pragmarx/google2fa`: enrol/confirm/disable/regenerate endpoints, a recovery-code **count** endpoint (`GET /auth/two-factor/recovery-codes` — codes stay hashed, so only the remaining count is surfaced, never the values), and a `2fa+challenge` login step. Secret stored encrypted, recovery codes salted+hashed (single-use), intra-window TOTP replay protection, account-keyed challenge throttle, and `amr` claims (`["pwd"]` / `["pwd","otp"]`) on issued tokens. `Auth\ChallengeToken` is a generic single-use challenge primitive (reused by passkeys).
+- Step-up ("sudo") confirmation: `POST /auth/confirm-password` (or `/auth/confirm-passkey`) mints a short-lived `confirmation_token`, and the `lukk.confirm` middleware gates sensitive routes behind it (423 Locked otherwise). Reusable for your own routes; the 2FA + passkey management endpoints use it.
+- Passkeys (WebAuthn / FIDO2), opt-in via `features.passkeys` + a `WebAuthnCeremony` adapter: passwordless registration/login (→ tokens with `amr: ["webauthn"]`), credential list/delete, and passkey-based step-up confirmation. Stateless cache-backed single-use challenges (keyed by user for registration, opaque `ceremony_id` for login), sign-count regression detection (`Events\PasskeyCloneDetected`, never flags `0`), globally-unique credential ids, COSE public key encrypted at rest. Storage behind `Contracts\PasskeyRepository` (`passkeys` table). `rp_id` and `origins` are required (no weak fallback); `passkeys.user_verification` (default `preferred`, set `required` for biometric/PIN) gates login and step-up.
+
+Commands:
+
+- `lukk:secret` Artisan command to generate the 256-bit HMAC signing secret and write `LUKK_SECRET` to `.env` (modeled on `jwt:secret`/`key:generate`; supports `--show` and `--force`).
+- `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
+- `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
+
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/stsepelin/lukk/releases/tag/v0.1.0
