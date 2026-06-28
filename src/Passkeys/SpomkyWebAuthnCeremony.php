@@ -1,0 +1,187 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Lukk\Passkeys;
+
+use Cose\Algorithm\Signature\ECDSA\ES256;
+use Cose\Algorithm\Signature\RSA\RS256;
+use InvalidArgumentException;
+use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Exceptions\PasskeyVerificationFailed;
+use Lukk\Support\NewPasskey;
+use Lukk\Support\PasskeyRecord;
+use Symfony\Component\Serializer\SerializerInterface;
+use Throwable;
+use Webauthn\AttestationStatement\AttestationStatementSupportManager;
+use Webauthn\AttestationStatement\NoneAttestationStatementSupport;
+use Webauthn\AuthenticatorAssertionResponse;
+use Webauthn\AuthenticatorAssertionResponseValidator;
+use Webauthn\AuthenticatorAttestationResponse;
+use Webauthn\AuthenticatorAttestationResponseValidator;
+use Webauthn\CeremonyStep\CeremonyStepManagerFactory;
+use Webauthn\Denormalizer\WebauthnSerializerFactory;
+use Webauthn\PublicKeyCredential;
+use Webauthn\PublicKeyCredentialCreationOptions;
+use Webauthn\PublicKeyCredentialDescriptor;
+use Webauthn\PublicKeyCredentialParameters;
+use Webauthn\PublicKeyCredentialRequestOptions;
+use Webauthn\PublicKeyCredentialRpEntity;
+use Webauthn\PublicKeyCredentialSource;
+use Webauthn\PublicKeyCredentialUserEntity;
+
+/**
+ * Default WebAuthnCeremony, wrapping web-auth/webauthn-lib. lukk supplies the
+ * challenge and owns storage + the sign-count policy (a no-op counter checker);
+ * this only builds ceremony options and verifies attestations/assertions.
+ */
+class SpomkyWebAuthnCeremony implements WebAuthnCeremony
+{
+    private readonly SerializerInterface $serializer;
+
+    private readonly AuthenticatorAttestationResponseValidator $attestation;
+
+    private readonly AuthenticatorAssertionResponseValidator $assertion;
+
+    /**
+     * @param  array{rp_id:?string,rp_name:string,origins:array<int,string>,user_verification:string}  $config
+     */
+    public function __construct(private readonly array $config)
+    {
+        // Fail loud rather than silently weak: an empty rp_id breaks the RP-ID
+        // hash check, and an empty origins list downgrades origin validation to
+        // domain-suffix matching instead of an explicit allow-list.
+        if (empty($config['rp_id'])) {
+            throw new InvalidArgumentException('Passkeys require lukk.passkeys.rp_id — the registrable domain shared by your front-end and API, e.g. "example.com" (set LUKK_PASSKEY_RP_ID).');
+        }
+
+        if ($config['origins'] === []) {
+            throw new InvalidArgumentException('Passkeys require lukk.passkeys.origins — the allowed front-end origin(s), e.g. "https://app.example.com" (set LUKK_PASSKEY_ORIGINS).');
+        }
+
+        $support = new AttestationStatementSupportManager([new NoneAttestationStatementSupport]);
+        $this->serializer = (new WebauthnSerializerFactory($support))->create();
+
+        $factory = new CeremonyStepManagerFactory;
+        $factory->setCounterChecker(new NullCounterChecker);
+        $factory->setAllowedOrigins($this->config['origins']);
+
+        $this->attestation = AuthenticatorAttestationResponseValidator::create($factory->creationCeremony());
+        $this->assertion = AuthenticatorAssertionResponseValidator::create($factory->requestCeremony());
+    }
+
+    public function registrationOptions(int|string $userId, string $userName, string $challenge, array $excludeCredentialIds): array
+    {
+        $options = PublicKeyCredentialCreationOptions::create(
+            rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
+            user: PublicKeyCredentialUserEntity::create($userName, (string) $userId, $userName),
+            challenge: $this->decode($challenge),
+            pubKeyCredParams: [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)],
+            excludeCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $excludeCredentialIds),
+        );
+
+        return $this->toArray($options);
+    }
+
+    public function verifyRegistration(int|string $userId, array $response, string $challenge): NewPasskey
+    {
+        try {
+            $authenticatorResponse = $this->credentialResponse($response);
+
+            if (! $authenticatorResponse instanceof AuthenticatorAttestationResponse) {
+                throw new PasskeyVerificationFailed('Not an attestation response.');
+            }
+
+            $options = PublicKeyCredentialCreationOptions::create(
+                rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
+                user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''),
+                challenge: $this->decode($challenge),
+            );
+
+            $record = $this->attestation->check($authenticatorResponse, $options, (string) $this->config['rp_id']);
+        } catch (PasskeyVerificationFailed $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            // Any library error verifying attacker-supplied input — including a
+            // malformed COSE key (InvalidArgumentException) — is a verification
+            // failure (clean 4xx), never an uncaught 500.
+            throw new PasskeyVerificationFailed('The passkey registration could not be verified.', previous: $e);
+        }
+
+        return new NewPasskey(
+            credentialId: $this->encode($record->publicKeyCredentialId),
+            publicKey: $this->serializer->serialize($record, 'json'),
+            signCount: $record->counter,
+            transports: $record->transports,
+            aaguid: $record->aaguid->toRfc4122(),
+        );
+    }
+
+    public function authenticationOptions(string $challenge, array $allowCredentialIds): array
+    {
+        $options = PublicKeyCredentialRequestOptions::create(
+            challenge: $this->decode($challenge),
+            rpId: $this->config['rp_id'],
+            allowCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $allowCredentialIds),
+            userVerification: $this->config['user_verification'] ?? 'preferred',
+        );
+
+        return $this->toArray($options);
+    }
+
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored): int
+    {
+        // Decode the stored credential outside the try — a corrupt/undecryptable
+        // record is an infrastructure failure, not a verification failure.
+        $source = $this->serializer->deserialize($stored->publicKey, PublicKeyCredentialSource::class, 'json');
+
+        try {
+            $authenticatorResponse = $this->credentialResponse($response);
+
+            if (! $authenticatorResponse instanceof AuthenticatorAssertionResponse) {
+                throw new PasskeyVerificationFailed('Not an assertion response.');
+            }
+
+            $options = PublicKeyCredentialRequestOptions::create(
+                challenge: $this->decode($challenge),
+                rpId: $this->config['rp_id'],
+                userVerification: $this->config['user_verification'] ?? 'preferred',
+            );
+
+            // Usernameless: the user is resolved from our own credential_id → userId
+            // mapping, so we don't pre-assert a user handle here (pass null).
+            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null);
+        } catch (PasskeyVerificationFailed $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            // Any library error verifying attacker-supplied input — including a
+            // malformed COSE key (InvalidArgumentException) — is a verification
+            // failure (clean 4xx), never an uncaught 500.
+            throw new PasskeyVerificationFailed('The passkey assertion could not be verified.', previous: $e);
+        }
+
+        return $record->counter;
+    }
+
+    private function credentialResponse(array $response): mixed
+    {
+        $credential = $this->serializer->deserialize(json_encode($response), PublicKeyCredential::class, 'json');
+
+        return $credential->response;
+    }
+
+    private function toArray(object $options): array
+    {
+        return json_decode($this->serializer->serialize($options, 'json'), true);
+    }
+
+    private function decode(string $value): string
+    {
+        return base64_decode(strtr($value, '-_', '+/'));
+    }
+
+    private function encode(string $value): string
+    {
+        return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+    }
+}
