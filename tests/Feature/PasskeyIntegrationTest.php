@@ -6,8 +6,8 @@ use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Passkeys\PasskeyChallengeStore;
-use Lukk\Tests\Fixtures\FixedKeyAuthenticator;
 use Lukk\Tests\Fixtures\User;
+use WebauthnEmulator\Authenticator;
 use WebauthnEmulator\CredentialRepository\InMemoryRepository;
 
 uses()->group('passkeys');
@@ -29,7 +29,7 @@ function toBase64Url(mixed $value): mixed
 }
 
 it('registers and logs in through the real web-auth ceremony (end-to-end crypto)', function () {
-    $authenticator = new FixedKeyAuthenticator(new InMemoryRepository);
+    $authenticator = new Authenticator(new InMemoryRepository);
 
     $user = User::factory()->create();
     $access = $user->startSession()->accessToken;
@@ -66,7 +66,7 @@ it('registers and logs in through the real web-auth ceremony (end-to-end crypto)
 
 it('rejects a presence-only assertion when user verification is required', function () {
     config(['lukk.passkeys.user_verification' => 'required']);
-    $authenticator = new FixedKeyAuthenticator(new InMemoryRepository);
+    $authenticator = new Authenticator(new InMemoryRepository);
 
     $user = User::factory()->create();
     $access = $user->startSession()->accessToken;
@@ -89,7 +89,7 @@ it('rejects a presence-only assertion when user verification is required', funct
 });
 
 it('rejects responses presented to the wrong ceremony', function () {
-    $authenticator = new FixedKeyAuthenticator(new InMemoryRepository);
+    $authenticator = new Authenticator(new InMemoryRepository);
     $ceremony = app(WebAuthnCeremony::class);
 
     $regChallenge = app(PasskeyChallengeStore::class)->generate();
