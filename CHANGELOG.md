@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-29
+
+### Changed
+
+- Leaner Composer dist: `.gitattributes` export-ignore excludes tests, docs, CI, and dev tooling, so `composer require lukk/lukk` installs only the runtime code.
+- Documented the BFF per-IP throttling caveat (auth traffic collapses to the BFF server's IP) in the deployment guide.
+
 ## [0.1.0] - 2026-06-28
 
 ### Added
@@ -54,5 +61,6 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/stsepelin/lukk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/stsepelin/lukk/releases/tag/v0.1.0
