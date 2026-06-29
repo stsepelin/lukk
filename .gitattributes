@@ -1,0 +1,14 @@
+# Keep the Composer dist lean: exclude dev-only files from the tarball that
+# `composer require lukk/lukk` installs into a consumer's vendor/. Runtime code
+# (src, config, database, composer.json) and README/LICENSE still ship.
+/.github          export-ignore
+/.editorconfig    export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
+/CHANGELOG.md     export-ignore
+/CLAUDE.md        export-ignore
+/ROADMAP.md       export-ignore
+/docs             export-ignore
+/tests            export-ignore
+/phpunit.xml.dist export-ignore
+/pint.json        export-ignore
