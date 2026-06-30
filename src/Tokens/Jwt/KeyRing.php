@@ -43,9 +43,7 @@ class KeyRing
             return ['key' => (string) $this->config['secret'], 'kid' => null];
         }
 
-        // Fail loud: signing with a kid absent from the public set would mint
-        // tokens nothing can verify (the verifier looks the kid up by name) — a
-        // silent, total auth outage. Require the active kid to be present.
+        // Fail loud: signing with a kid absent from the public set mints tokens nothing can verify.
         $kid = (string) ($this->config['keys']['active'] ?? '');
 
         if ($kid === '' || ! array_key_exists($kid, $this->publicKeys())) {
@@ -104,8 +102,7 @@ class KeyRing
      */
     public function jwks(): array
     {
-        // A symmetric algorithm has no public keys to publish; never advertise
-        // stray asymmetric keys under an HS* alg (the "alg" would be nonsensical).
+        // A symmetric algorithm publishes no public keys.
         if ($this->isSymmetric()) {
             return ['keys' => []];
         }
@@ -170,8 +167,7 @@ class KeyRing
         if ($passphrase !== null && $passphrase !== '') {
             $key = openssl_pkey_get_private($pem, (string) $passphrase);
 
-            // Fail loud rather than hand an undecryptable PEM to the signer (which
-            // would surface as an opaque OpenSSL error far from the real cause).
+            // Fail loud rather than hand an undecryptable PEM to the signer.
             if ($key === false) {
                 throw new InvalidArgumentException('Could not decrypt the private key — check lukk.keys.passphrase.');
             }
