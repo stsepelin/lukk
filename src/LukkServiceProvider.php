@@ -79,19 +79,21 @@ class LukkServiceProvider extends ServiceProvider
         $this->registerGuard();
         $this->registerRateLimiters();
 
-        $this->app->make('router')->aliasMiddleware('lukk.confirm', RequireConfirmation::class);
+        $router = $this->app->make('router');
+        $router->aliasMiddleware('lukk.confirm', RequireConfirmation::class);
+        // Opt-in alias for a consumer's own `auth:api` routes; see docs/installation.md.
+        $router->aliasMiddleware('lukk.force-json', ForceJsonRequest::class);
+
+        // `ForceJsonRequest` must sort before `Authenticate` (high in the framework
+        // priority). Registered unconditionally so the alias also works in a verify-only
+        // service (`routes => false`).
+        $kernel = $this->app->make(HttpKernel::class);
+        if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
+            $kernel->addToMiddlewarePriorityBefore(AuthenticatesRequests::class, ForceJsonRequest::class);
+        }
 
         if ($this->config()['routes'] ?? true) {
             $this->loadRoutesFrom(__DIR__.'/routes/api.php');
-
-            // `ForceJsonRequest` (on lukk's route group) must run BEFORE `Authenticate`,
-            // which sits high in the framework's middleware priority — otherwise the
-            // forced `Accept` lands too late and an Accept-less request still 500s via the
-            // guest redirect. Insert it just ahead of the auth middleware in the priority.
-            $kernel = $this->app->make(HttpKernel::class);
-            if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
-                $kernel->addToMiddlewarePriorityBefore(AuthenticatesRequests::class, ForceJsonRequest::class);
-            }
         }
 
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {

@@ -95,8 +95,15 @@ Route::middleware('auth:api')->get('/me', fn (Request $request) => $request->use
 >
 > **Your own `auth:api` routes** (like `/me` above) are *not* covered automatically. By default an unauthenticated request *without* `Accept: application/json` takes Laravel's guest redirect (`redirectGuestsTo(fn () => route('login'))`) and — with no `login` route — **500s inside the middleware**, before `shouldRenderJsonWhen` can intervene (it runs *after* the throw, so it does **not** fix this). For your routes, do one of:
 >
+> - **attach lukk's `lukk.force-json` middleware** (recommended — surgical, no global state):
+>
+>   ```php
+>   Route::middleware(['lukk.force-json', 'auth:api'])->get('/me', fn (Request $r) => $r->user());
+>   ```
+>
+>   It forces `Accept: application/json` on just those routes (ordered ahead of `Authenticate`), so an unauthenticated hit returns a clean `401` JSON. **or**
 > - send `Accept: application/json` from the client (the [`lukk-nuxt`](https://github.com/stsepelin/lukk-js) BFF app proxy does this for you), **or**
-> - disable the guest redirect: `->withMiddleware(fn ($m) => $m->redirectGuestsTo(fn () => null))`, **or**
+> - disable the guest redirect *globally* — only for a pure-API app, since it also drops a real web login's redirect: `->withMiddleware(fn ($m) => $m->redirectGuestsTo(fn () => null))`, **or**
 > - mount them under `api/` (Laravel's `install:api` already renders those as JSON).
 
 <a name="preparing-the-user-model"></a>
