@@ -18,9 +18,12 @@ use Lukk\Http\Controllers\SessionController;
 use Lukk\Http\Controllers\TokenController;
 use Lukk\Http\Controllers\TwoFactorAuthenticationController;
 use Lukk\Http\Controllers\TwoFactorChallengedSessionController;
+use Lukk\Http\Middleware\ForceJsonRequest;
 
+// `ForceJsonRequest` makes lukk's routes always render JSON errors (a clean 401/422),
+// immune to the host app's guest-redirect config — see the middleware for why.
 Route::prefix((string) config('lukk.path', 'auth'))
-    ->middleware('api')
+    ->middleware(['api', ForceJsonRequest::class])
     ->group(function () {
         $guard = 'auth:'.config('lukk.guard', 'api');
         $confirmed = [$guard, 'lukk.confirm'];

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- lukk's `/auth/*` routes now force `Accept: application/json` (a `ForceJsonRequest` middleware, ordered ahead of `Authenticate` in the framework priority), so authentication and validation failures always render a clean `401`/`422` JSON. This makes lukk's API immune to the host app's exception config and Laravel's default guest redirect, which otherwise 500s an `Accept`-less request (e.g. behind a BFF proxy that strips `Accept`) — `shouldRenderJsonWhen` does **not** prevent that, as it runs after the auth middleware has already thrown.
+
 ## [0.1.1] - 2026-06-29
 
 ### Changed
