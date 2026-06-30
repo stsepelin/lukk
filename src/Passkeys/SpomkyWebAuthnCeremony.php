@@ -48,9 +48,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
      */
     public function __construct(private readonly array $config)
     {
-        // Fail loud rather than silently weak: an empty rp_id breaks the RP-ID
-        // hash check, and an empty origins list downgrades origin validation to
-        // domain-suffix matching instead of an explicit allow-list.
+        // Fail loud: empty rp_id breaks the RP-ID hash check; empty origins downgrades to domain-suffix matching.
         if (empty($config['rp_id'])) {
             throw new InvalidArgumentException('Passkeys require lukk.passkeys.rp_id — the registrable domain shared by your front-end and API, e.g. "example.com" (set LUKK_PASSKEY_RP_ID).');
         }
@@ -102,9 +100,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {
-            // Any library error verifying attacker-supplied input — including a
-            // malformed COSE key (InvalidArgumentException) — is a verification
-            // failure (clean 4xx), never an uncaught 500.
+            // Any library error on attacker-supplied input (incl. a malformed COSE key) is a verification failure (4xx), not a 500.
             throw new PasskeyVerificationFailed('The passkey registration could not be verified.', previous: $e);
         }
 
@@ -131,8 +127,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
 
     public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored): int
     {
-        // Decode the stored credential outside the try — a corrupt/undecryptable
-        // record is an infrastructure failure, not a verification failure.
+        // Decode the stored credential outside the try — a corrupt record is infra failure, not verification failure.
         $source = $this->serializer->deserialize($stored->publicKey, PublicKeyCredentialSource::class, 'json');
 
         try {
@@ -148,15 +143,12 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 userVerification: $this->config['user_verification'] ?? 'preferred',
             );
 
-            // Usernameless: the user is resolved from our own credential_id → userId
-            // mapping, so we don't pre-assert a user handle here (pass null).
+            // Usernameless: the user is resolved from our credential_id→userId mapping, so pass null here.
             $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null);
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {
-            // Any library error verifying attacker-supplied input — including a
-            // malformed COSE key (InvalidArgumentException) — is a verification
-            // failure (clean 4xx), never an uncaught 500.
+            // Any library error on attacker-supplied input (incl. a malformed COSE key) is a verification failure (4xx), not a 500.
             throw new PasskeyVerificationFailed('The passkey assertion could not be verified.', previous: $e);
         }
 
