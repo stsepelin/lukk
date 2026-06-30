@@ -63,8 +63,7 @@ class AttemptLogin
         $user = $this->users->retrieveByCredentials($credentials);
 
         if ($user === null) {
-            // Run an equivalent hash so an unknown email takes the same time as a
-            // wrong password — no user enumeration via timing.
+            // Equivalent hash so an unknown email costs the same as a wrong password (no timing enumeration).
             Hash::check($credentials['password'], $this->timingHash());
             $this->fail();
         }
