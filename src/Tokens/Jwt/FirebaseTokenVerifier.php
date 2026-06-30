@@ -37,23 +37,17 @@ class FirebaseTokenVerifier implements TokenVerifier
     {
         JWT::$leeway = $this->config['leeway'];
 
-        // Pass a non-null stdClass so firebase/php-jwt populates it with the
-        // verified header (it only fills the ref when it isn't already null).
+        // Non-null so firebase/php-jwt populates it with the verified header.
         $headers = new \stdClass;
 
         try {
-            // A single Key (symmetric) or a kid-addressed set (asymmetric); the
-            // library picks by the token's kid and verifies under that key's
-            // pinned algorithm.
+            // One Key (symmetric) or a kid-addressed set (asymmetric), decoded under the pinned alg.
             $claims = JWT::decode($jwt, $this->keys->verificationKeys(), $headers);
         } catch (Throwable) {
             return null;
         }
 
-        // Reject anything that is not an access token. Challenge tokens (2FA /
-        // step-up) are signed with the same key, iss and aud and carry a sub, so
-        // the typ header is the only thing distinguishing them — without this an
-        // unconsumed 2fa+challenge token could be presented as a bearer token.
+        // Reject non-access tokens: a 2FA/step-up challenge shares key/iss/aud, so `typ` is the only distinguisher.
         if (($headers->typ ?? null) !== 'at+jwt') {
             return null;
         }
@@ -62,8 +56,7 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        // Accept when this service is one of the token's audiences. A single
-        // audience is a string; a multi-service token carries an array.
+        // Accept when this service is one of the token's audiences (string or array).
         $accepted = array_filter((array) $this->config['audience']);
         $presented = array_filter((array) ($claims->aud ?? []));
 
@@ -71,15 +64,12 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        // The library validates exp only when it is present; require it so a
-        // token lacking exp can never be accepted as non-expiring (defence in
-        // depth for any future issuer sharing this iss/aud).
+        // Require exp explicitly: the library only validates it when present.
         if (! is_numeric($claims->exp ?? null)) {
             return null;
         }
 
-        // sub is passed straight to the user provider — require a non-empty
-        // string so a malformed (null/array) sub can never reach it.
+        // Require a non-empty string sub before handing it to the user provider.
         if (! is_string($claims->sub ?? null) || $claims->sub === '') {
             return null;
         }

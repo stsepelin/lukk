@@ -40,8 +40,7 @@ class FinishPasskeyRegistration
             $this->fail();
         }
 
-        // credential_id is globally unique (PK); a duplicate would otherwise be a
-        // raw DB error rather than a clean "could not be registered" response.
+        // credential_id is globally unique (PK); catch a duplicate as a clean failure, not a raw DB error.
         if ($this->passkeys->findByCredentialId($passkey->credentialId) !== null) {
             $this->fail();
         }

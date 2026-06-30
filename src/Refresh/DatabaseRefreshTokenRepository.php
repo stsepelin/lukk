@@ -24,9 +24,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function findByHashForUpdate(string $hash): ?RefreshTokenRecord
     {
-        // Non-locking existence check first: a SELECT ... FOR UPDATE on an absent
-        // unique-index value gap-locks under MySQL REPEATABLE READ, so garbage /
-        // replayed tokens (the common abuse case) would serialize legitimate inserts.
+        // Non-locking existence check first: `FOR UPDATE` on an absent unique value gap-locks under MySQL REPEATABLE READ.
         if (! $this->query()->where('token_hash', $hash)->exists()) {
             return null;
         }
@@ -90,8 +88,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->when($exceptFamilyId !== null, fn (Builder $query) => $query->where('family_id', '!=', $exceptFamilyId))
             ->whereNull('revoked_at');
 
-        // Atomic: a family created between the read and the update would otherwise
-        // be revoked in the DB but never returned (so never denylisted).
+        // Atomic: a family created between the read and update would be revoked but never returned (so never denylisted).
         return DB::transaction(function () use ($constrain) {
             $ids = $constrain($this->query())->distinct()->pluck('family_id')->all();
 
@@ -103,8 +100,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function pruneExpired(): int
     {
-        // Two index-driven deletes rather than one `OR` scan (an OR across
-        // expires_at + revoked_at can't use a single index).
+        // Two index-driven deletes rather than one `OR` scan (an OR can't use a single index).
         return $this->query()->where('expires_at', '<', now())->delete()
             + $this->query()->whereNotNull('revoked_at')->delete();
     }

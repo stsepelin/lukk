@@ -21,9 +21,8 @@ use Lukk\Support\TokenPair;
  *   - consumed, in grace    -> tolerate (mint a fresh sibling, no logout)
  *   - fresh                 -> stamp consumed, issue successor
  *
- * INVARIANT: the family revocation that follows a reuse/revoked outcome happens
- * AFTER the transaction commits (in killFamily, via RevokeSession). Revoking
- * inside the transaction and then throwing would roll the revocation back.
+ * INVARIANT: the family revocation after a reuse/revoked outcome runs AFTER commit
+ * (killFamily/RevokeSession) — revoking inside the transaction then throwing rolls it back.
  */
 class RotateRefreshToken
 {
@@ -42,8 +41,7 @@ class RotateRefreshToken
         $hash = $this->issuer->hash($presentedSecret);
         $grace = $this->config['grace_seconds'];
 
-        // Mint the successor secret + hash BEFORE opening the transaction so no
-        // entropy/hashing work happens while the row lock is held.
+        // Mint the successor secret + hash before the transaction, so no hashing under the row lock.
         $secret = $this->issuer->newRefreshSecret();
         $secretHash = $this->issuer->hash($secret);
 
@@ -69,8 +67,7 @@ class RotateRefreshToken
                 return RotationOutcome::reuse($record->familyId);
             }
 
-            // First consumption stamps the parent. A within-grace re-consumption
-            // keeps the original stamp and mints another sibling — no logout.
+            // First consumption stamps the parent; a within-grace re-consumption keeps it and mints a sibling.
             if ($record->rotatedAt === null) {
                 $this->repository->markRotated($record->id);
             }
