@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-30
+
 ### Changed
 
 - lukk's `/auth/*` routes now force `Accept: application/json` (a `ForceJsonRequest` middleware, ordered ahead of `Authenticate` in the framework priority), so authentication and validation failures always render a clean `401`/`422` JSON. This makes lukk's API immune to the host app's exception config and Laravel's default guest redirect, which otherwise 500s an `Accept`-less request (e.g. behind a BFF proxy that strips `Accept`) — `shouldRenderJsonWhen` does **not** prevent that, as it runs after the auth middleware has already thrown.
@@ -65,6 +67,7 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/stsepelin/lukk/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/stsepelin/lukk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/stsepelin/lukk/releases/tag/v0.1.0
