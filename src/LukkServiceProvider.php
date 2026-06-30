@@ -8,9 +8,11 @@ use Illuminate\Auth\RequestGuard;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Foundation\CachesConfiguration;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\ServiceProvider;
 use Lukk\Actions\AttemptLogin;
@@ -41,6 +43,7 @@ use Lukk\Contracts\TokenVerifier;
 use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Http\Middleware\RequireConfirmation;
 use Lukk\Http\Responses\LoginResponse as LoginResponseImpl;
 use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
@@ -80,6 +83,15 @@ class LukkServiceProvider extends ServiceProvider
 
         if ($this->config()['routes'] ?? true) {
             $this->loadRoutesFrom(__DIR__.'/routes/api.php');
+
+            // `ForceJsonRequest` (on lukk's route group) must run BEFORE `Authenticate`,
+            // which sits high in the framework's middleware priority — otherwise the
+            // forced `Accept` lands too late and an Accept-less request still 500s via the
+            // guest redirect. Insert it just ahead of the auth middleware in the priority.
+            $kernel = $this->app->make(HttpKernel::class);
+            if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
+                $kernel->addToMiddlewarePriorityBefore(AuthenticatesRequests::class, ForceJsonRequest::class);
+            }
         }
 
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {
