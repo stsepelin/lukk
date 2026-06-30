@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `lukk.force-json` middleware alias. Attach it to your *own* `auth:api` routes (`Route::middleware(['lukk.force-json', 'auth:api'])`) to get a clean `401` JSON instead of the guest-redirect `500` on an `Accept`-less request — surgically, without globally disabling the guest redirect (which would also drop a real web login's redirect). It reuses the existing `ForceJsonRequest` middleware (ordered ahead of `Authenticate`), is opt-in (registers nothing global until you attach it), and works in verify-only services (`routes => false`) too.
+
 ## [0.1.2] - 2026-06-30
 
 ### Changed
