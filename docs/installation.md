@@ -91,17 +91,13 @@ Route::middleware('auth:api')->get('/me', fn (Request $request) => $request->use
 ```
 
 > [!IMPORTANT]
-> **Render API errors as JSON.** Laravel's `php artisan install:api` configures JSON error responses only for the `api/*` path. Lukk's routes are mounted at `/auth/*` (default), so for a missing token or failed validation to return a JSON `401`/`422` instead of a web redirect, extend that rule in `bootstrap/app.php` (or mount your protected routes under `api/`):
+> **API errors as JSON.** Lukk's own `/auth/*` routes always render JSON `401`/`422` — lukk forces `Accept: application/json` on them, so they're immune to your app's exception config.
 >
-> ```php
-> ->withExceptions(function (Illuminate\Foundation\Configuration\Exceptions $exceptions) {
->     $exceptions->shouldRenderJsonWhen(
->         fn ($request) => $request->is('auth/*') || $request->expectsJson(),
->     );
-> })
-> ```
+> **Your own `auth:api` routes** (like `/me` above) are *not* covered automatically. By default an unauthenticated request *without* `Accept: application/json` takes Laravel's guest redirect (`redirectGuestsTo(fn () => route('login'))`) and — with no `login` route — **500s inside the middleware**, before `shouldRenderJsonWhen` can intervene (it runs *after* the throw, so it does **not** fix this). For your routes, do one of:
 >
-> (The refresh endpoint already returns a self-rendered `401` regardless of this setting.)
+> - send `Accept: application/json` from the client (the [`lukk-nuxt`](https://github.com/stsepelin/lukk-js) BFF app proxy does this for you), **or**
+> - disable the guest redirect: `->withMiddleware(fn ($m) => $m->redirectGuestsTo(fn () => null))`, **or**
+> - mount them under `api/` (Laravel's `install:api` already renders those as JSON).
 
 <a name="preparing-the-user-model"></a>
 ## Preparing the User Model
