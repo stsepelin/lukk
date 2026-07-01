@@ -103,6 +103,9 @@ $this->app->bind(LoginResponse::class, MyLoginResponse::class);
 
 The response contracts are `LoginResponse`, `RefreshResponse`, `LogoutResponse`, and `TwoFactorChallengeResponse`.
 
+> [!NOTE]
+> The default response shape is the contract the [lukk-js clients](https://stsepelin.github.io/lukk-js/) consume. If you reshape it, keep the client in sync (or adapt it) so the two don't drift.
+
 <a name="swapping-the-issuer-verifier-or-denylist"></a>
 ## Swapping the Issuer, Verifier, or Denylist
 

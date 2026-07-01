@@ -100,7 +100,7 @@ All logout routes require a valid access token (`auth:api`):
 <a name="output-modes"></a>
 ## Output Modes
 
-The `lukk.cookie_mode` option controls where tokens are delivered.
+The `lukk.cookie_mode` option controls where tokens are delivered. From a browser SPA or Nuxt app, the [lukk-js client](https://stsepelin.github.io/lukk-js/authentication) drives these endpoints for you; its two [transport modes](https://stsepelin.github.io/lukk-js/transport-modes) pair with the output modes below.
 
 ### BFF Mode (`cookie_mode => false`, default)
 
@@ -154,3 +154,6 @@ $pair->refreshToken;  // the opaque refresh token (shown once)
 ```
 
 The returned `TokenPair` is a value object; the plaintext refresh token is available only here and is never retrievable again.
+
+> [!NOTE]
+> On the client, a custom registration form that hits your own route can bind Laravel validation with the [lukk-js form helper](https://stsepelin.github.io/lukk-js/forms).

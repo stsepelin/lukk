@@ -2,6 +2,9 @@
 
 Lukk supports passkeys (WebAuthn / FIDO2) for **passwordless, phishing-resistant** login. A passkey is a public-key credential bound to your domain and stored on the user's device or password manager; logging in proves possession of the private key, which a phishing site can never obtain.
 
+> [!NOTE]
+> On the client, the [lukk-js passkey composables](https://stsepelin.github.io/lukk-js/passkeys) drive the browser `navigator.credentials` ceremony and the (de)serialization for the flows below.
+
 - [Setup](#setup)
 - [Endpoints](#endpoints)
 - [Registering a Passkey](#registering-a-passkey)

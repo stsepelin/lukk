@@ -147,7 +147,7 @@ The cache store backing the revocation denylist. `null` uses your application's 
 | `false` (default) | **BFF mode.** Both tokens are returned in the JSON body, for a server-side client (such as a Nuxt BFF) that seals them itself. |
 | `true` | **Direct browser mode.** The refresh token is set in a `__Host-refresh` cookie (HttpOnly, Secure, `Path=/`, no `Domain`); only the access token and its expiry are in the body. |
 
-See [Authentication → Output Modes](authentication.md#output-modes) for the full response shapes.
+See [Authentication → Output Modes](authentication.md#output-modes) for the full response shapes, and the lukk-js [transport modes](https://stsepelin.github.io/lukk-js/transport-modes) for which client mode pairs with each (BFF ↔ body mode, direct ↔ cookie mode).
 
 <a name="guard-and-provider"></a>
 ## Guard & Provider
