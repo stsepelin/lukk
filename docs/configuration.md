@@ -99,11 +99,11 @@ The `iss` and `aud` claims stamped into every token and validated on every reque
 <a name="rate-limits"></a>
 ## Rate Limits
 
-Every throttle lives here, each shaped as `{ max_attempts, decay_seconds }`:
+Every throttle lives here, each shaped as `{ max_attempts, decay_seconds }` (login adds a third key, `ip_max_attempts`):
 
 ```php
 'rate_limits' => [
-    'login' => ['max_attempts' => 5, 'decay_seconds' => 60],
+    'login' => ['max_attempts' => 5, 'decay_seconds' => 60, 'ip_max_attempts' => 30],
     'two_factor' => ['max_attempts' => 5, 'decay_seconds' => 60],
     'refresh' => ['max_attempts' => 30, 'decay_seconds' => 60],
     'passkeys' => ['max_attempts' => 30, 'decay_seconds' => 60],
@@ -112,7 +112,7 @@ Every throttle lives here, each shaped as `{ max_attempts, decay_seconds }`:
 
 | Limit | Default | Keyed on | Notes |
 |---|---|---|---|
-| `login` | 5 / 60s | normalized email + IP | Failures-only: only failed attempts count, a success clears the counter; lockout returns a `429` validation error. |
+| `login` | 5 / 60s (+ `ip_max_attempts` 30) | normalized email + IP | Failures-only: only failed attempts count, a success clears the counter; lockout returns a `429` validation error. **`ip_max_attempts`** (env `LUKK_LOGIN_IP_MAX_ATTEMPTS`) is a separate coarse per-IP cap on *all* login attempts, bounding password-spraying across many emails. |
 | `two_factor` | 5 / 60s | account (`sub`) | Throttles challenge-code guesses for a single account. Also guards the endpoint per IP. |
 | `refresh` | 30 / 60s | IP | Per-IP guard on `POST /auth/refresh`. |
 | `passkeys` | 30 / 60s | IP | Per-IP guard on the passkey login + assertion-options endpoints. |
