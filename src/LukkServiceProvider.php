@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk;
 
+use Illuminate\Auth\Notifications\VerifyEmail;
 use Illuminate\Auth\RequestGuard;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -14,6 +15,7 @@ use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\ChallengeTwoFactor;
@@ -33,6 +35,7 @@ use Lukk\Console\GenerateKeysCommand;
 use Lukk\Console\GenerateSecretCommand;
 use Lukk\Console\PruneTokensCommand;
 use Lukk\Contracts\Denylist;
+use Lukk\Contracts\EmailVerificationResponse;
 use Lukk\Contracts\LoginResponse;
 use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\PasskeyRepository;
@@ -45,6 +48,8 @@ use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Http\Middleware\RequireConfirmation;
+use Lukk\Http\Middleware\RequireVerifiedEmail;
+use Lukk\Http\Responses\EmailVerificationResponse as EmailVerificationResponseImpl;
 use Lukk\Http\Responses\LoginResponse as LoginResponseImpl;
 use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
 use Lukk\Http\Responses\RefreshResponse as RefreshResponseImpl;
@@ -81,6 +86,7 @@ class LukkServiceProvider extends ServiceProvider
 
         $router = $this->app->make('router');
         $router->aliasMiddleware('lukk.confirm', RequireConfirmation::class);
+        $router->aliasMiddleware('lukk.verified', RequireVerifiedEmail::class);
         // Opt-in alias for a consumer's own `auth:api` routes; see docs/installation.md.
         $router->aliasMiddleware('lukk.force-json', ForceJsonRequest::class);
 
@@ -94,6 +100,13 @@ class LukkServiceProvider extends ServiceProvider
 
         if ($this->config()['routes'] ?? true) {
             $this->loadRoutesFrom(__DIR__.'/routes/api.php');
+
+            // Point the notification at the signed verify route — but only when that route is
+            // actually registered (i.e. lukk owns the routes). Otherwise a verify-only service
+            // (`routes => false`) with the feature on would reference a missing route name.
+            if ($this->config()['features']['email_verification'] ?? false) {
+                $this->configureEmailVerification();
+            }
         }
 
         $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {
@@ -203,12 +216,27 @@ class LukkServiceProvider extends ServiceProvider
     /**
      * Response contracts — rebind any to reshape the body/cookies.
      */
+    /**
+     * Point Laravel's email-verification notification at lukk's signed verify route, so
+     * the link the user clicks lands on lukk's endpoint (which then redirects to your SPA).
+     * Only wired when the feature is on, so a host app's own verification isn't hijacked.
+     */
+    private function configureEmailVerification(): void
+    {
+        VerifyEmail::createUrlUsing(fn ($notifiable) => URL::temporarySignedRoute(
+            'lukk.verification.verify',
+            now()->addMinutes((int) ($this->config()['email_verification']['expire'] ?? 60)),
+            ['id' => $notifiable->getKey(), 'hash' => sha1($notifiable->getEmailForVerification())],
+        ));
+    }
+
     private function registerResponses(): void
     {
         $this->app->bind(LoginResponse::class, LoginResponseImpl::class);
         $this->app->bind(RefreshResponse::class, RefreshResponseImpl::class);
         $this->app->bind(LogoutResponse::class, LogoutResponseImpl::class);
         $this->app->bind(TwoFactorChallengeResponse::class, TwoFactorChallengeResponseImpl::class);
+        $this->app->bind(EmailVerificationResponse::class, EmailVerificationResponseImpl::class);
     }
 
     private function registerGuard(): void
@@ -232,7 +260,7 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
-        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa'] as $key => $name) {
+        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
 

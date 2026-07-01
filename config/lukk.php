@@ -148,6 +148,10 @@ return [
             'max_attempts' => (int) env('LUKK_PASSKEY_MAX_ATTEMPTS', 30),
             'decay_seconds' => (int) env('LUKK_PASSKEY_DECAY', 60),
         ],
+        'email_verification' => [
+            'max_attempts' => (int) env('LUKK_VERIFY_MAX_ATTEMPTS', 6),
+            'decay_seconds' => (int) env('LUKK_VERIFY_DECAY', 60),
+        ],
     ],
 
     /*
@@ -389,6 +393,35 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Email Verification
+    |--------------------------------------------------------------------------
+    |
+    | First-party email verification (opt-in via features.email_verification).
+    | Your user model must implement Illuminate\Contracts\Auth\MustVerifyEmail
+    | and the users table must have the framework-default `email_verified_at`
+    | column — lukk ships no migration for it (it's a Laravel default).
+    |
+    |  - "frontend_url" is where the signed verification link ultimately lands
+    |    the user (your SPA verify page). The browser hits the API GET, which
+    |    verifies then redirects here (with ?verified=1); leave it empty to
+    |    return 204 instead of redirecting. An `Accept: application/json` fetch
+    |    always gets 204, never a redirect.
+    |  - "expire" is the signed link's validity, in minutes.
+    |  - "block_unverified_login" refuses login with a 403 for an unverified
+    |    user, instead of issuing tokens and gating per-route with the
+    |    `lukk.verified` middleware (409). Default false — the SPA-friendly
+    |    "log in, then gate the sensitive routes" model.
+    |
+    */
+
+    'email_verification' => [
+        'frontend_url' => env('LUKK_VERIFY_URL'),
+        'expire' => (int) env('LUKK_VERIFY_EXPIRE', 60),
+        'block_unverified_login' => (bool) env('LUKK_VERIFY_BLOCK_LOGIN', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Feature Toggles
     |--------------------------------------------------------------------------
     |
@@ -428,6 +461,19 @@ return [
         */
 
         'passkeys' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Email Verification
+        |--------------------------------------------------------------------------
+        |
+        | Enable first-party email verification. Requires a user model that
+        | implements MustVerifyEmail and the framework-default `email_verified_at`
+        | column (no lukk migration). Configure it under `email_verification` above.
+        |
+        */
+
+        'email_verification' => false,
     ],
 
 ];
