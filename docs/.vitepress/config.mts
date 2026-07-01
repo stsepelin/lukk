@@ -48,6 +48,7 @@ export default defineConfig({
           { text: 'Two-Factor Authentication', link: '/two-factor-authentication' },
           { text: 'Passkeys', link: '/passkeys' },
           { text: 'Confirmation', link: '/confirmation' },
+          { text: 'Email Verification', link: '/email-verification' },
         ],
       },
       {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers;
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Contracts\Support\Responsable;
 use Illuminate\Http\Request;
 use Lukk\Actions\AttemptLogin;
@@ -41,6 +42,10 @@ class AuthenticatedSessionController
             )]);
         }
 
+        // Opt-in: refuse login for an unverified email. Runs only after a successful credential
+        // check, so it never touches the constant-time unknown-user / wrong-password path.
+        abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
+
         return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']])]);
     }
 
@@ -60,5 +65,13 @@ class AuthenticatedSessionController
         return (bool) config('lukk.features.two_factor')
             && method_exists($user, 'hasEnabledTwoFactor')
             && $user->hasEnabledTwoFactor();
+    }
+
+    private function emailUnverified(Authenticatable $user): bool
+    {
+        return (bool) config('lukk.features.email_verification')
+            && (bool) config('lukk.email_verification.block_unverified_login')
+            && $user instanceof MustVerifyEmail
+            && ! $user->hasVerifiedEmail();
     }
 }
