@@ -10,6 +10,7 @@ use Illuminate\Http\Response;
 use Lukk\Actions\FinishPasskeyRegistration;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Requests\PasskeyRegistrationRequest;
 
 /**
  * The user's passkey credentials: `index` lists them, `store` registers a new
@@ -37,10 +38,8 @@ class PasskeyController
         return $this->noStore(response()->json(['passkeys' => $passkeys]));
     }
 
-    public function store(Request $request): Response
+    public function store(PasskeyRegistrationRequest $request): Response
     {
-        $request->validate(['credential' => ['required', 'array'], 'name' => ['nullable', 'string', 'max:255']]);
-
         ($this->finishRegistration)($request->user(), $request->array('credential'), $request->input('name'));
 
         return response()->noContent();

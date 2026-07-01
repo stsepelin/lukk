@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `lukk.force-json` middleware alias. Attach it to your *own* `auth:api` routes (`Route::middleware(['lukk.force-json', 'auth:api'])`) to get a clean `401` JSON instead of the guest-redirect `500` on an `Accept`-less request — surgically, without globally disabling the guest redirect (which would also drop a real web login's redirect). It reuses the existing `ForceJsonRequest` middleware (ordered ahead of `Authenticate`), is opt-in (registers nothing global until you attach it), and works in verify-only services (`routes => false`) too.
 
+### Changed
+
+- Auth request validation moved to FormRequests (`LoginRequest`, `TwoFactorChallengeRequest`, `PasskeyAssertionRequest`, `PasskeyRegistrationRequest`). A malformed input (e.g. `code[]=x`) now renders a `422` instead of a `500`.
+- `lukk:prune` now keeps revoked-but-unexpired refresh tokens (deletes only rows past `expires_at`), so a replay of a revoked token still resolves to reuse detection (`reuse` + family cascade + `RefreshTokenReused`) instead of a generic reject; the rows self-delete once they expire.
+
+### Security
+
+- **Passkey `user_verification` now defaults to `required`** (was `preferred`). Passwordless login and passkey step-up are single-factor (possession), so enforcing user verification (biometric/PIN) makes them phishing-resistant (AAL2). Set `LUKK_PASSKEY_UV=preferred` if you must support authenticators that can't verify the user.
+- `RevokeSession` writes the denylist entry **before** the DB revoke, so a mid-operation cache failure can't leave a family's access tokens live after its refresh tokens are revoked.
+- Challenge/confirmation tokens (2FA, passkey step-up) sign and verify through the same `KeyRing` as access tokens — staying alg-pinned and working under an RS256/ES256 deployment (previously hard-coded to the symmetric secret, which broke asymmetric setups).
+- The 2FA trait hides `two_factor_secret` / `two_factor_recovery_codes` from model serialization (matching Fortify), so returning your `User` model in a response no longer exposes the encrypted secret / hashed recovery blobs.
+- The passkey ceremony now **pins the accepted COSE signature algorithms explicitly** (ES256 + RS256, matching the advertised `pubKeyCredParams`) instead of inheriting `web-auth/webauthn-lib`'s transitive default — so a future library-default change can't silently widen the allowed set (defense-in-depth; WebAuthn L3 §5.3/§7.2).
+
+### Performance
+
+- `KeyRing` now memoizes its verification `Key` set and loaded public-key PEMs per instance, so an asymmetric (RS256/ES256) deployment no longer re-reads key files or re-allocates a `Firebase\JWT\Key` on every token verification.
+
 ### Fixed
 
 - JWKS EC coordinates are now left-padded to the curve field size (RFC 7518 §6.2.1.2). `openssl_pkey_get_details` strips leading zero bytes, so roughly 1 in 256 coordinates was published a byte short and strict JWKS consumers would reject the key. Only affects RS256/ES256 (specifically ES\*) deployments serving `GET /auth/jwks`; the default HS256 setup publishes an empty set and is unaffected.

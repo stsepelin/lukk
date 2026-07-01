@@ -17,6 +17,12 @@ use Lukk\Support\RecoveryCode;
  */
 trait HasTwoFactorAuthentication
 {
+    /** Keep the (encrypted) secret and (hashed) recovery codes out of the model's array/JSON form. */
+    public function initializeHasTwoFactorAuthentication(): void
+    {
+        $this->mergeHidden(['two_factor_secret', 'two_factor_recovery_codes']);
+    }
+
     public function hasEnabledTwoFactor(): bool
     {
         return ! is_null($this->two_factor_secret) && ! is_null($this->two_factor_confirmed_at);

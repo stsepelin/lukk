@@ -24,7 +24,9 @@ class RevokeSession
 
     public function __invoke(string $familyId): void
     {
-        $this->repository->revokeFamily($familyId);
+        // Denylist FIRST: if the second write fails, a leftover denylist entry is harmless, whereas a
+        // DB revoke with no denylist entry would leave the family's access tokens live until expiry.
         $this->denylist->revokeFamily($familyId, $this->config['access_ttl'] + $this->config['leeway']);
+        $this->repository->revokeFamily($familyId);
     }
 }

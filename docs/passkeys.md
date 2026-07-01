@@ -124,7 +124,7 @@ When your front-end and API live on different subdomains (`app.example.com` and 
 - Credential IDs are globally unique, and the COSE public key is **encrypted at rest**.
 - A regressing signature counter is rejected and dispatches `Events\PasskeyCloneDetected`, but a `0` counter is never flagged — synced passkeys (iCloud, Google, 1Password) always report `0`.
 - `rp_id` and `origins` are **required** when passkeys are enabled — lukk throws on an empty value rather than fall back to a weak default.
-- By default lukk requests **user presence** (a tap). For phishing-resistant, AAL2-style login and step-up — requiring biometric/PIN — set `user_verification` to `required` (see [Configuration](configuration.md#passkeys)). It applies to both passwordless login and `confirm-passkey` step-up.
+- By default lukk **requires user verification** (`user_verification` → `required`) — the authenticator must verify the user (biometric/PIN), not just their presence. Passwordless login and `confirm-passkey` step-up are single-factor (possession), so enforcing UV makes them phishing-resistant, AAL2-style. Lower it to `preferred` only if you must support authenticators that can't verify the user (see [Configuration](configuration.md#passkeys)).
 - Passkey storage sits behind `Contracts\PasskeyRepository` (`passkeys` table) and is swappable.
 
 > [!WARNING]
