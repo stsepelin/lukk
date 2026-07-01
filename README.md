@@ -83,6 +83,8 @@ Full documentation lives in [`docs/`](docs/README.md):
 | [Deployment](docs/deployment.md) | Single service, splitting auth from the API, multiple audiences |
 | [Architecture & Security](docs/architecture.md) | Design rationale, standards mapping, security checklist |
 
+**For AI assistants:** the docs are exposed as [`/llms.txt`](https://stsepelin.github.io/lukk/llms.txt) + [`/llms-full.txt`](https://stsepelin.github.io/lukk/llms-full.txt) ([llms.txt](https://llmstxt.org) convention), and [`AGENTS.md`](AGENTS.md) has integration + contribution rules.
+
 ## Testing
 
 ```bash
