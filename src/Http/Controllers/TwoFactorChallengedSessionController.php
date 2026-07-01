@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers;
 
-use Illuminate\Http\Request;
 use Lukk\Actions\StartSession;
 use Lukk\Actions\VerifyTwoFactorChallenge;
 use Lukk\Contracts\LoginResponse;
+use Lukk\Http\Requests\TwoFactorChallengeRequest;
 
 /**
  * Completes a two-factor login: `store` exchanges the challenge token plus a TOTP
@@ -20,7 +20,7 @@ class TwoFactorChallengedSessionController
         private readonly StartSession $start,
     ) {}
 
-    public function store(Request $request): LoginResponse
+    public function store(TwoFactorChallengeRequest $request): LoginResponse
     {
         $user = ($this->verifyChallenge)(
             (string) $request->input('challenge_token'),

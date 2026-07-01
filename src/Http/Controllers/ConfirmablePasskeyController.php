@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Http\Concerns\IssuesConfirmationToken;
+use Lukk\Http\Requests\PasskeyAssertionRequest;
 
 /**
  * Step-up ("sudo") confirmation by passkey: `store` verifies a passkey assertion
@@ -25,10 +25,8 @@ class ConfirmablePasskeyController
         private readonly ChallengeToken $challengeTokens,
     ) {}
 
-    public function store(Request $request, FinishPasskeyLogin $finishPasskeyLogin): JsonResponse
+    public function store(PasskeyAssertionRequest $request, FinishPasskeyLogin $finishPasskeyLogin): JsonResponse
     {
-        $request->validate(['ceremony_id' => ['required', 'string'], 'credential' => ['required', 'array']]);
-
         $userId = $finishPasskeyLogin((string) $request->input('ceremony_id'), $request->array('credential'));
 
         if ((string) $userId !== (string) $request->user()->getAuthIdentifier()) {

@@ -45,6 +45,11 @@ it('rejects an unknown user with a 422 (constant-time path, no leak)', function 
         ->assertStatus(422);
 });
 
+it('returns 422, not a 500, for a malformed credential type', function () {
+    $this->postJson('/auth/login', ['email' => ['array'], 'password' => 'p'])
+        ->assertStatus(422);
+});
+
 it('stamps amr=[pwd] on a password-only login token', function () {
     User::factory()->create(['email' => 'x@y.com']);
 
