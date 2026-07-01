@@ -137,13 +137,19 @@ class KeyRing
         $details = openssl_pkey_get_details($public);
 
         if (str_starts_with($this->config['algorithm'], 'ES')) {
-            $curves = ['prime256v1' => 'P-256', 'secp384r1' => 'P-384', 'secp521r1' => 'P-521'];
+            // [JWK curve name, field size in bytes]. openssl strips leading zero bytes
+            // from x/y, but RFC 7518 §6.2.1.2 requires each coordinate to be the full
+            // field length, left-padded — else a ~1/256 short coordinate breaks strict
+            // JWKS consumers.
+            $curves = ['prime256v1' => ['P-256', 32], 'secp384r1' => ['P-384', 48], 'secp521r1' => ['P-521', 66]];
+            [$crv, $size] = $curves[$details['ec']['curve_name']] ?? [(string) $details['ec']['curve_name'], null];
+            $pad = fn (string $coord): string => $size === null ? $coord : str_pad($coord, $size, "\0", STR_PAD_LEFT);
 
             return [
                 'kty' => 'EC',
-                'crv' => $curves[$details['ec']['curve_name']] ?? (string) $details['ec']['curve_name'],
-                'x' => $this->base64Url($details['ec']['x']),
-                'y' => $this->base64Url($details['ec']['y']),
+                'crv' => $crv,
+                'x' => $this->base64Url($pad($details['ec']['x'])),
+                'y' => $this->base64Url($pad($details['ec']['y'])),
             ];
         }
 
