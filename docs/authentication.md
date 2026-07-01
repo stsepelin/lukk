@@ -6,6 +6,7 @@
 - [Logging Out](#logging-out)
 - [Output Modes](#output-modes)
 - [Protecting Routes](#protecting-routes)
+- [The User Endpoint](#user-endpoint)
 - [Starting Sessions Manually](#starting-sessions-manually)
 
 <a name="endpoints"></a>
@@ -140,6 +141,49 @@ Route::middleware('auth:api')->group(function () {
 ```
 
 On every request the guard verifies the JWT (pinning the algorithm and asserting `iss`/`aud`/`exp`/`nbf`), then checks the denylist by both `jti` and `fid`. A token that is expired, tampered, denylisted, or whose user has been deleted is rejected with `401`.
+
+<a name="user-endpoint"></a>
+## The User Endpoint
+
+lukk issues the token; **your app owns the user resource** — lukk doesn't ship a `/user` route (Sanctum convention). The `/me` route above is exactly what the [lukk-js client](https://stsepelin.github.io/lukk-js/) fetches to populate `useLukkAuth().user`, so its shape is yours to decide. A bare model already works:
+
+```php
+Route::get('/me', fn (Request $request) => $request->user())->middleware('auth:api');
+```
+
+An Eloquent model serializes `email_verified_at` (respecting `$hidden`/`$casts`), which the client reads to derive its `verified` state — so make sure your response **includes it** (or a boolean `email_verified`).
+
+### `UserResource` (optional)
+
+For a shaped, guaranteed-aligned response, extend the optional base resource `Lukk\Http\Resources\UserResource`. It emits the identifier and a derived `email_verified` boolean (the fields the client reads); override `fields()` to add your own:
+
+```php
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+
+class UserResource extends \Lukk\Http\Resources\UserResource
+{
+    protected function fields(Request $request): array
+    {
+        return [
+            'name' => $this->name,
+            'roles' => $this->roles,
+        ];
+    }
+}
+```
+
+```php
+Route::get('/me', fn (Request $request) => new UserResource($request->user()))->middleware('auth:api');
+```
+
+This emits `{ "data": { "id": …, "email_verified": …, "name": …, "roles": … } }`. A Laravel API Resource **wraps in `data` by default** — the lukk-js client [auto-unwraps a clean `{ data }`](https://stsepelin.github.io/lukk-js/configuration#user-endpoint), so `useLukkAuth().user` is the flat user either way; you can also `JsonResource::withoutWrapping()` if you prefer a bare object.
+
+`UserResource` is a **convenience, not a contract** — lukk's actual user contract is still Laravel's `Authenticatable` + the opt-in `MustVerifyEmail`; you never have to use the resource.
+
+> [!NOTE]
+> Keep this resource **lean**. In a BFF/SSR deployment the user object is serialized into the page's SSR payload (HTML), so only expose fields the UI needs — the endpoint, not the client, is where you prevent over-exposure (OWASP API3:2023).
 
 <a name="starting-sessions-manually"></a>
 ## Starting Sessions Manually
