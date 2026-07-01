@@ -38,6 +38,9 @@ class TestCase extends Orchestra
         // without confirmed 2FA, so it doesn't affect the password-only tests.
         $app['config']->set('lukk.features.two_factor', true);
         $app['config']->set('lukk.features.passkeys', true);
+        // Register the email-verification routes/wiring. Login gating stays off
+        // (block_unverified_login defaults false), so password-only tests are unaffected.
+        $app['config']->set('lukk.features.email_verification', true);
     }
 
     protected function defineDatabaseMigrations(): void
@@ -53,6 +56,7 @@ class TestCase extends Orchestra
             $table->text('two_factor_secret')->nullable();
             $table->text('two_factor_recovery_codes')->nullable();
             $table->timestamp('two_factor_confirmed_at')->nullable();
+            $table->timestamp('email_verified_at')->nullable();
         });
 
         Schema::create('passkeys', function (Blueprint $table) {

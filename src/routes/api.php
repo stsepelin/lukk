@@ -7,6 +7,7 @@ use Lukk\Http\Controllers\AuthenticatedSessionController;
 use Lukk\Http\Controllers\ConfirmablePasskeyController;
 use Lukk\Http\Controllers\ConfirmablePasswordController;
 use Lukk\Http\Controllers\ConfirmedTwoFactorAuthenticationController;
+use Lukk\Http\Controllers\EmailVerificationNotificationController;
 use Lukk\Http\Controllers\JwksController;
 use Lukk\Http\Controllers\OtherSessionsController;
 use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
@@ -18,6 +19,7 @@ use Lukk\Http\Controllers\SessionController;
 use Lukk\Http\Controllers\TokenController;
 use Lukk\Http\Controllers\TwoFactorAuthenticationController;
 use Lukk\Http\Controllers\TwoFactorChallengedSessionController;
+use Lukk\Http\Controllers\VerifyEmailController;
 use Lukk\Http\Middleware\ForceJsonRequest;
 
 // `ForceJsonRequest` renders these routes' errors as JSON regardless of host config.
@@ -55,4 +57,22 @@ Route::prefix((string) config('lukk.path', 'auth'))
             Route::post('passkeys', [PasskeyController::class, 'store'])->middleware($confirmed);
             Route::delete('passkeys/{credentialId}', [PasskeyController::class, 'destroy'])->middleware($confirmed);
         }
+
+        if (config('lukk.features.email_verification')) {
+            Route::post('email/verification-notification', EmailVerificationNotificationController::class)
+                ->middleware([$guard, 'throttle:lukk-email-verification']);
+        }
     });
+
+// The verification link is clicked straight from an email, so it sits OUTSIDE the JSON-forcing
+// group: the `signed` URL (not `auth`) is the authority, and the controller content-negotiates a
+// browser redirect vs a 204. Gated on the feature like the routes above.
+if (config('lukk.features.email_verification')) {
+    Route::prefix((string) config('lukk.path', 'auth'))
+        ->middleware(['api'])
+        ->group(function () {
+            Route::get('email/verify/{id}/{hash}', VerifyEmailController::class)
+                ->middleware(['signed', 'throttle:lukk-email-verification'])
+                ->name('lukk.verification.verify');
+        });
+}
