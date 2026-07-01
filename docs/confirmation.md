@@ -2,6 +2,9 @@
 
 Some actions are sensitive enough that a valid session isn't sufficient — you want proof that the *person* is still there. Lukk provides **step-up confirmation**: a short-lived "sudo" window, modeled on GitHub's, that the user enters by re-confirming a credential. Sensitive routes then require that proof.
 
+> [!NOTE]
+> On the client, [lukk-js confirmation](https://stsepelin.github.io/lukk-js/confirmation) earns the token and auto-attaches the header, so gated actions just work.
+
 - [How It Works](#how-it-works)
 - [Earning Confirmation](#earning-confirmation)
 - [Gating Your Own Routes](#gating-your-own-routes)

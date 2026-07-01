@@ -20,6 +20,9 @@ It is intentionally **not** Passport, Sanctum, or an OAuth2 server. There are no
 The package was built for a single-page application split across a front-end host (for example a Nuxt BFF at `app.example.com`) and a Laravel API (`api.example.com`), but it works for any first-party client.
 
 > [!NOTE]
+> A first-party JS/TS + Nuxt client, **[lukk-js](https://stsepelin.github.io/lukk-js/)**, is the companion package: it mirrors this HTTP contract in TypeScript and handles token attachment, refresh, and the 2FA/passkey ceremonies for a browser or Nuxt app.
+
+> [!NOTE]
 > The single runtime dependency is [`firebase/php-jwt`](https://github.com/firebase/php-jwt), the audited library that performs the JWS signing and verification. Everything else is Laravel core. Optional two-factor and passkey support each pull one additional library, but only when you enable the feature.
 
 <a name="why-lukk"></a>

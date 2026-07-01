@@ -34,7 +34,7 @@ LUKK_COOKIE_MODE=true
 
 This is *less* work than the split sub-domain case, not more:
 
-- **Cookie mode fits a direct browser SPA.** The refresh token rides in the `__Host-refresh` cookie (sent automatically on every same-origin request); the access token stays in memory and goes out as a `Bearer` header. (If you have a server-rendered/BFF layer, leave `cookie_mode` off and use BFF mode instead.)
+- **Cookie mode fits a direct browser SPA.** The refresh token rides in the `__Host-refresh` cookie (sent automatically on every same-origin request); the access token stays in memory and goes out as a `Bearer` header. (If you have a server-rendered/BFF layer, leave `cookie_mode` off and use [BFF mode](https://stsepelin.github.io/lukk-js/transport-modes#bff) instead.)
 - **No CORS.** Same origin means no preflight and no credentialed-CORS config — the cross-origin operational note below simply doesn't apply.
 - **CSRF is covered by design.** The refresh cookie is `SameSite=Strict` (a cross-site page can't trigger a refresh with it) and protected routes authenticate via the `Bearer` header, not an ambient cookie.
 - **Passkeys are the easy case:** `rp_id = example.com`, `origins = ["https://example.com"]` — front-end and API share the exact origin.
@@ -44,7 +44,7 @@ lukk's own `/auth/*` routes always render JSON errors (it forces JSON on them); 
 <a name="splitting-auth-and-api"></a>
 ## Splitting Auth and API
 
-You can run a dedicated **auth service** (login, refresh, logout, 2FA, passkeys) and one or more **API services** that only verify tokens. This works today, with no code changes, as long as the services trust each other — see the [caveat](#trust) below.
+You can run a dedicated **auth service** (login, refresh, logout, 2FA, passkeys) and one or more **API services** that only verify tokens. This works today, with no code changes, as long as the services trust each other — see the [caveat](#trust) below. A browser client calling these services across origins uses the lukk-js [direct transport mode](https://stsepelin.github.io/lukk-js/transport-modes#direct).
 
 **On the auth service** — the default setup. It keeps the routes, the database, and the refresh-token rotation.
 
