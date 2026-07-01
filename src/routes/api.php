@@ -30,7 +30,6 @@ Route::prefix((string) config('lukk.path', 'auth'))
         // Public key set (RFC 7517) — populated only under an asymmetric algorithm.
         Route::get('jwks', JwksController::class);
 
-        // Sessions
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
         Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);

@@ -100,9 +100,10 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function pruneExpired(): int
     {
-        // Two index-driven deletes rather than one `OR` scan (an OR can't use a single index).
-        return $this->query()->where('expires_at', '<', now())->delete()
-            + $this->query()->whereNotNull('revoked_at')->delete();
+        // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one still
+        // resolves to `reuse` (fires the reuse event + family cascade) instead of a generic `unknown`
+        // reject — they self-delete once they expire.
+        return $this->query()->where('expires_at', '<', now())->delete();
     }
 
     private function query(): Builder

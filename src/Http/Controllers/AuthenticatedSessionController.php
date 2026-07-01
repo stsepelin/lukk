@@ -15,6 +15,7 @@ use Lukk\Contracts\LoginResponse;
 use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Contracts\TwoFactorChallengeResponse;
+use Lukk\Http\Requests\LoginRequest;
 
 /**
  * The password-authenticated session: `store` logs in (issuing a token pair, or a
@@ -30,7 +31,7 @@ class AuthenticatedSessionController
         private readonly ChallengeToken $challengeTokens,
     ) {}
 
-    public function store(Request $request): Responsable
+    public function store(LoginRequest $request): Responsable
     {
         $user = ($this->attempt)($request);
 

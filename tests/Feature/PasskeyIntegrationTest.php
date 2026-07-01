@@ -29,6 +29,10 @@ function toBase64Url(mixed $value): mixed
 }
 
 it('registers and logs in through the real web-auth ceremony (end-to-end crypto)', function () {
+    // The software emulator only sets user-present (not user-verified), so this end-to-end
+    // crypto test runs under "preferred"; the default "required" is asserted separately below,
+    // and real authenticators satisfy it with a biometric/PIN.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
     $authenticator = new Authenticator(new InMemoryRepository);
 
     $user = User::factory()->create();

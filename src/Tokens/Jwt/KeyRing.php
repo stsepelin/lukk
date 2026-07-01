@@ -22,6 +22,12 @@ use OpenSSLAsymmetricKey;
  */
 class KeyRing
 {
+    /** @var array<string, string>|null Memoized PEM set (immutable config → load the files once). */
+    private ?array $publicKeys = null;
+
+    /** @var Key|array<string, Key>|null Memoized verification material (one Key alloc per instance, not per verify). */
+    private Key|array|null $verificationKeys = null;
+
     /**
      * @param  array{algorithm:string,secret:?string,keys?:array<string,mixed>}  $config
      */
@@ -61,8 +67,12 @@ class KeyRing
      */
     public function verificationKeys(): Key|array
     {
+        if ($this->verificationKeys !== null) {
+            return $this->verificationKeys;
+        }
+
         if ($this->isSymmetric()) {
-            return new Key((string) $this->config['secret'], $this->config['algorithm']);
+            return $this->verificationKeys = new Key((string) $this->config['secret'], $this->config['algorithm']);
         }
 
         $keys = [];
@@ -71,7 +81,7 @@ class KeyRing
             $keys[$kid] = new Key($pem, $this->config['algorithm']);
         }
 
-        return $keys;
+        return $this->verificationKeys = $keys;
     }
 
     /**
@@ -81,6 +91,10 @@ class KeyRing
      */
     public function publicKeys(): array
     {
+        if ($this->publicKeys !== null) {
+            return $this->publicKeys;
+        }
+
         $keys = [];
 
         foreach ((array) ($this->config['keys']['public'] ?? []) as $kid => $value) {
@@ -91,7 +105,7 @@ class KeyRing
             }
         }
 
-        return $keys;
+        return $this->publicKeys = $keys;
     }
 
     /**

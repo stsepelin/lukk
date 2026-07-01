@@ -138,6 +138,21 @@ it('skips blank and unreadable public-key entries', function () {
     expect(array_keys($ring->publicKeys()))->toBe(['k1']);
 });
 
+it('memoizes verification keys so repeated verifies reuse one Key set', function () {
+    $kp = rsaKeypair();
+    $ring = new KeyRing(asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1'));
+
+    // Same instances on the second call → no per-verify Key alloc / PEM re-read.
+    expect($ring->verificationKeys())->toBe($ring->verificationKeys())
+        ->and($ring->publicKeys())->toBe($ring->publicKeys());
+});
+
+it('memoizes the symmetric verification key', function () {
+    $ring = new KeyRing(['algorithm' => 'HS256', 'secret' => str_repeat('a', 32)]);
+
+    expect($ring->verificationKeys())->toBe($ring->verificationKeys());
+});
+
 it('throws a clear error when the private-key passphrase is wrong', function () {
     $kp = rsaKeypair('correct-pass');
     $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1', 'wrong-pass');
