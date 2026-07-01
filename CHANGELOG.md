@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-01
+
 ### Added
 
 - `lukk.force-json` middleware alias. Attach it to your *own* `auth:api` routes (`Route::middleware(['lukk.force-json', 'auth:api'])`) to get a clean `401` JSON instead of the guest-redirect `500` on an `Accept`-less request — surgically, without globally disabling the guest redirect (which would also drop a real web login's redirect). It reuses the existing `ForceJsonRequest` middleware (ordered ahead of `Authenticate`), is opt-in (registers nothing global until you attach it), and works in verify-only services (`routes => false`) too.
@@ -92,7 +94,8 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/stsepelin/lukk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/stsepelin/lukk/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/stsepelin/lukk/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/stsepelin/lukk/releases/tag/v0.1.0
