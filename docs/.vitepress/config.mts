@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitepress'
+import llmstxt from 'vitepress-plugin-llms'
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -12,6 +13,11 @@ export default defineConfig({
   head: [
     ['meta', { name: 'theme-color', content: '#3c8772' }],
   ],
+  // Emit llms.txt + llms-full.txt (+ per-page .md) so AI tools can ingest the docs.
+  // https://llmstxt.org
+  vite: {
+    plugins: [llmstxt()],
+  },
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/introduction' },
