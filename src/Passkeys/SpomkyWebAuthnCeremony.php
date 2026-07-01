@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Passkeys;
 
+use Cose\Algorithm\Manager as CoseAlgorithmManager;
 use Cose\Algorithm\Signature\ECDSA\ES256;
 use Cose\Algorithm\Signature\RSA\RS256;
 use InvalidArgumentException;
@@ -63,6 +64,9 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         $factory = new CeremonyStepManagerFactory;
         $factory->setCounterChecker(new NullCounterChecker);
         $factory->setAllowedOrigins($this->config['origins']);
+        // Pin the COSE signature allow-list to exactly what we advertise in pubKeyCredParams (ES256/RS256)
+        // rather than inherit the library's transitive default — so a future lib change can't silently widen it.
+        $factory->setAlgorithmManager(CoseAlgorithmManager::create()->add(new ES256, new RS256));
 
         $this->attestation = AuthenticatorAttestationResponseValidator::create($factory->creationCeremony());
         $this->assertion = AuthenticatorAssertionResponseValidator::create($factory->requestCeremony());

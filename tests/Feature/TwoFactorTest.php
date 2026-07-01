@@ -125,6 +125,21 @@ it('completes the login by exchanging the challenge with a TOTP code', function 
         ->assertJsonStructure(['access_token', 'refresh_token']);
 });
 
+it('returns 422, not a 500, for a malformed two-factor-challenge input', function () {
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => 'x', 'code' => ['not', 'a', 'string']])
+        ->assertStatus(422);
+});
+
+it('hides the two-factor secret and recovery codes from model serialization', function () {
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+
+    $array = $user->fresh()->toArray();
+
+    expect($array)->not->toHaveKey('two_factor_secret')
+        ->and($array)->not->toHaveKey('two_factor_recovery_codes');
+});
+
 it('completes the login with a recovery code and consumes it', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);

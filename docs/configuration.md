@@ -126,7 +126,7 @@ Each maps to a named limiter (`lukk-refresh`, `lukk-passkeys`, `lukk-2fa`) you c
 'denylist_store' => env('LUKK_DENYLIST_STORE'),
 ```
 
-The cache store backing the revocation denylist. `null` uses your application's default cache store. The denylist is self-evicting (entries expire with the tokens they revoke), so any cache driver works — Redis is recommended in production.
+The cache store backing the revocation denylist. `null` uses your application's default cache store. The denylist is self-evicting (entries expire with the tokens they revoke), so any cache driver works — Redis is recommended in production. Use a store that **throws** when unreachable (Redis, database): a denylist read error then propagates and access-token verification **fails closed** (rejects), rather than silently treating a revoked token as valid. Avoid a store that swallows connection errors into a `null`/miss.
 
 > [!IMPORTANT]
 > Across **multiple nodes** this must be a **shared, persistent** store (e.g. Redis) — not the `array` driver and not a per-node cache. The same store also backs the TOTP replay cache and the passkey/2FA throttles; if it isn't shared, a revoked token can still be honored on another node and replay protection isn't authoritative.
@@ -250,7 +250,7 @@ Used only when `features.passkeys` is enabled. See [Passkeys](passkeys.md).
     'rp_id' => env('LUKK_PASSKEY_RP_ID'),
     'origins' => array_values(array_filter(array_map('trim', explode(',', (string) env('LUKK_PASSKEY_ORIGINS', ''))))),
     'challenge_ttl' => (int) env('LUKK_PASSKEY_CHALLENGE_TTL', 120),
-    'user_verification' => env('LUKK_PASSKEY_UV', 'preferred'),
+    'user_verification' => env('LUKK_PASSKEY_UV', 'required'),
 ],
 ```
 
@@ -260,4 +260,4 @@ Used only when `features.passkeys` is enabled. See [Passkeys](passkeys.md).
 | `rp_id` | **required** | The registrable domain shared by your front-end and API — e.g. `example.com`, **not** `api.example.com`. Throws if unset when passkeys are enabled. |
 | `origins` | **required** | Allowed browser origins (your front-end), as a comma-separated `LUKK_PASSKEY_ORIGINS` value. An empty list is rejected. |
 | `challenge_ttl` | `120` (2 min) | How long a WebAuthn challenge is valid. |
-| `user_verification` | `preferred` | Whether the authenticator must verify the user (biometric/PIN), not just their presence. Set `required` for phishing-resistant login + step-up. One of `required`, `preferred`, `discouraged`. |
+| `user_verification` | `required` | Whether the authenticator must verify the user (biometric/PIN), not just their presence. Default `required` makes passwordless login + step-up phishing-resistant (AAL2). Lower to `preferred` only for authenticators that can't verify the user. One of `required`, `preferred`, `discouraged`. |

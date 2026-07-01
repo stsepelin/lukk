@@ -320,13 +320,15 @@ return [
         |--------------------------------------------------------------------------
         |
         | Whether the authenticator must verify the user (biometric / PIN) rather
-        | than just their presence (a tap). "preferred" (default) accepts either;
-        | set "required" for phishing-resistant, AAL2-style login and step-up.
+        | than just their presence (a tap). Default "required" — passkey login and
+        | step-up are single-factor (possession), so enforcing user verification
+        | makes them phishing-resistant, AAL2-style. Lower to "preferred" only if
+        | you must support authenticators that can't verify the user.
         | One of: "required", "preferred", "discouraged".
         |
         */
 
-        'user_verification' => env('LUKK_PASSKEY_UV', 'preferred'),
+        'user_verification' => env('LUKK_PASSKEY_UV', 'required'),
     ],
 
     /*

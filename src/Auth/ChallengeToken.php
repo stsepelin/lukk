@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Lukk\Auth;
 
 use Firebase\JWT\JWT;
-use Firebase\JWT\Key;
 use Illuminate\Support\Str;
 use Lukk\Contracts\Denylist;
+use Lukk\Tokens\Jwt\KeyRing;
 use Throwable;
 
 /**
@@ -19,13 +19,19 @@ use Throwable;
  */
 class ChallengeToken
 {
+    private readonly KeyRing $keys;
+
     /**
      * @param  array{secret:string,algorithm:string,issuer:string,audience:string,leeway:int,...}  $config
      */
     public function __construct(
         private readonly array $config,
         private readonly Denylist $denylist,
-    ) {}
+    ) {
+        // Sign/verify through the same KeyRing as the access tokens, so challenges stay alg-pinned
+        // and keep working under an asymmetric (RS256/ES256) deployment where `secret` is null.
+        $this->keys = new KeyRing($config);
+    }
 
     public function issue(string $kind, int|string $userId, int $ttl): string
     {
@@ -41,7 +47,9 @@ class ChallengeToken
             'exp' => $now + $ttl,
         ];
 
-        return JWT::encode($payload, $this->config['secret'], $this->config['algorithm'], head: ['typ' => $kind.'+challenge']);
+        $signing = $this->keys->signingKey();
+
+        return JWT::encode($payload, $signing['key'], $this->config['algorithm'], keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
     }
 
     /**
@@ -82,7 +90,7 @@ class ChallengeToken
         JWT::$leeway = $this->config['leeway'];
 
         try {
-            $claims = JWT::decode($token, new Key($this->config['secret'], $this->config['algorithm']));
+            $claims = JWT::decode($token, $this->keys->verificationKeys());
         } catch (Throwable) {
             return null;
         }
