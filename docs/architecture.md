@@ -1,6 +1,6 @@
 # Architecture & Security
 
-This page explains *why* Lukk is built the way it is, maps its behavior to the relevant standards, and gives a checklist you can audit against. For day-to-day usage see the other pages; this is the reference for reviewers and the security-minded.
+This page explains *why* Lukk is built the way it is, maps its behavior to the relevant standards, and gives a checklist you can audit against. For day-to-day usage see the other pages; this is the reference for reviewers and the security-minded. For the client-side counterpart, see [lukk-js › Architecture](https://stsepelin.github.io/lukk-js/architecture).
 
 - [Why a Custom Package](#why-a-custom-package)
 - [Layered Design](#layered-design)
