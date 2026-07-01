@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `lukk.force-json` middleware alias. Attach it to your *own* `auth:api` routes (`Route::middleware(['lukk.force-json', 'auth:api'])`) to get a clean `401` JSON instead of the guest-redirect `500` on an `Accept`-less request — surgically, without globally disabling the guest redirect (which would also drop a real web login's redirect). It reuses the existing `ForceJsonRequest` middleware (ordered ahead of `Authenticate`), is opt-in (registers nothing global until you attach it), and works in verify-only services (`routes => false`) too.
 
+### Fixed
+
+- JWKS EC coordinates are now left-padded to the curve field size (RFC 7518 §6.2.1.2). `openssl_pkey_get_details` strips leading zero bytes, so roughly 1 in 256 coordinates was published a byte short and strict JWKS consumers would reject the key. Only affects RS256/ES256 (specifically ES\*) deployments serving `GET /auth/jwks`; the default HS256 setup publishes an empty set and is unaffected.
+
 ## [0.1.2] - 2026-06-30
 
 ### Changed
