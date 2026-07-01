@@ -119,7 +119,7 @@ The denylist is held in the **cache, not a table** — it is keyed by `jti` and 
 | Instant revocation (denylist by `fid`/`jti`) | OWASP Session Management |
 | Login throttled + constant-time (no user enumeration) | OWASP ASVS |
 | Tokens kept out of the browser; sealed `__Host-` cookie | OAuth 2.0 for Browser-Based Apps |
-| Token responses non-cacheable (`Cache-Control: no-store`) | RFC 6749 §5.1 |
+| Token responses non-cacheable (`Cache-Control: no-store, private`) | RFC 6749 §5.1 |
 | Reuse/family-revoke emits a security event | RFC 9700 §4.14.2 |
 
 <a name="security-checklist"></a>
@@ -135,7 +135,7 @@ The denylist is held in the **cache, not a table** — it is keyed by `jti` and 
 - [x] Denylist (`fid`/`jti`) kills access within one request; global logout (`DELETE /sessions`) works.
 - [x] Login throttled; password check constant-time; unknown user indistinguishable from wrong password.
 - [x] HS256 secret ≥ 256-bit random (`php artisan lukk:secret`); v7 enforces the minimum.
-- [x] Token responses carry `Cache-Control: no-store`.
+- [x] Token responses carry `Cache-Control: no-store, private`.
 - [x] Reuse/family-revoke dispatches `Events\RefreshTokenReused`.
 - [x] Expired/not-yet-valid tokens, and tokens whose `sub` user was deleted, rejected at the guard.
 - [x] **(2FA)** Challenge single-use + short TTL; TOTP single-use within its window; account-throttled; recovery codes salted+hashed and single-use; secret encrypted; enroll→confirm before activation; step-up to manage; `amr` reflects `otp`.
