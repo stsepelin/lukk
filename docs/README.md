@@ -21,6 +21,7 @@ Minimal-dependency JWT authentication for **first-party** Laravel applications �
 - [Two-Factor Authentication](two-factor-authentication.md) — TOTP with recovery codes
 - [Passkeys](passkeys.md) — passwordless, phishing-resistant WebAuthn login
 - [Confirmation](confirmation.md) — step-up ("sudo") confirmation for sensitive routes
+- [Email Verification](email-verification.md) — first-party signed-link verification + a `lukk.verified` gate
 
 ## Reference
 

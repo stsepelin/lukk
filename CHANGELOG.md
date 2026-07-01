@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Email verification** (opt-in via `features.email_verification`). First-party, stateless verification that rides Laravel's framework-default `email_verified_at` + `MustVerifyEmail` (no lukk migration). A **signed link** (`GET /auth/email/verify/{id}/{hash}`, outside the JSON-forcing group) verifies and content-negotiates a redirect to your SPA (`email_verification.frontend_url`, with `?verified=1`) or a `204` for a JSON client; `POST /auth/email/verification-notification` resends (throttled `lukk-email-verification`). A `lukk.verified` middleware gates routes with a **409** when the email isn't verified (read fresh off the user, never a token claim), and `email_verification.block_unverified_login` optionally refuses login with a **403**. lukk points Laravel's `VerifyEmail` notification at its signed route; verification fires the standard `Illuminate\Auth\Events\Verified`. See [docs/email-verification.md](docs/email-verification.md).
+
 ## [0.1.3] - 2026-07-01
 
 ### Added
