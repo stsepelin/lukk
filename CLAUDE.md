@@ -2,7 +2,7 @@
 
 Minimal-dependency, first-party JWT auth package for Laravel 12/13 (`Lukk\` namespace): short-lived HS256 access JWTs + opaque rotating refresh tokens with reuse detection, a concurrency grace window, and a cache-backed denylist. Optional, feature-gated 2FA (TOTP) and passkeys (WebAuthn). It deliberately is **not** Passport/Sanctum/OAuth — first-party, so no authorization-code/PKCE ceremony. Architecture is modeled on Sanctum.
 
-User-facing docs live in `docs/` (start at `docs/README.md`; `docs/architecture.md` has the design rationale, standards mapping, and security checklist). Customization recipes are in `docs/customization.md`.
+User-facing docs live in the separate **[lukk-docs](https://github.com/stsepelin/lukk-docs)** repo (a unified VitePress site covering both this package and the lukk-js client, published to stsepelin.github.io/lukk). Edit docs there — this repo no longer has a `docs/` directory. The `architecture` page has the design rationale, standards mapping, and security checklist; the `customization` page has the recipes.
 
 ## Commands
 

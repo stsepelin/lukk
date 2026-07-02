@@ -18,7 +18,7 @@ Minimal-dependency JWT authentication for **first-party Laravel apps** (Laravel 
 - **Reuse detection** — replaying a consumed token revokes the whole session (token family).
 - **Concurrency grace window** — multiple tabs / SSR refresh without false logouts.
 - **Instant revocation** — a cache-backed denylist kills an access token or a whole session within one request.
-- **Optional [two-factor auth](docs/two-factor-authentication.md)** (TOTP + recovery codes) and **[passkeys](docs/passkeys.md)** (WebAuthn / FIDO2), each opt-in and feature-gated.
+- **Optional [two-factor auth](https://stsepelin.github.io/lukk/two-factor-authentication)** (TOTP + recovery codes) and **[passkeys](https://stsepelin.github.io/lukk/passkeys)** (WebAuthn / FIDO2), each opt-in and feature-gated.
 - **Sanctum/Fortify-style design** — a contract per swappable piece, single-purpose Actions, a static `Lukk` config hub, a dedicated guard, and Responsable response contracts.
 
 The single runtime dependency is [`firebase/php-jwt`](https://github.com/firebase/php-jwt), the audited JWS primitive — never hand-roll JWT. Everything else is Laravel core.
@@ -30,7 +30,7 @@ The single runtime dependency is [`firebase/php-jwt`](https://github.com/firebas
 | **Access token** | HS256 JWT, 15 min. Claims `iss/aud/sub/fid/jti/iat/nbf/exp`, header `typ=at+jwt`. Verified every request: alg pinned, `iss`/`aud` asserted, denylist checked by `jti` and `fid`. |
 | **Refresh token** | Opaque 256-bit secret, 30 days. Returned once; stored only as `sha256`. Rotated on every refresh; reuse after the grace window revokes the whole family. |
 
-HS256 is correct while this app is its own sole verifier. RS256/ES256 + a JWKS endpoint + `kid` key rotation are built in (behind the same contracts) for when an independent service must verify tokens — flip `LUKK_ALGORITHM` and run `php artisan lukk:keygen`. See [Architecture & Security](docs/architecture.md).
+HS256 is correct while this app is its own sole verifier. RS256/ES256 + a JWKS endpoint + `kid` key rotation are built in (behind the same contracts) for when an independent service must verify tokens — flip `LUKK_ALGORITHM` and run `php artisan lukk:keygen`. See [Architecture & Security](https://stsepelin.github.io/lukk/architecture).
 
 ## Requirements
 
@@ -63,25 +63,13 @@ Then protect routes with `auth:api` as usual:
 Route::middleware('auth:api')->get('/me', fn (Request $r) => $r->user());
 ```
 
-The package registers `login`, `refresh`, `logout`, and session-revocation (`DELETE /sessions`, `DELETE /sessions/others`) routes automatically. See **[Installation](docs/installation.md)** and **[Authentication](docs/authentication.md)** for the full walkthrough.
+The package registers `login`, `refresh`, `logout`, and session-revocation (`DELETE /sessions`, `DELETE /sessions/others`) routes automatically. See **[Installation](https://stsepelin.github.io/lukk/installation)** and **[Authentication](https://stsepelin.github.io/lukk/authentication)** for the full walkthrough.
 
 ## Documentation
 
-Full documentation lives in [`docs/`](docs/README.md):
+📚 **Full documentation: [stsepelin.github.io/lukk](https://stsepelin.github.io/lukk)**
 
-| | |
-|---|---|
-| [Introduction](docs/introduction.md) | What Lukk is, the token model, and when to use it |
-| [Installation](docs/installation.md) | Install, generate the secret, wire the guard |
-| [Configuration](docs/configuration.md) | Every option, explained |
-| [Authentication](docs/authentication.md) | Login, refresh, logout, protecting routes, output modes |
-| [Customization](docs/customization.md) | Swap login logic, storage, models, responses, claims |
-| [Events & Maintenance](docs/events.md) | Security events, token pruning, testing |
-| [Two-Factor Authentication](docs/two-factor-authentication.md) | TOTP with recovery codes |
-| [Passkeys](docs/passkeys.md) | Passwordless, phishing-resistant WebAuthn login |
-| [Confirmation](docs/confirmation.md) | Step-up ("sudo") confirmation for sensitive routes |
-| [Deployment](docs/deployment.md) | Single service, splitting auth from the API, multiple audiences |
-| [Architecture & Security](docs/architecture.md) | Design rationale, standards mapping, security checklist |
+lukk (the Laravel package) and [lukk-js](https://github.com/stsepelin/lukk-js) (the TypeScript/Nuxt client) are documented together on one site — each feature page covers both the server and the client. Start with the [Introduction](https://stsepelin.github.io/lukk/introduction) or jump to [Installation](https://stsepelin.github.io/lukk/installation).
 
 **For AI assistants:** the docs are exposed as [`/llms.txt`](https://stsepelin.github.io/lukk/llms.txt) + [`/llms-full.txt`](https://stsepelin.github.io/lukk/llms-full.txt) ([llms.txt](https://llmstxt.org) convention), and [`AGENTS.md`](AGENTS.md) has integration + contribution rules.
 
