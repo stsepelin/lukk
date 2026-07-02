@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-02
+
 ### Added
 
 - Optional `Lukk\Http\Resources\UserResource` — an extendable base API Resource for your `user.endpoint` that emits the fields the lukk-js client reads (the identifier + a derived `email_verified` boolean), so `useLukkAuth().user` / `verified` work out of the box. Extend it and override `fields()` to add your own; a bare model or your own resource still works too (lukk doesn't own your user endpoint — this is a convenience).
+- `cookie.secure` config (env `LUKK_COOKIE_SECURE`, default `true`) gating the direct-mode refresh cookie's `Secure` attribute. Set it `false` **only** for local development over plain http — a browser drops a `Secure` cookie on http even on localhost, so the session wouldn't persist; lukk then also strips the `__Host-` prefix from the cookie name (that prefix requires `Secure`). Never ship `secure=false`.
+
+### Security
+
+- **IP-independent per-account login lockout** (`LUKK_LOGIN_ACCOUNT_MAX_ATTEMPTS`, default 20/min). The login limiter now throttles per account too, not just per email+IP, bounding a distributed brute force that rotates source IPs against a single account. The unknown-user path stays constant-time.
+- **Atomic TOTP single-use.** The one-time-use guard for a TOTP code now uses an atomic cache `add` (was a `has` + `put`), closing a same-instant double-accept race under concurrency.
+
+### Fixed
+
+- Passkey registration now requests a **resident (discoverable) credential** (`residentKey: required`, user verification advisory), so passwordless / usernameless login works — the ceremony previously didn't request one and discoverable login failed with `NotAllowedError`.
 
 ## [0.1.4] - 2026-07-01
 
@@ -104,7 +116,8 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/stsepelin/lukk/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/stsepelin/lukk/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/stsepelin/lukk/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/stsepelin/lukk/compare/v0.1.1...v0.1.2
