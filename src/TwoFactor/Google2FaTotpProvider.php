@@ -43,12 +43,9 @@ class Google2FaTotpProvider implements TwoFactorProvider
 
         $key = 'lukk:2fa:used:'.hash('sha256', $secret.'|'.$code);
 
-        if ($this->cache->has($key)) {
-            return false;
-        }
-
-        $this->cache->put($key, true, (2 * $this->config['window'] + 1) * 30);
-
-        return true;
+        // Atomic claim: add() writes only if the key is absent and returns false otherwise,
+        // so two concurrent requests presenting the same code can't both pass (has()+put()
+        // would race). The marker outlives the code's full validity band (±window steps).
+        return $this->cache->add($key, true, (2 * $this->config['window'] + 1) * 30);
     }
 }
