@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-02
+
 ### Added
 
 - **Password reset** (opt-in via `features.password_reset`), built on Laravel's password broker. `POST /auth/forgot-password` emails a reset link pointing at your SPA (`password_reset.frontend_url?token=…&email=…`) and always returns a generic `200` (no user enumeration, throttled `lukk-password-reset`); `POST /auth/reset-password` consumes the token, sets the new password, fires `Illuminate\Auth\Events\PasswordReset`, and — unless `password_reset.revoke_sessions` is false — **revokes every existing session** (refresh families + denylist) so a session that predates the reset can't survive it. Relies on the framework-default `password_reset_tokens` table + an `auth.passwords` broker (`password_reset.broker` selects a non-default one; no lukk migration). Both endpoints are enumeration-safe — reset returns one generic `422` for every failure. See the [password-reset docs](https://stsepelin.github.io/lukk-docs/password-reset).
@@ -120,7 +122,8 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/stsepelin/lukk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/stsepelin/lukk/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/stsepelin/lukk/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/stsepelin/lukk/compare/v0.1.2...v0.1.3
