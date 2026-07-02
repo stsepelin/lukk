@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Password reset** (opt-in via `features.password_reset`), built on Laravel's password broker. `POST /auth/forgot-password` emails a reset link pointing at your SPA (`password_reset.frontend_url?token=…&email=…`) and always returns a generic `200` (no user enumeration, throttled `lukk-password-reset`); `POST /auth/reset-password` consumes the token, sets the new password, fires `Illuminate\Auth\Events\PasswordReset`, and — unless `password_reset.revoke_sessions` is false — **revokes every existing session** (refresh families + denylist) so a session that predates the reset can't survive it. Relies on the framework-default `password_reset_tokens` table + an `auth.passwords` broker (`password_reset.broker` selects a non-default one; no lukk migration). Both endpoints are enumeration-safe — reset returns one generic `422` for every failure. See the [password-reset docs](https://stsepelin.github.io/lukk-docs/password-reset).
+
 ## [0.2.0] - 2026-07-02
 
 ### Added

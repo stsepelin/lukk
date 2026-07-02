@@ -41,6 +41,15 @@ class TestCase extends Orchestra
         // Register the email-verification routes/wiring. Login gating stays off
         // (block_unverified_login defaults false), so password-only tests are unaffected.
         $app['config']->set('lukk.features.email_verification', true);
+        // Password reset: enable the feature + configure the broker it builds on.
+        $app['config']->set('lukk.features.password_reset', true);
+        $app['config']->set('auth.defaults.passwords', 'users');
+        $app['config']->set('auth.passwords.users', [
+            'provider' => 'users',
+            'table' => 'password_reset_tokens',
+            'expire' => 60,
+            'throttle' => 60,
+        ]);
     }
 
     protected function defineDatabaseMigrations(): void
@@ -57,6 +66,12 @@ class TestCase extends Orchestra
             $table->text('two_factor_recovery_codes')->nullable();
             $table->timestamp('two_factor_confirmed_at')->nullable();
             $table->timestamp('email_verified_at')->nullable();
+        });
+
+        Schema::create('password_reset_tokens', function (Blueprint $table) {
+            $table->string('email')->primary();
+            $table->string('token');
+            $table->timestamp('created_at')->nullable();
         });
 
         Schema::create('passkeys', function (Blueprint $table) {

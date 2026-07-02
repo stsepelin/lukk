@@ -118,44 +118,103 @@ return [
     |
     | Every throttle in one place, each as { max_attempts, decay_seconds }.
     |
-    |  - "login" is the failures-only limiter: only failed attempts count, a
-    |    success clears the counter. It has two buckets: "max_attempts" keyed on
-    |    the normalized email + IP (the tight per-origin limit), and
-    |    "account_max_attempts" keyed on the email alone — an IP-independent cap so
-    |    a distributed attacker can't get "max_attempts" guesses per IP against one
-    |    account. Keep account_max_attempts > max_attempts (legit multi-device users).
-    |    "ip_max_attempts" is a separate coarse per-IP cap on ALL login requests,
-    |    so password spraying (varying the email) can't slip past the per-account
-    |    limit.
-    |  - "two_factor" values feed two limiters: a per-IP cap on the challenge
-    |    route, and the real per-account guess limit (keyed by "sub") enforced
-    |    inside the verify action.
-    |  - "refresh" and "passkeys" are per-IP guards on those endpoints.
-    |
     */
 
     'rate_limits' => [
+
+        /*
+        |--------------------------------------------------------------------------
+        | Login
+        |--------------------------------------------------------------------------
+        |
+        | The failures-only limiter: only failed attempts count, a success clears
+        | the counter. "max_attempts" is keyed on the normalized email + IP (the
+        | tight per-origin limit); "account_max_attempts" is keyed on the email
+        | alone — an IP-independent cap so a distributed attacker can't get
+        | "max_attempts" guesses per IP against one account (keep it above
+        | max_attempts for legit multi-device users). "ip_max_attempts" is a
+        | separate coarse per-IP cap on ALL login requests, so password spraying
+        | (varying the email) can't slip past the per-account limit.
+        |
+        */
+
         'login' => [
             'max_attempts' => (int) env('LUKK_LOGIN_MAX_ATTEMPTS', 5),
             'decay_seconds' => (int) env('LUKK_LOGIN_DECAY', 60),
             'ip_max_attempts' => (int) env('LUKK_LOGIN_IP_MAX_ATTEMPTS', 30),
             'account_max_attempts' => (int) env('LUKK_LOGIN_ACCOUNT_MAX_ATTEMPTS', 20),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Two-Factor
+        |--------------------------------------------------------------------------
+        |
+        | Feeds two limiters: a per-IP cap on the challenge route, and the real
+        | per-account guess limit (keyed by "sub") enforced inside the verify
+        | action.
+        |
+        */
+
         'two_factor' => [
             'max_attempts' => (int) env('LUKK_2FA_MAX_ATTEMPTS', 5),
             'decay_seconds' => (int) env('LUKK_2FA_DECAY', 60),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Refresh
+        |--------------------------------------------------------------------------
+        |
+        | A per-IP guard on the token-refresh endpoint.
+        |
+        */
+
         'refresh' => [
             'max_attempts' => (int) env('LUKK_REFRESH_MAX_ATTEMPTS', 30),
             'decay_seconds' => (int) env('LUKK_REFRESH_DECAY', 60),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Passkeys
+        |--------------------------------------------------------------------------
+        |
+        | A per-IP guard on the passkey login/registration endpoints.
+        |
+        */
+
         'passkeys' => [
             'max_attempts' => (int) env('LUKK_PASSKEY_MAX_ATTEMPTS', 30),
             'decay_seconds' => (int) env('LUKK_PASSKEY_DECAY', 60),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Email Verification
+        |--------------------------------------------------------------------------
+        |
+        | A per-IP guard on the verify + resend endpoints.
+        |
+        */
+
         'email_verification' => [
             'max_attempts' => (int) env('LUKK_VERIFY_MAX_ATTEMPTS', 6),
             'decay_seconds' => (int) env('LUKK_VERIFY_DECAY', 60),
+        ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Password Reset
+        |--------------------------------------------------------------------------
+        |
+        | A per-IP guard on the forgot-password + reset-password endpoints.
+        |
+        */
+
+        'password_reset' => [
+            'max_attempts' => (int) env('LUKK_RESET_MAX_ATTEMPTS', 6),
+            'decay_seconds' => (int) env('LUKK_RESET_DECAY', 60),
         ],
     ],
 
@@ -413,23 +472,108 @@ return [
     | and the users table must have the framework-default `email_verified_at`
     | column — lukk ships no migration for it (it's a Laravel default).
     |
-    |  - "frontend_url" is where the signed verification link ultimately lands
-    |    the user (your SPA verify page). The browser hits the API GET, which
-    |    verifies then redirects here (with ?verified=1); leave it empty to
-    |    return 204 instead of redirecting. An `Accept: application/json` fetch
-    |    always gets 204, never a redirect.
-    |  - "expire" is the signed link's validity, in minutes.
-    |  - "block_unverified_login" refuses login with a 403 for an unverified
-    |    user, instead of issuing tokens and gating per-route with the
-    |    `lukk.verified` middleware (409). Default false — the SPA-friendly
-    |    "log in, then gate the sensitive routes" model.
-    |
     */
 
     'email_verification' => [
+
+        /*
+        |--------------------------------------------------------------------------
+        | Frontend URL
+        |--------------------------------------------------------------------------
+        |
+        | Where the signed verification link ultimately lands the user (your SPA
+        | verify page). The browser hits the API GET, which verifies then
+        | redirects here (with ?verified=1); leave it empty to return 204 instead
+        | of redirecting. An `Accept: application/json` fetch always gets 204.
+        |
+        */
+
         'frontend_url' => env('LUKK_VERIFY_URL'),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Link Lifetime
+        |--------------------------------------------------------------------------
+        |
+        | The signed verification link's validity, in minutes.
+        |
+        */
+
         'expire' => (int) env('LUKK_VERIFY_EXPIRE', 60),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Block Unverified Login
+        |--------------------------------------------------------------------------
+        |
+        | Refuse login with a 403 for an unverified user, instead of issuing
+        | tokens and gating per-route with the `lukk.verified` middleware (409).
+        | Default false — the SPA-friendly "log in, then gate the sensitive
+        | routes" model.
+        |
+        */
+
         'block_unverified_login' => (bool) env('LUKK_VERIFY_BLOCK_LOGIN', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Password Reset
+    |--------------------------------------------------------------------------
+    |
+    | First-party password reset (opt-in via features.password_reset), built on
+    | Laravel's password broker. Your user model must implement
+    | Illuminate\Contracts\Auth\CanResetPassword (the default `App\Models\User`
+    | already does) and you need the framework-default `password_reset_tokens`
+    | table + a configured `auth.passwords` broker — lukk ships no migration.
+    | The token's lifetime + per-email throttle come from that broker
+    | (`auth.passwords.users.expire` / `.throttle`).
+    |
+    */
+
+    'password_reset' => [
+
+        /*
+        |--------------------------------------------------------------------------
+        | Frontend URL
+        |--------------------------------------------------------------------------
+        |
+        | Where the reset link lands the user (your SPA reset page). lukk points
+        | Laravel's ResetPassword notification at it, appending `?token=...&email=...`;
+        | that page collects the new password and POSTs it to `/auth/reset-password`.
+        | Required when the feature is enabled — an empty value emails a link with
+        | no host.
+        |
+        */
+
+        'frontend_url' => env('LUKK_RESET_URL'),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Revoke Sessions on Reset
+        |--------------------------------------------------------------------------
+        |
+        | When true (the default), a successful reset revokes every existing
+        | session (refresh families + denylist), so a session that predates the
+        | reset — e.g. an attacker's — can't survive it.
+        |
+        */
+
+        'revoke_sessions' => (bool) env('LUKK_RESET_REVOKE_SESSIONS', true),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Broker
+        |--------------------------------------------------------------------------
+        |
+        | The `auth.passwords` broker used to mint + verify reset tokens. Null uses
+        | your app's default broker (config('auth.defaults.passwords')). Set this
+        | only when you reset against a non-default broker — e.g. a separate admin
+        | guard with its own token table.
+        |
+        */
+
+        'broker' => env('LUKK_RESET_BROKER'),
     ],
 
     /*
@@ -486,6 +630,20 @@ return [
         */
 
         'email_verification' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Password Reset
+        |--------------------------------------------------------------------------
+        |
+        | Enable first-party password reset (Laravel password broker). Requires a
+        | user model that implements CanResetPassword, the framework-default
+        | `password_reset_tokens` table, and an `auth.passwords` broker (no lukk
+        | migration). Configure it under `password_reset` above.
+        |
+        */
+
+        'password_reset' => false,
     ],
 
 ];

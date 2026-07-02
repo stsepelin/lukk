@@ -9,11 +9,13 @@ use Lukk\Http\Controllers\ConfirmablePasswordController;
 use Lukk\Http\Controllers\ConfirmedTwoFactorAuthenticationController;
 use Lukk\Http\Controllers\EmailVerificationNotificationController;
 use Lukk\Http\Controllers\JwksController;
+use Lukk\Http\Controllers\NewPasswordController;
 use Lukk\Http\Controllers\OtherSessionsController;
 use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
 use Lukk\Http\Controllers\PasskeyController;
 use Lukk\Http\Controllers\PasskeyLoginOptionsController;
 use Lukk\Http\Controllers\PasskeyRegistrationOptionsController;
+use Lukk\Http\Controllers\PasswordResetLinkController;
 use Lukk\Http\Controllers\RecoveryCodeController;
 use Lukk\Http\Controllers\SessionController;
 use Lukk\Http\Controllers\TokenController;
@@ -61,6 +63,12 @@ Route::prefix((string) config('lukk.path', 'auth'))
         if (config('lukk.features.email_verification')) {
             Route::post('email/verification-notification', EmailVerificationNotificationController::class)
                 ->middleware([$guard, 'throttle:lukk-email-verification']);
+        }
+
+        if (config('lukk.features.password_reset')) {
+            // Public (no auth): a logged-out user requests + completes a reset.
+            Route::post('forgot-password', PasswordResetLinkController::class)->middleware('throttle:lukk-password-reset');
+            Route::post('reset-password', NewPasswordController::class)->middleware('throttle:lukk-password-reset');
         }
     });
 

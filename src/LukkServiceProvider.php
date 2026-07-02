@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk;
 
+use Illuminate\Auth\Notifications\ResetPassword as ResetPasswordNotification;
 use Illuminate\Auth\Notifications\VerifyEmail;
 use Illuminate\Auth\RequestGuard;
 use Illuminate\Cache\RateLimiter;
@@ -22,10 +23,12 @@ use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Actions\RegenerateRecoveryCodes;
+use Lukk\Actions\ResetPassword;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeOtherSessions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
+use Lukk\Actions\SendPasswordResetLink;
 use Lukk\Actions\StartSession;
 use Lukk\Actions\VerifyTwoFactorChallenge;
 use Lukk\Auth\ChallengeToken;
@@ -106,6 +109,10 @@ class LukkServiceProvider extends ServiceProvider
             // (`routes => false`) with the feature on would reference a missing route name.
             if ($this->config()['features']['email_verification'] ?? false) {
                 $this->configureEmailVerification();
+            }
+
+            if ($this->config()['features']['password_reset'] ?? false) {
+                $this->configurePasswordReset();
             }
         }
 
@@ -200,6 +207,8 @@ class LukkServiceProvider extends ServiceProvider
         ));
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProvider(), $app->make(LoginRateLimiter::class)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProvider()));
+        $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
+        $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
 
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             $app->make(TwoFactorProvider::class), (int) $this->config()['two_factor']['recovery_codes']));
@@ -229,6 +238,22 @@ class LukkServiceProvider extends ServiceProvider
             now()->addMinutes((int) ($this->config()['email_verification']['expire'] ?? 60)),
             ['id' => $notifiable->getKey(), 'hash' => sha1($notifiable->getEmailForVerification())],
         ));
+    }
+
+    /**
+     * Point Laravel's password-reset notification at your SPA reset page (with the token +
+     * email in the query), rather than the framework-default web route. Only wired when the
+     * feature is on, so a host app's own password reset isn't hijacked. The link carries the
+     * broker token; the SPA page collects the new password and POSTs it to `/auth/reset-password`.
+     */
+    private function configurePasswordReset(): void
+    {
+        ResetPasswordNotification::createUrlUsing(function ($notifiable, string $token): string {
+            $frontend = (string) ($this->config()['password_reset']['frontend_url'] ?? '');
+
+            return $frontend.(str_contains($frontend, '?') ? '&' : '?')
+                .'token='.$token.'&email='.urlencode($notifiable->getEmailForPasswordReset());
+        });
     }
 
     private function registerResponses(): void
@@ -261,7 +286,7 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
-        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification'] as $key => $name) {
+        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
 
