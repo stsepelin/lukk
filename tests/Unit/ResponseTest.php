@@ -57,6 +57,18 @@ it('puts the refresh token in a __Host- cookie and omits it from the body in coo
     expect($cookie->getDomain())->toBeNull();
 });
 
+it('drops Secure and the __Host- prefix when lukk.cookie.secure is off (dev over http)', function () {
+    config(['lukk.cookie_mode' => true, 'lukk.cookie.secure' => false]);
+
+    $cookie = emit(new TokenPair('access.jwt', 'opaque-refresh', 900))->headers->getCookies()[0];
+
+    // __Host- REQUIRES Secure, so the prefix is stripped when Secure is off — else the browser rejects it.
+    expect($cookie->getName())->toBe('refresh');
+    expect($cookie->isSecure())->toBeFalse();
+    expect($cookie->isHttpOnly())->toBeTrue();
+    expect($cookie->getPath())->toBe('/');
+});
+
 it('clears the refresh cookie on logout in cookie mode', function () {
     config(['lukk.cookie_mode' => true]);
 

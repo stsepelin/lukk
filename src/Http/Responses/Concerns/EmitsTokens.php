@@ -6,6 +6,7 @@ namespace Lukk\Http\Responses\Concerns;
 
 use Illuminate\Http\JsonResponse;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Support\RefreshCookie;
 use Lukk\Support\TokenPair;
 
 /**
@@ -36,12 +37,12 @@ trait EmitsTokens
         $minutes = (int) (config('lukk.refresh_ttl', 2592000) / 60);
 
         $response->withCookie(cookie()->make(
-            name: (string) config('lukk.cookie.refresh_name', '__Host-refresh'),
+            name: RefreshCookie::name(),
             value: $pair->refreshToken,
             minutes: $minutes,
             path: '/',
             domain: null,
-            secure: true,
+            secure: RefreshCookie::secure(),
             httpOnly: true,
             raw: false,
             // Strict, not Lax: the refresh call is an XHR, never a navigation, so

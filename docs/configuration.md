@@ -139,6 +139,7 @@ The cache store backing the revocation denylist. `null` uses your application's 
 
 'cookie' => [
     'refresh_name' => '__Host-refresh',
+    'secure' => (bool) env('LUKK_COOKIE_SECURE', true),
 ],
 ```
 
@@ -146,6 +147,13 @@ The cache store backing the revocation denylist. `null` uses your application's 
 |---|---|
 | `false` (default) | **BFF mode.** Both tokens are returned in the JSON body, for a server-side client (such as a Nuxt BFF) that seals them itself. |
 | `true` | **Direct browser mode.** The refresh token is set in a `__Host-refresh` cookie (HttpOnly, Secure, `Path=/`, no `Domain`); only the access token and its expiry are in the body. |
+
+`cookie.secure` (env `LUKK_COOKIE_SECURE`, default `true`) controls the refresh cookie's
+`Secure` attribute. **Keep it `true` in production** — the refresh token must never travel
+over plain http. Set it to `false` **only for local development over http** (a browser drops
+a `Secure` cookie on http, even on localhost, so the session wouldn't persist): lukk then also
+strips the `__Host-` prefix from the cookie name, since that prefix requires `Secure`. Never
+ship `secure=false`.
 
 See [Authentication → Output Modes](authentication.md#output-modes) for the full response shapes, and the lukk-js [transport modes](https://stsepelin.github.io/lukk-js/transport-modes) for which client mode pairs with each (BFF ↔ body mode, direct ↔ cookie mode).
 
