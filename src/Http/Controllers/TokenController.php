@@ -7,6 +7,7 @@ namespace Lukk\Http\Controllers;
 use Illuminate\Http\Request;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\RefreshResponse;
+use Lukk\Support\RefreshCookie;
 
 /**
  * Mints a fresh token pair from a presented refresh token (rotation + reuse
@@ -27,8 +28,6 @@ class TokenController
 
     private function presentedRefreshToken(Request $request): string
     {
-        $cookieName = (string) config('lukk.cookie.refresh_name', '__Host-refresh');
-
-        return (string) ($request->input('refresh_token') ?? $request->cookie($cookieName) ?? '');
+        return (string) ($request->input('refresh_token') ?? $request->cookie(RefreshCookie::name()) ?? '');
     }
 }
