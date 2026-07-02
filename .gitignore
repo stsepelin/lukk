@@ -10,3 +10,6 @@ composer.lock
 /node_modules
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+
+# Internal security audit — keep local/private, never in the public repo
+AUDIT/
