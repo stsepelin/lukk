@@ -361,12 +361,19 @@ return [
     | Nuxt BFF seals them server-side. When true (direct browser client), the
     | refresh token is delivered in a __Host- prefixed cookie.
     |
+    | "secure" gates the cookie's Secure attribute. Keep it true in production —
+    | the refresh token must never travel over http. Set it false ONLY for local
+    | development over plain http (a browser drops a Secure cookie on http, even on
+    | localhost); lukk then also drops the __Host- prefix from the name, since that
+    | prefix requires Secure. Never ship secure=false.
+    |
     */
 
     'cookie_mode' => (bool) env('LUKK_COOKIE_MODE', false),
 
     'cookie' => [
         'refresh_name' => '__Host-refresh',
+        'secure' => (bool) env('LUKK_COOKIE_SECURE', true),
     ],
 
     /*
