@@ -119,7 +119,11 @@ return [
     | Every throttle in one place, each as { max_attempts, decay_seconds }.
     |
     |  - "login" is the failures-only limiter: only failed attempts count, a
-    |    success clears the counter, keyed on the normalized email + IP.
+    |    success clears the counter. It has two buckets: "max_attempts" keyed on
+    |    the normalized email + IP (the tight per-origin limit), and
+    |    "account_max_attempts" keyed on the email alone — an IP-independent cap so
+    |    a distributed attacker can't get "max_attempts" guesses per IP against one
+    |    account. Keep account_max_attempts > max_attempts (legit multi-device users).
     |    "ip_max_attempts" is a separate coarse per-IP cap on ALL login requests,
     |    so password spraying (varying the email) can't slip past the per-account
     |    limit.
@@ -135,6 +139,7 @@ return [
             'max_attempts' => (int) env('LUKK_LOGIN_MAX_ATTEMPTS', 5),
             'decay_seconds' => (int) env('LUKK_LOGIN_DECAY', 60),
             'ip_max_attempts' => (int) env('LUKK_LOGIN_IP_MAX_ATTEMPTS', 30),
+            'account_max_attempts' => (int) env('LUKK_LOGIN_ACCOUNT_MAX_ATTEMPTS', 20),
         ],
         'two_factor' => [
             'max_attempts' => (int) env('LUKK_2FA_MAX_ATTEMPTS', 5),

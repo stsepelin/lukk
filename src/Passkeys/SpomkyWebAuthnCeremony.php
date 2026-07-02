@@ -20,6 +20,7 @@ use Webauthn\AuthenticatorAssertionResponse;
 use Webauthn\AuthenticatorAssertionResponseValidator;
 use Webauthn\AuthenticatorAttestationResponse;
 use Webauthn\AuthenticatorAttestationResponseValidator;
+use Webauthn\AuthenticatorSelectionCriteria;
 use Webauthn\CeremonyStep\CeremonyStepManagerFactory;
 use Webauthn\Denormalizer\WebauthnSerializerFactory;
 use Webauthn\PublicKeyCredential;
@@ -79,6 +80,15 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             user: PublicKeyCredentialUserEntity::create($userName, (string) $userId, $userName),
             challenge: $this->decode($challenge),
             pubKeyCredParams: [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)],
+            // Login is usernameless (empty allowCredentials → discoverable), so the credential
+            // MUST be created as a resident/discoverable key — otherwise a real authenticator
+            // stores a non-discoverable credential that passwordless login can never find. UV is
+            // requested here (advisory); it's enforced server-side at assertion (see
+            // verifyAssertion, which checks the UV flag), the operative gate.
+            authenticatorSelection: AuthenticatorSelectionCriteria::create(
+                userVerification: $this->config['user_verification'] ?? 'required',
+                residentKey: AuthenticatorSelectionCriteria::RESIDENT_KEY_REQUIREMENT_REQUIRED,
+            ),
             excludeCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $excludeCredentialIds),
         );
 
@@ -123,7 +133,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             challenge: $this->decode($challenge),
             rpId: $this->config['rp_id'],
             allowCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $allowCredentialIds),
-            userVerification: $this->config['user_verification'] ?? 'preferred',
+            userVerification: $this->config['user_verification'] ?? 'required',
         );
 
         return $this->toArray($options);
@@ -144,7 +154,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             $options = PublicKeyCredentialRequestOptions::create(
                 challenge: $this->decode($challenge),
                 rpId: $this->config['rp_id'],
-                userVerification: $this->config['user_verification'] ?? 'preferred',
+                userVerification: $this->config['user_verification'] ?? 'required',
             );
 
             // Usernameless: the user is resolved from our credential_id→userId mapping, so pass null here.

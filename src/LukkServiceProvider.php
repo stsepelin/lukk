@@ -154,7 +154,7 @@ class LukkServiceProvider extends ServiceProvider
                 'rp_id' => $passkeys['rp_id'],
                 'rp_name' => $passkeys['rp_name'] ?? $this->appName(),
                 'origins' => $passkeys['origins'],
-                'user_verification' => $passkeys['user_verification'] ?? 'preferred',
+                'user_verification' => $passkeys['user_verification'] ?? 'required',
             ]);
         });
     }
@@ -194,8 +194,9 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
-            (int) $this->config()['rate_limits']['login']['max_attempts'],
-            (int) $this->config()['rate_limits']['login']['decay_seconds'],
+            (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
+            (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
+            (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
         ));
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProvider(), $app->make(LoginRateLimiter::class)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProvider()));
