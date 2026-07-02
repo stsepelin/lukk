@@ -154,7 +154,7 @@ class LukkServiceProvider extends ServiceProvider
                 'rp_id' => $passkeys['rp_id'],
                 'rp_name' => $passkeys['rp_name'] ?? $this->appName(),
                 'origins' => $passkeys['origins'],
-                'user_verification' => $passkeys['user_verification'] ?? 'preferred',
+                'user_verification' => $passkeys['user_verification'] ?? 'required',
             ]);
         });
     }
