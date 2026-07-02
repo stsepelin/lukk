@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional `Lukk\Http\Resources\UserResource` — an extendable base API Resource for your `user.endpoint` that emits the fields the lukk-js client reads (the identifier + a derived `email_verified` boolean), so `useLukkAuth().user` / `verified` work out of the box. Extend it and override `fields()` to add your own; a bare model or your own resource still works too (lukk doesn't own your user endpoint — this is a convenience).
+
 ## [0.1.4] - 2026-07-01
 
 ### Added

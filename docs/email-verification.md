@@ -109,6 +109,9 @@ The email link points at the **API** and redirects to your **SPA** (`frontend_ur
 
 On the client, the [lukk-js `useLukkEmailVerification` composable](https://stsepelin.github.io/lukk-js/) drives the resend + the post-redirect sync.
 
+> [!NOTE]
+> **Exposing the verified state to the client.** lukk-js reads `email_verified_at` (or a boolean `email_verified`) off your `user.endpoint` response to drive its `verified` state — so make sure your user resource **includes** that field. The optional [`Lukk\Http\Resources\UserResource`](authentication.md#user-endpoint) emits a derived `email_verified` boolean for you; a bare Eloquent model already serializes `email_verified_at`.
+
 <a name="security-notes"></a>
 ## Security notes
 
