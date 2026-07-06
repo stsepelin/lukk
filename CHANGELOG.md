@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`refresh_tokens` schema: added a nullable `guard` column** (for multi-guard family isolation; it stays null and unused under a single guard). ⚠️ **Pre-1.0 schema change** — because lukk is `0.x` with no stable installs, this was folded into the existing `create_refresh_tokens_table` migration rather than shipped as a separate one. **Fresh installs are unaffected** (publishing `lukk-migrations` creates the column). A pre-release install that already ran the old migration must add the column manually — `ALTER TABLE refresh_tokens ADD COLUMN guard VARCHAR(255) NULL` — or drop and re-run the migration. Future schema changes (post-1.0) will ship as additive migrations.
+- **`refresh_tokens` schema: added a nullable `guard` column** (for multi-guard family isolation; it stays null and unused under a single guard). ⚠️ **Pre-1.0 schema change** — because lukk is `0.x` with no stable installs, this was folded into the existing `create_refresh_tokens_table` migration rather than shipped as a separate one. **Fresh installs are unaffected** (publishing `lukk-migrations` creates the column). A pre-release install that already ran the old migration must add the column manually — `ALTER TABLE refresh_tokens ADD COLUMN guard VARCHAR(255) NULL` — or drop and re-run the migration. See the [UPGRADE guide](UPGRADE.md#upgrading-to-040-from-03x). Future schema changes (post-1.0) will ship as additive migrations.
 
 ## [0.3.0] - 2026-07-02
 

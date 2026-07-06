@@ -11,7 +11,7 @@ Minimal-dependency JWT authentication for **first-party Laravel apps** (Laravel 
 
 > **Unofficial, independent package.** Not affiliated with, endorsed by, or maintained by the Laravel team. "Laravel", "Sanctum", and "Fortify" are referenced only to describe compatibility and design influence; they are trademarks of their respective owners.
 
-> **Pre-1.0 — expect breaking changes.** lukk is in the `0.x` series. The core is production-minded and fully tested (100% coverage), but per [semantic versioning for initial development](https://semver.org/#spec-item-4), the public API, config, and **database schema may change between minor versions** without a major bump. Pin an exact version and read the [CHANGELOG](CHANGELOG.md) before upgrading — a release may require re-running migrations. The 1.0 release will mark API/schema stability.
+> **Pre-1.0 — expect breaking changes.** lukk is in the `0.x` series. The core is production-minded and fully tested (100% coverage), but per [semantic versioning for initial development](https://semver.org/#spec-item-4), the public API, config, and **database schema may change between minor versions** without a major bump. Pin an exact version and read the [UPGRADE guide](UPGRADE.md) (and the [CHANGELOG](CHANGELOG.md)) before upgrading — a release may require re-running migrations. The 1.0 release will mark API/schema stability.
 
 ## Features
 
