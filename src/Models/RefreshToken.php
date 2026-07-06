@@ -11,6 +11,7 @@ use Illuminate\Support\Carbon;
 /**
  * @property string $id
  * @property int|string $user_id
+ * @property ?string $guard
  * @property string $family_id
  * @property string $token_hash
  * @property ?string $previous_id

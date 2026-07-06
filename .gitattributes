@@ -8,6 +8,7 @@
 /CHANGELOG.md     export-ignore
 /CLAUDE.md        export-ignore
 /ROADMAP.md       export-ignore
+/UPGRADE.md       export-ignore
 /docs             export-ignore
 /tests            export-ignore
 /phpunit.xml.dist export-ignore

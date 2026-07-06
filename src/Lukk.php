@@ -7,7 +7,9 @@ namespace Lukk;
 use Closure;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
+use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
+use RuntimeException;
 
 /**
  * Static configuration hub (Sanctum style). Register hooks from your
@@ -104,6 +106,119 @@ class Lukk
     public static function refreshTokenModel(): string
     {
         return self::$refreshTokenModel ?? RefreshToken::class;
+    }
+
+    /**
+     * The resolved config for a guard: the top-level `lukk` block for the default guard, or a
+     * `guards.{name}` override deep-merged over it. `null` resolves the current guard.
+     *
+     * @return array<string, mixed>
+     */
+    public static function guardConfig(?string $name = null): array
+    {
+        $lukk = (array) config('lukk');
+        $name ??= self::currentGuard();
+
+        if ($name === (string) ($lukk['guard'] ?? 'api')) {
+            return $lukk;
+        }
+
+        $merged = LukkServiceProvider::mergeConfig($lukk, (array) ($lukk['guards'][$name] ?? []));
+        unset($merged['guards']);
+
+        return $merged;
+    }
+
+    /**
+     * Every lukk guard name — the default guard plus any declared under `lukk.guards`.
+     *
+     * @return array<int, string>
+     */
+    public static function guardNames(): array
+    {
+        $lukk = (array) config('lukk');
+
+        return array_values(array_unique([
+            (string) ($lukk['guard'] ?? 'api'),
+            ...array_keys((array) ($lukk['guards'] ?? [])),
+        ]));
+    }
+
+    /** Whether more than the default guard is configured (any `lukk.guards` entries). */
+    public static function isMultiGuard(): bool
+    {
+        return ! empty(config('lukk.guards'));
+    }
+
+    /** The lukk guard active for the current request (default: `config('lukk.guard')`). */
+    public static function currentGuard(): string
+    {
+        return app(GuardContext::class)->current();
+    }
+
+    /** Set the active guard for the current request (used by the per-guard route middleware). */
+    public static function useGuard(?string $name): void
+    {
+        app(GuardContext::class)->use($name);
+    }
+
+    /** Run a callback with a specific guard active, restoring the previous one afterwards. */
+    public static function onGuard(string $name, Closure $callback): mixed
+    {
+        return app(GuardContext::class)->on($name, $callback);
+    }
+
+    /**
+     * Fail fast on an unsafe multi-guard config (called at boot). Every guard must:
+     *   - be a `lukk-jwt` guard in config/auth.php (extra guards);
+     *   - carry a NON-EMPTY, DISTINCT audience — the token-isolation control, so a token for one
+     *     guard is rejected by another regardless of shared keys (RFC 8725 §3.9 / ASVS §9.2.3–9.2.4);
+     *   - mount at a distinct host+path, so one guard's routes can't silently shadow another's.
+     */
+    public static function assertGuardsIsolated(): void
+    {
+        if (! self::isMultiGuard()) {
+            return;
+        }
+
+        $default = (string) (config('lukk.guard') ?? 'api');
+        $authGuards = (array) config('auth.guards', []);
+        $audienceOwners = [];
+        $pathMounts = [];
+
+        foreach (self::guardNames() as $name) {
+            if ($name !== $default && ($authGuards[$name]['driver'] ?? null) !== 'lukk-jwt') {
+                throw new RuntimeException("lukk guard [{$name}] must be declared in config/auth.php with driver 'lukk-jwt'.");
+            }
+
+            $cfg = self::guardConfig($name);
+
+            $audiences = array_values(array_filter((array) ($cfg['audience'] ?? [])));
+            if ($audiences === []) {
+                throw new RuntimeException("lukk guard [{$name}] must declare a non-empty audience — it is what isolates its tokens from other guards.");
+            }
+
+            foreach ($audiences as $audience) {
+                if (isset($audienceOwners[$audience])) {
+                    throw new RuntimeException("lukk guards [{$audienceOwners[$audience]}] and [{$name}] share the audience [{$audience}]; each guard needs a distinct audience so their tokens can't cross.");
+                }
+                $audienceOwners[$audience] = $name;
+            }
+
+            // A null domain is a wildcard (`Route::domain(null)` matches every host), so two guards
+            // collide on the same path when they share a domain OR either omits one — the wildcard
+            // group (mounted first) would shadow the other's routes.
+            $path = (string) ($cfg['path'] ?? 'auth');
+            $domain = in_array($cfg['domain'] ?? null, [null, ''], true) ? null : (string) $cfg['domain'];
+
+            foreach ($pathMounts[$path] ?? [] as [$otherName, $otherDomain]) {
+                if ($domain === null || $otherDomain === null || $domain === $otherDomain) {
+                    throw new RuntimeException("lukk guards [{$otherName}] and [{$name}] can serve the same host and path (a null domain matches every host); give them distinct domains and/or paths.");
+                }
+            }
+
+            $pathMounts[$path][] = [$name, $domain];
+        }
     }
 
     /**

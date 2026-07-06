@@ -40,6 +40,18 @@ it('replaces an existing secret in place with --force', function () {
     expect(substr_count($contents, 'LUKK_SECRET='))->toBe(1);
 });
 
+it('writes a per-guard secret to LUKK_<GUARD>_SECRET with --guard', function () {
+    file_put_contents($this->envPath, "APP_NAME=Lukk\n");
+
+    $this->artisan('lukk:secret', ['--guard' => 'admin'])->assertSuccessful();
+
+    $contents = file_get_contents($this->envPath);
+    expect($contents)->toMatch('/^LUKK_ADMIN_SECRET=[0-9a-f]{64}$/m')
+        ->not->toContain('LUKK_SECRET=');
+    // The running config reflects the new per-guard key.
+    expect(strlen((string) config('lukk.guards.admin.secret')))->toBe(64);
+});
+
 it('prints the secret without writing when given --show', function () {
     file_put_contents($this->envPath, "LUKK_SECRET=keepme\n");
 

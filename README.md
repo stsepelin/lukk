@@ -11,6 +11,8 @@ Minimal-dependency JWT authentication for **first-party Laravel apps** (Laravel 
 
 > **Unofficial, independent package.** Not affiliated with, endorsed by, or maintained by the Laravel team. "Laravel", "Sanctum", and "Fortify" are referenced only to describe compatibility and design influence; they are trademarks of their respective owners.
 
+> **Pre-1.0 — expect breaking changes.** lukk is in the `0.x` series. The core is production-minded and fully tested (100% coverage), but per [semantic versioning for initial development](https://semver.org/#spec-item-4), the public API, config, and **database schema may change between minor versions** without a major bump. Pin an exact version and read the [UPGRADE guide](UPGRADE.md) (and the [CHANGELOG](CHANGELOG.md)) before upgrading — a release may require re-running migrations. The 1.0 release will mark API/schema stability.
+
 ## Features
 
 - **Short-lived access JWTs** (HS256, 15 min) — stateless, verified on every request with the algorithm pinned and `iss`/`aud` asserted.
@@ -79,6 +81,18 @@ lukk (the Laravel package) and [lukk-js](https://github.com/stsepelin/lukk-js) (
 composer install
 vendor/bin/pest
 ```
+
+## Acknowledgements
+
+lukk stands on the shoulders of the Laravel ecosystem, and its design is a deliberate synthesis of ideas from the first-party packages. Sincere thanks to their authors and maintainers — lukk isn't affiliated with or endorsed by any of them (see the note at the top); these are simply the works that shaped it:
+
+- **[Laravel Sanctum](https://laravel.com/docs/sanctum)** — the architectural model. `HasRefreshTokens` is the `HasApiTokens` analog, the static `Lukk` hub mirrors Sanctum's configuration style, and the publish-only migration convention is borrowed wholesale.
+- **[Laravel Fortify](https://laravel.com/docs/fortify)** — the customization philosophy: single-purpose actions + rebindable response contracts, hooks like `Lukk::registerUsing()` (à la `Fortify::createUsersUsing()`), the `Password::defaults()` policy, and the configurable login identifier.
+- **[Laravel Passport](https://laravel.com/docs/passport)** — conventions for token issuance, publish-only migrations, and keeping models extensible.
+- **[Laravel Jetstream](https://jetstream.laravel.com) & [Breeze](https://laravel.com/docs/starter-kits)** — the reference for two-factor + single-use recovery codes and step-up ("sudo") confirmation, and — with **[Inertia](https://inertiajs.com)** and the Nuxt ecosystem — the first-party client-side patterns that shaped [lukk-js](https://github.com/stsepelin/lukk-js).
+- **[tymon/jwt-auth](https://github.com/tymondesigns/jwt-auth)** — the established Laravel JWT package; its `lock_subject` approach to cross-guard isolation directly informed lukk's multi-guard design.
+
+And the libraries lukk is built on: **[firebase/php-jwt](https://github.com/firebase/php-jwt)** (the sole runtime dependency), **[pragmarx/google2fa](https://github.com/antonioribeiro/google2fa)** (TOTP), and **[web-auth/webauthn-lib](https://github.com/web-auth/webauthn-framework)** by Spomky-Labs (passkeys) — plus the [Laravel](https://laravel.com) framework and community that make all of this possible. 🙏
 
 ## License
 

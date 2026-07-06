@@ -9,6 +9,7 @@ use Illuminate\Console\Command;
 class GenerateSecretCommand extends Command
 {
     protected $signature = 'lukk:secret
+        {--guard= : Generate the secret for a specific guard (writes LUKK_<GUARD>_SECRET)}
         {--show : Display the generated secret instead of writing it to the .env file}
         {--f|force : Overwrite an existing secret without confirmation}';
 
@@ -25,20 +26,41 @@ class GenerateSecretCommand extends Command
             return self::SUCCESS;
         }
 
-        if (! $this->setSecretInEnvironmentFile($key)) {
+        [$envVar, $configKey] = $this->target();
+
+        if (! $this->setSecretInEnvironmentFile($key, $envVar, $configKey)) {
             return self::FAILURE;
         }
 
-        $this->laravel['config']['lukk.secret'] = $key;
+        $this->laravel['config'][$configKey] = $key;
 
         $this->components->info('Lukk signing secret set successfully.');
 
         return self::SUCCESS;
     }
 
-    protected function setSecretInEnvironmentFile(string $key): bool
+    /**
+     * The .env variable and config key to write — the default guard's `LUKK_SECRET`/`lukk.secret`,
+     * or a per-guard `LUKK_<GUARD>_SECRET`/`lukk.guards.<guard>.secret` when `--guard` is given.
+     *
+     * @return array{0:string,1:string}
+     */
+    protected function target(): array
     {
-        $current = (string) ($this->laravel['config']['lukk.secret'] ?? '');
+        $guard = (string) ($this->option('guard') ?? '');
+
+        if ($guard === '') {
+            return ['LUKK_SECRET', 'lukk.secret'];
+        }
+
+        $envVar = 'LUKK_'.strtoupper(str_replace('-', '_', $guard)).'_SECRET';
+
+        return [$envVar, "lukk.guards.{$guard}.secret"];
+    }
+
+    protected function setSecretInEnvironmentFile(string $key, string $envVar, string $configKey): bool
+    {
+        $current = (string) ($this->laravel['config'][$configKey] ?? '');
 
         if ($current !== '' && ! $this->option('force')
             && ! $this->confirm('A Lukk secret already exists. Overwrite it?')) {
@@ -55,10 +77,10 @@ class GenerateSecretCommand extends Command
 
         $contents = file_get_contents($path);
 
-        if (preg_match('/^LUKK_SECRET=/m', $contents) === 1) {
-            $contents = preg_replace('/^LUKK_SECRET=.*$/m', 'LUKK_SECRET='.$key, $contents);
+        if (preg_match("/^{$envVar}=/m", $contents) === 1) {
+            $contents = preg_replace("/^{$envVar}=.*$/m", "{$envVar}={$key}", $contents);
         } else {
-            $contents = rtrim($contents, "\n")."\n\nLUKK_SECRET=".$key."\n";
+            $contents = rtrim($contents, "\n")."\n\n{$envVar}={$key}\n";
         }
 
         file_put_contents($path, $contents);
