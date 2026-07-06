@@ -41,6 +41,8 @@ class TestCase extends Orchestra
         // Register the email-verification routes/wiring. Login gating stays off
         // (block_unverified_login defaults false), so password-only tests are unaffected.
         $app['config']->set('lukk.features.email_verification', true);
+        // Registration: enable the first-party register endpoint.
+        $app['config']->set('lukk.features.registration', true);
         // Password reset: enable the feature + configure the broker it builds on.
         $app['config']->set('lukk.features.password_reset', true);
         $app['config']->set('auth.defaults.passwords', 'users');
@@ -58,15 +60,7 @@ class TestCase extends Orchestra
         // core refresh_tokens migration here for the suite.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
-        Schema::create('users', function (Blueprint $table) {
-            $table->id();
-            $table->string('email')->unique();
-            $table->string('password');
-            $table->text('two_factor_secret')->nullable();
-            $table->text('two_factor_recovery_codes')->nullable();
-            $table->timestamp('two_factor_confirmed_at')->nullable();
-            $table->timestamp('email_verified_at')->nullable();
-        });
+        Schema::create('users', fn (Blueprint $table) => $this->defineUsersTable($table));
 
         Schema::create('password_reset_tokens', function (Blueprint $table) {
             $table->string('email')->primary();
@@ -85,5 +79,21 @@ class TestCase extends Orchestra
             $table->timestamp('last_used_at')->nullable();
             $table->timestamps();
         });
+    }
+
+    /**
+     * The stock-Laravel `users` shape: `name` + a required unique `email`. A subclass can
+     * override this (e.g. UsernameTestCase) to model a different identifier column.
+     */
+    protected function defineUsersTable(Blueprint $table): void
+    {
+        $table->id();
+        $table->string('name')->nullable();
+        $table->string('email')->unique();
+        $table->string('password');
+        $table->text('two_factor_secret')->nullable();
+        $table->text('two_factor_recovery_codes')->nullable();
+        $table->timestamp('two_factor_confirmed_at')->nullable();
+        $table->timestamp('email_verified_at')->nullable();
     }
 }

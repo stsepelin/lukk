@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Registration** (opt-in via `features.registration`). A first-party `POST /auth/register` that mirrors login: it creates the user, fires `Illuminate\Auth\Events\Registered` (so the email-verification listener sends the link), and returns the same token pair a login yields (BFF or cookie mode) — or a 2FA challenge if the new user is already enrolled, or a `201` no-session shape when the account can't log in yet. The built-in default create works with the **stock Laravel `users` shape out of the box** (`name` + the identifier + a hashed `password`). Fully customizable: `Lukk::registerUsing()` owns user creation (closure or invokable class-string), `Lukk::registerValidation()` (or rebinding `RegisterRequest`) owns the fields/rules, and `RegisterResponse` is rebindable like the other response contracts. `registration.login` (default true) toggles auto-login vs. create-only (`201`, sign in separately). Per-IP throttled (`lukk-register`); a duplicate identifier is a `422` (the only enumeration a registration form inherently has). Backward compatible — off by default.
+- **Configurable login identifier** (`lukk.username`, default `email`). Fortify-style: set it to `username` (or any unique column) and both login and registration authenticate by that column instead of email — the login request field, the constant-time credential lookup, the per-account throttle bucket, and the registration validation/create all follow it. Defaults to `email`, so existing behavior is unchanged.
+
 ## [0.3.0] - 2026-07-02
 
 ### Added

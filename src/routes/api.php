@@ -17,6 +17,7 @@ use Lukk\Http\Controllers\PasskeyLoginOptionsController;
 use Lukk\Http\Controllers\PasskeyRegistrationOptionsController;
 use Lukk\Http\Controllers\PasswordResetLinkController;
 use Lukk\Http\Controllers\RecoveryCodeController;
+use Lukk\Http\Controllers\RegisteredUserController;
 use Lukk\Http\Controllers\SessionController;
 use Lukk\Http\Controllers\TokenController;
 use Lukk\Http\Controllers\TwoFactorAuthenticationController;
@@ -33,6 +34,11 @@ Route::prefix((string) config('lukk.path', 'auth'))
 
         // Public key set (RFC 7517) — populated only under an asymmetric algorithm.
         Route::get('jwks', JwksController::class);
+
+        if (config('lukk.features.registration')) {
+            // Public: create an account and (unless verification blocks it) start a session.
+            Route::post('register', [RegisteredUserController::class, 'store'])->middleware('throttle:lukk-register');
+        }
 
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');

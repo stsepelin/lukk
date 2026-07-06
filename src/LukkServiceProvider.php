@@ -23,6 +23,7 @@ use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Actions\RegenerateRecoveryCodes;
+use Lukk\Actions\Register;
 use Lukk\Actions\ResetPassword;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeOtherSessions;
@@ -44,6 +45,7 @@ use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshResponse;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Contracts\RegisterResponse;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Contracts\TwoFactorChallengeResponse;
@@ -56,6 +58,7 @@ use Lukk\Http\Responses\EmailVerificationResponse as EmailVerificationResponseIm
 use Lukk\Http\Responses\LoginResponse as LoginResponseImpl;
 use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
 use Lukk\Http\Responses\RefreshResponse as RefreshResponseImpl;
+use Lukk\Http\Responses\RegisterResponse as RegisterResponseImpl;
 use Lukk\Http\Responses\TwoFactorChallengeResponse as TwoFactorChallengeResponseImpl;
 use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyChallengeStore;
@@ -204,11 +207,14 @@ class LukkServiceProvider extends ServiceProvider
             (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
             (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
             (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
+            (string) ($this->config()['username'] ?? 'email'),
         ));
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProvider(), $app->make(LoginRateLimiter::class)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProvider()));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
+        $this->app->bind(Register::class, fn () => new Register(
+            $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
 
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             $app->make(TwoFactorProvider::class), (int) $this->config()['two_factor']['recovery_codes']));
@@ -263,6 +269,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(LogoutResponse::class, LogoutResponseImpl::class);
         $this->app->bind(TwoFactorChallengeResponse::class, TwoFactorChallengeResponseImpl::class);
         $this->app->bind(EmailVerificationResponse::class, EmailVerificationResponseImpl::class);
+        $this->app->bind(RegisterResponse::class, RegisterResponseImpl::class);
     }
 
     private function registerGuard(): void
@@ -286,7 +293,7 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
-        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset'] as $key => $name) {
+        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
 
@@ -376,5 +383,18 @@ class LukkServiceProvider extends ServiceProvider
     private function userProvider(): ?UserProvider
     {
         return $this->app->make('auth')->createUserProvider($this->config()['user_provider'] ?? null);
+    }
+
+    /**
+     * The Eloquent user model behind the configured provider — the default target for
+     * registration's create (used only when no Lukk::registerUsing hook is set).
+     *
+     * @return class-string
+     */
+    private function userModelClass(): string
+    {
+        $provider = $this->config()['user_provider'] ?? 'users';
+
+        return (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
     }
 }
