@@ -27,6 +27,7 @@ class LoginRateLimiter
         private readonly int $decaySeconds,
         private readonly int $accountMaxAttempts,
         private readonly string $username = 'email',
+        private readonly string $guard = 'api',
     ) {}
 
     public function tooManyAttempts(Request $request): bool
@@ -58,13 +59,14 @@ class LoginRateLimiter
 
     public function key(Request $request): string
     {
-        return $this->identifier($request).'|'.$request->ip();
+        return $this->guard.'|'.$this->identifier($request).'|'.$request->ip();
     }
 
-    /** IP-independent per-account bucket (distributed brute-force cap). */
+    /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood
+     *  on one guard's login can't lock a colliding account out of another guard. */
     public function accountKey(Request $request): string
     {
-        return 'acct|'.$this->identifier($request);
+        return 'acct|'.$this->guard.'|'.$this->identifier($request);
     }
 
     private function identifier(Request $request): string

@@ -51,9 +51,11 @@ use Lukk\Contracts\TokenVerifier;
 use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Guards\GuardContext;
 use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Http\Middleware\RequireConfirmation;
 use Lukk\Http\Middleware\RequireVerifiedEmail;
+use Lukk\Http\Middleware\SetGuard;
 use Lukk\Http\Responses\EmailVerificationResponse as EmailVerificationResponseImpl;
 use Lukk\Http\Responses\LoginResponse as LoginResponseImpl;
 use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
@@ -88,6 +90,7 @@ class LukkServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->registerGuard();
+        Lukk::assertGuardsIsolated();
         $this->registerRateLimiters();
 
         $router = $this->app->make('router');
@@ -95,6 +98,8 @@ class LukkServiceProvider extends ServiceProvider
         $router->aliasMiddleware('lukk.verified', RequireVerifiedEmail::class);
         // Opt-in alias for a consumer's own `auth:api` routes; see docs/installation.md.
         $router->aliasMiddleware('lukk.force-json', ForceJsonRequest::class);
+        // Stamps the active guard per per-guard route group (multi-guard).
+        $router->aliasMiddleware('lukk.set-guard', SetGuard::class);
 
         // `ForceJsonRequest` must sort before `Authenticate` (high in the framework
         // priority). Registered unconditionally so the alias also works in a verify-only
@@ -136,11 +141,19 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function registerTokens(): void
     {
+        // The active-guard holder (scoped → reset per request in Octane; per-request in FPM) + a
+        // shared denylist (jti/fid are UUIDs, so revocation entries never collide across guards).
+        $this->app->scoped(GuardContext::class);
         $this->app->singleton(Denylist::class, fn () => new CacheDenylist($this->config()));
-        $this->app->singleton(TokenIssuer::class, fn () => new FirebaseTokenIssuer($this->config()));
-        $this->app->singleton(TokenVerifier::class, fn ($app) => new FirebaseTokenVerifier($this->config(), $app->make(Denylist::class)));
-        $this->app->singleton(ChallengeToken::class, fn ($app) => new ChallengeToken($this->config(), $app->make(Denylist::class)));
-        $this->app->singleton(RefreshTokenRepository::class, DatabaseRefreshTokenRepository::class);
+
+        // Per-guard crypto identity: each resolves from the CURRENT guard's config (its own
+        // secret/keys/issuer/audience/ttls), so a token minted for one guard can't be issued or
+        // verified as another. Bind (not singleton) so the current guard is honored per request.
+        $this->app->bind(TokenIssuer::class, fn () => new FirebaseTokenIssuer(Lukk::guardConfig()));
+        $this->app->bind(TokenVerifier::class, fn ($app) => new FirebaseTokenVerifier(Lukk::guardConfig(), $app->make(Denylist::class)));
+        $this->app->bind(ChallengeToken::class, fn ($app) => new ChallengeToken(Lukk::guardConfig(), $app->make(Denylist::class)));
+        $this->app->bind(RefreshTokenRepository::class, fn () => new DatabaseRefreshTokenRepository(
+            Lukk::isMultiGuard() ? Lukk::currentGuard() : null));
     }
 
     /**
@@ -191,16 +204,19 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function registerActions(): void
     {
+        // Session/rotation/revocation actions run against the CURRENT guard's config + (via the
+        // bindings above) its issuer + guard-scoped repository — so a session is minted, rotated,
+        // and revoked entirely within one guard's family of tokens.
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), $this->config()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig()));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), $this->config()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), $this->config()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RevokeOtherSessions::class, fn ($app) => new RevokeOtherSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), $this->config()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), $app->make(RevokeSession::class), $this->config()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), $app->make(RevokeSession::class), Lukk::guardConfig()));
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
@@ -208,9 +224,12 @@ class LukkServiceProvider extends ServiceProvider
             (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
             (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
             (string) ($this->config()['username'] ?? 'email'),
+            Lukk::currentGuard(),
         ));
-        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProvider(), $app->make(LoginRateLimiter::class)));
-        $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProvider()));
+        // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
+        // admin login authenticates against the admins table, not the users table.
+        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class)));
+        $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProviderFor(Lukk::currentGuard())));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
         $this->app->bind(Register::class, fn () => new Register(
@@ -276,7 +295,13 @@ class LukkServiceProvider extends ServiceProvider
     {
         Auth::extend('lukk-jwt', function ($app, $name, array $config) {
             $provider = $app->make('auth')->createUserProvider($config['provider'] ?? null);
-            $guard = new JwtGuard($app->make(TokenVerifier::class), $provider);
+
+            // Verify with THIS guard's own crypto identity (its secret/keys + audience allowlist),
+            // resolved by the guard name — never the shared/current-guard verifier. A token minted
+            // for another guard fails the audience (and signature, if keys differ) check and returns
+            // null before any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
+            $verifier = new FirebaseTokenVerifier(Lukk::guardConfig($name), $app->make(Denylist::class));
+            $guard = new JwtGuard($verifier, $provider);
 
             return new RequestGuard(fn ($request) => $guard($request), $app->make('request'), $provider);
         });
@@ -308,6 +333,20 @@ class LukkServiceProvider extends ServiceProvider
             return (new Limit(maxAttempts: (int) ($limit['ip_max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
                 ->by($request->ip());
         });
+
+        // Per-guard login/refresh limiters for the additional guards' core-session routes, so an
+        // admin login flood can't consume the users guard's budget (each keyed per IP).
+        foreach (array_keys((array) ($this->config()['guards'] ?? [])) as $guardName) {
+            $limits = (array) (Lukk::guardConfig((string) $guardName)['rate_limits'] ?? []);
+
+            $limiter->for("lukk-{$guardName}-login", fn ($request) => (new Limit(
+                maxAttempts: (int) ($limits['login']['ip_max_attempts'] ?? 30),
+                decaySeconds: (int) ($limits['login']['decay_seconds'] ?? 60)))->by($request->ip()));
+
+            $limiter->for("lukk-{$guardName}-refresh", fn ($request) => (new Limit(
+                maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
+                decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by($request->ip()));
+        }
     }
 
     private function registerPublishing(): void
@@ -383,6 +422,22 @@ class LukkServiceProvider extends ServiceProvider
     private function userProvider(): ?UserProvider
     {
         return $this->app->make('auth')->createUserProvider($this->config()['user_provider'] ?? null);
+    }
+
+    /**
+     * The user provider for a given guard. The default guard uses `lukk.user_provider`; an extra
+     * guard reuses its `config/auth.php` provider (single source of truth) — so lukk never
+     * duplicates the provider, and login resolves the right table per guard.
+     */
+    private function userProviderFor(string $guard): ?UserProvider
+    {
+        $config = $this->app->make('config');
+
+        $provider = $guard === (string) ($this->config()['guard'] ?? 'api')
+            ? ($this->config()['user_provider'] ?? null)
+            : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? null);
+
+        return $this->app->make('auth')->createUserProvider($provider);
     }
 
     /**

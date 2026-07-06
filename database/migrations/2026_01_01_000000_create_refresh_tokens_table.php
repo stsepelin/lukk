@@ -16,6 +16,11 @@ return new class extends Migration
             // Change to ulid()/uuid() here if your users use non-integer keys.
             $table->unsignedBigInteger('user_id')->index();
 
+            // The guard a family belongs to (multi-guard isolation). Null on the default guard;
+            // an extra guard (e.g. `admin`) stamps its name so its families can't be seen, rotated,
+            // or revoked by another guard even when user ids collide. Unused under a single guard.
+            $table->string('guard')->nullable();
+
             $table->uuid('family_id')->index();          // stable across a rotation chain
             $table->char('token_hash', 64)->unique();    // sha256(opaque secret)
             $table->ulid('previous_id')->nullable();     // audit chain pointer

@@ -12,11 +12,18 @@ use Lukk\Lukk;
 use Lukk\Support\RefreshTokenRecord;
 
 /**
- * Default storage: the refresh_tokens table via Eloquent. The model is
- * resolved through Lukk::refreshTokenModel() so apps can swap it.
+ * Default storage: the refresh_tokens table via Eloquent. The model is resolved through
+ * Lukk::refreshTokenModel() so apps can swap it.
+ *
+ * Multi-guard: constructed with a `$guard` name, every read/write is scoped by the `guard` column
+ * so one guard's families are invisible to another even when user ids collide (users.id ==
+ * admins.id). A `null` guard (the single-guard default) applies no scope and touches no `guard`
+ * column — identical to the pre-multi-guard behavior and schema.
  */
 class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 {
+    public function __construct(private readonly ?string $guard = null) {}
+
     public function transaction(Closure $callback): mixed
     {
         return DB::transaction($callback);
@@ -25,11 +32,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     public function findByHashForUpdate(string $hash): ?RefreshTokenRecord
     {
         // Non-locking existence check first: `FOR UPDATE` on an absent unique value gap-locks under MySQL REPEATABLE READ.
-        if (! $this->query()->where('token_hash', $hash)->exists()) {
+        if (! $this->scoped()->where('token_hash', $hash)->exists()) {
             return null;
         }
 
-        $row = $this->query()
+        $row = $this->scoped()
             ->where('token_hash', $hash)
             ->lockForUpdate()
             ->first();
@@ -46,23 +53,30 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt): void
     {
-        $this->query()->create([
+        $attributes = [
             'user_id' => $userId,
             'family_id' => $familyId,
             'previous_id' => $previousId,
             'token_hash' => $tokenHash,
             'expires_at' => $expiresAt, // Eloquent datetime cast accepts a unix timestamp
-        ]);
+        ];
+
+        // Only stamp the guard column under multi-guard; a single-guard schema has no such column.
+        if ($this->guard !== null) {
+            $attributes['guard'] = $this->guard;
+        }
+
+        $this->query()->create($attributes);
     }
 
     public function markRotated(string $id): void
     {
-        $this->query()->whereKey($id)->update(['rotated_at' => now()]);
+        $this->scoped()->whereKey($id)->update(['rotated_at' => now()]);
     }
 
     public function revokeFamily(string $familyId): void
     {
-        $this->query()
+        $this->scoped()
             ->where('family_id', $familyId)
             ->whereNull('revoked_at')
             ->update(['revoked_at' => now()]);
@@ -90,9 +104,9 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
         // Atomic: a family created between the read and update would be revoked but never returned (so never denylisted).
         return DB::transaction(function () use ($constrain) {
-            $ids = $constrain($this->query())->distinct()->pluck('family_id')->all();
+            $ids = $constrain($this->scoped())->distinct()->pluck('family_id')->all();
 
-            $constrain($this->query())->update(['revoked_at' => now()]);
+            $constrain($this->scoped())->update(['revoked_at' => now()]);
 
             return $ids;
         });
@@ -102,14 +116,26 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     {
         // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one still
         // resolves to `reuse` (fires the reuse event + family cascade) instead of a generic `unknown`
-        // reject — they self-delete once they expire.
+        // reject — they self-delete once they expire. Guard-agnostic: prunes every guard's expired rows.
         return $this->query()->where('expires_at', '<', now())->delete();
     }
 
-    private function query(): Builder
+    /**
+     * The base query on the configured refresh-token model. Protected so a consumer can subclass
+     * with a different model/table without re-implementing the repository.
+     */
+    protected function query(): Builder
     {
         $model = Lukk::refreshTokenModel();
 
         return $model::query();
+    }
+
+    /** {@see query()} scoped to this repository's guard (no scope when guard is null). */
+    private function scoped(): Builder
+    {
+        $query = $this->query();
+
+        return $this->guard === null ? $query : $query->where('guard', $this->guard);
     }
 }

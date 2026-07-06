@@ -24,10 +24,35 @@ use Lukk\Http\Controllers\TwoFactorAuthenticationController;
 use Lukk\Http\Controllers\TwoFactorChallengedSessionController;
 use Lukk\Http\Controllers\VerifyEmailController;
 use Lukk\Http\Middleware\ForceJsonRequest;
+use Lukk\Lukk;
 
-// `ForceJsonRequest` renders these routes' errors as JSON regardless of host config.
-Route::prefix((string) config('lukk.path', 'auth'))
-    ->middleware(['api', ForceJsonRequest::class])
+// Additional guards (multi-audience). Mounted FIRST so a subdomain-scoped guard takes precedence
+// over the host-agnostic default guard sharing the same path. Each gets the CORE session routes
+// wired to its own `auth:{name}` + crypto identity (features stay on the default guard for now).
+foreach ((array) config('lukk.guards', []) as $guardName => $override) {
+    $cfg = Lukk::guardConfig($guardName);
+
+    Route::domain($cfg['domain'] ?? null)
+        ->prefix((string) ($cfg['path'] ?? 'auth'))
+        ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.$guardName])
+        ->group(function () use ($guardName) {
+            $guard = 'auth:'.$guardName;
+
+            Route::get('jwks', JwksController::class);
+            Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-login');
+            Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-refresh');
+            Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
+            Route::delete('sessions', [SessionController::class, 'destroy'])->middleware($guard);
+            Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware($guard);
+            Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware($guard);
+        });
+}
+
+// `ForceJsonRequest` renders these routes' errors as JSON regardless of host config. This is the
+// DEFAULT guard — it carries every feature; `lukk.set-guard` resets the active guard each request.
+Route::domain(config('lukk.domain'))
+    ->prefix((string) config('lukk.path', 'auth'))
+    ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.config('lukk.guard', 'api')])
     ->group(function () {
         $guard = 'auth:'.config('lukk.guard', 'api');
         $confirmed = [$guard, 'lukk.confirm'];
@@ -82,7 +107,8 @@ Route::prefix((string) config('lukk.path', 'auth'))
 // group: the `signed` URL (not `auth`) is the authority, and the controller content-negotiates a
 // browser redirect vs a 204. Gated on the feature like the routes above.
 if (config('lukk.features.email_verification')) {
-    Route::prefix((string) config('lukk.path', 'auth'))
+    Route::domain(config('lukk.domain'))
+        ->prefix((string) config('lukk.path', 'auth'))
         ->middleware(['api'])
         ->group(function () {
             Route::get('email/verify/{id}/{hash}', VerifyEmailController::class)

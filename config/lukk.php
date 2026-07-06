@@ -484,12 +484,45 @@ return [
     |--------------------------------------------------------------------------
     |
     | Whether to register the package's auth routes (login / refresh / logout /
-    | logout-all) and the URI prefix they are mounted under.
+    | logout-all), the URI prefix they mount under, and an optional host. Leave
+    | "domain" null to serve on any host, or set it (e.g. "api.example.com") to
+    | bind the routes to a subdomain — the stronger isolation for multi-guard.
     |
     */
 
     'routes' => true,
     'path' => 'auth',
+    'domain' => env('LUKK_DOMAIN'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Guards (multi-audience isolation)
+    |--------------------------------------------------------------------------
+    |
+    | lukk is single-guard by default: everything above is the DEFAULT guard
+    | (config('lukk.guard')). To serve a second isolated audience — an admin API
+    | alongside the users API — declare it here AND as a `lukk-jwt` guard in
+    | config/auth.php (whose `provider` lukk reuses). Each entry deep-merges over
+    | the top-level config, overriding only what differs:
+    |
+    |   'guards' => [
+    |       'admin' => [
+    |           'audience' => env('LUKK_ADMIN_AUDIENCE'),  // REQUIRED, distinct — the isolation
+    |           'secret'   => env('LUKK_ADMIN_SECRET'),    // optional: a separate signing key
+    |           'issuer'   => env('LUKK_ADMIN_ISSUER'),
+    |           'path'     => 'auth',                       // route prefix (with domain below)
+    |           'domain'   => 'admin.api.example.com',      // optional subdomain
+    |       ],
+    |   ],
+    |
+    | A token minted for one guard is rejected by another on the audience check
+    | (+ signature when keys differ). Each guard MUST declare a distinct, non-empty
+    | audience and mount at a distinct path/domain — lukk refuses to boot otherwise.
+    | Leave empty for a single-guard app (zero behavioral change).
+    |
+    */
+
+    'guards' => [],
 
     /*
     |--------------------------------------------------------------------------
