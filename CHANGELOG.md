@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-07
+
 ### Added
 
 - **Multiple guards** (multi-audience isolation). Declare a second isolated audience — an admin API alongside the users API — under `config('lukk.guards')` plus a `lukk-jwt` guard in `config/auth.php` (whose `provider` lukk reuses). Each guard carries its own cryptographic token identity: its own **`audience`** (required, distinct) and optionally its own `secret`/keys/`issuer`/ttls. A token minted for one guard is rejected by another on the audience check (and signature, when keys differ) — **before any user is resolved**, so it can never resolve `User::find($sub)` on the wrong guard (RFC 8725 §3.9 / OWASP ASVS 5.0 §9.2.3–9.2.4). Refresh-token families and logout-all are scoped by a nullable `guard` column, so revoking one guard's sessions can't touch another's even when user ids collide (`users.id == admins.id`). Routes auto-mount per guard under a per-guard `path` and optional **`domain`** (subdomain isolation). lukk **refuses to boot** unless every guard declares a distinct, non-empty audience and mounts at a distinct path/domain, and every extra guard is declared in `config/auth.php`. `php artisan lukk:secret --guard=admin` writes `LUKK_ADMIN_SECRET`; `HasRefreshTokens::lukkGuard()` binds a model (e.g. `Admin`) to its guard. An app with no `lukk.guards` behaves exactly as before.
@@ -132,7 +134,8 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/stsepelin/lukk/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/stsepelin/lukk/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/stsepelin/lukk/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/stsepelin/lukk/compare/v0.1.3...v0.1.4
