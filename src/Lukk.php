@@ -21,6 +21,12 @@ class Lukk
     /** @var (Closure(int|string): array<string,mixed>)|null */
     public static ?Closure $tokenClaimsUsing = null;
 
+    /** @var (Closure(array<string,mixed>): Authenticatable)|class-string|null */
+    public static Closure|string|null $registerUsing = null;
+
+    /** @var (Closure(Request): array<string,mixed>)|null */
+    public static ?Closure $registerValidation = null;
+
     /** @var class-string|null */
     public static ?string $refreshTokenModel = null;
 
@@ -41,6 +47,36 @@ class Lukk
     public static function tokenClaimsUsing(Closure $callback): void
     {
         self::$tokenClaimsUsing = $callback;
+    }
+
+    /**
+     * Fully control how a new user is created at registration (Fortify-style). Given the
+     * validated payload (incl. the plaintext `password`), return the new Authenticatable —
+     * hash the password yourself. Accepts a closure or an invokable class-string. When unset,
+     * lukk creates the configured user model with `name` + the identifier column
+     * (config `lukk.username`) + a hashed `password`.
+     *
+     * @param  (Closure(array<string,mixed>): Authenticatable)|class-string  $callback
+     */
+    public static function registerUsing(Closure|string $callback): void
+    {
+        self::$registerUsing = $callback;
+    }
+
+    /**
+     * Declare your own registration validation rules (username, terms, captcha, …) without
+     * subclassing RegisterRequest. The callback receives the request and returns the full
+     * rules array, replacing lukk's name + identifier + password defaults.
+     *
+     * If your rules drop `name` or the identifier column, pair this with a `registerUsing()`
+     * hook — the built-in default create still expects those fields and will fail loudly without
+     * them (add a captcha/terms field here freely; only the columns the default writes matter).
+     *
+     * @param  Closure(Request): array<string,mixed>  $callback
+     */
+    public static function registerValidation(Closure $callback): void
+    {
+        self::$registerValidation = $callback;
     }
 
     /**

@@ -55,8 +55,9 @@ class AttemptLogin
             $this->fail();
         }
 
+        $field = $this->field();
         $credentials = [
-            'email' => (string) $request->input('email'),
+            $field => (string) $request->input($field),
             'password' => (string) $request->input('password'),
         ];
 
@@ -86,15 +87,21 @@ class AttemptLogin
         $seconds = $this->limiter->availableIn($request);
 
         throw ValidationException::withMessages([
-            'email' => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+            $this->field() => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
         ])->status(429);
     }
 
     private function fail(): never
     {
         throw ValidationException::withMessages([
-            'email' => [__('These credentials do not match our records.')],
+            $this->field() => [__('These credentials do not match our records.')],
         ]);
+    }
+
+    /** The identifier field (config `lukk.username`) — the request field + the error key. */
+    private function field(): string
+    {
+        return (string) config('lukk.username', 'email');
     }
 
     private function timingHash(): string

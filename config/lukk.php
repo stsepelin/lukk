@@ -216,6 +216,20 @@ return [
             'max_attempts' => (int) env('LUKK_RESET_MAX_ATTEMPTS', 6),
             'decay_seconds' => (int) env('LUKK_RESET_DECAY', 60),
         ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Registration
+        |--------------------------------------------------------------------------
+        |
+        | A per-IP guard on the register endpoint.
+        |
+        */
+
+        'registration' => [
+            'max_attempts' => (int) env('LUKK_REGISTER_MAX_ATTEMPTS', 10),
+            'decay_seconds' => (int) env('LUKK_REGISTER_DECAY', 60),
+        ],
     ],
 
     /*
@@ -451,6 +465,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Login Identifier
+    |--------------------------------------------------------------------------
+    |
+    | The users-table column that identifies an account at login and registration
+    | (Fortify-style). Defaults to "email" (validated as an email address); set it
+    | to "username" — or any unique column — to authenticate by that instead. Login
+    | reads this field from the request, throttles per this identifier, and looks
+    | the user up by it; registration validates + writes it.
+    |
+    */
+
+    'username' => env('LUKK_USERNAME', 'email'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Routes
     |--------------------------------------------------------------------------
     |
@@ -578,6 +607,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Registration
+    |--------------------------------------------------------------------------
+    |
+    | First-party registration (opt-in via features.registration). The built-in
+    | default creates the configured model with name + email + a hashed password
+    | (the stock Laravel `users` shape). Own the fields entirely with
+    | Lukk::registerUsing() / Lukk::registerValidation() when your schema differs.
+    |
+    */
+
+    'registration' => [
+
+        /*
+        |--------------------------------------------------------------------------
+        | Auto-Login
+        |--------------------------------------------------------------------------
+        |
+        | After creating the account, issue a session (a token pair) just like login
+        | (true, the default) — or create the account only and return a 201 so the
+        | user signs in separately (false).
+        |
+        */
+
+        'login' => (bool) env('LUKK_REGISTER_LOGIN', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Feature Toggles
     |--------------------------------------------------------------------------
     |
@@ -644,6 +701,21 @@ return [
         */
 
         'password_reset' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Registration
+        |--------------------------------------------------------------------------
+        |
+        | Enable the first-party `POST {prefix}/register` endpoint. The default create
+        | works with the stock Laravel `users` shape out of the box (name + the identifier
+        | + a hashed password); own the fields entirely via `Lukk::registerUsing()` /
+        | `Lukk::registerValidation()` (or by rebinding RegisterRequest) when your schema
+        | differs. For public forms, add a captcha via `registerValidation`. Off by default.
+        |
+        */
+
+        'registration' => false,
     ],
 
 ];
