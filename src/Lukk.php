@@ -113,8 +113,13 @@ class Lukk
             }
         }
 
-        $prefix = (int) (config('lukk.rate_limits.ipv6_prefix') ?: 64);
-        $prefix = max(1, min(128, $prefix));
+        // A non-numeric value is truthy, so `?:` wouldn't catch it and the cast would yield 0 —
+        // clamping that to /1 would put every IPv6 caller in one bucket, the exact global-bucket
+        // failure this exists to remove. The floor is 32 for the same reason: a typo like `6` for
+        // `64` is otherwise indistinguishable from a deliberate (and catastrophic) setting.
+        $configured = config('lukk.rate_limits.ipv6_prefix');
+        $prefix = is_numeric($configured) ? (int) $configured : 64;
+        $prefix = max(32, min(128, $prefix));
         $whole = intdiv($prefix, 8);
         $bits = $prefix % 8;
 

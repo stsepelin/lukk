@@ -222,3 +222,36 @@ it('does not let one user\'s verification resends throttle another user', functi
         ->postJson('/auth/email/verification-notification')
         ->assertStatus(202);
 });
+
+it('ignores a non-numeric ipv6_prefix instead of collapsing every caller into one bucket', function () {
+    // 'abc' is truthy so `?:` never fires, and casting it yields 0 — clamping THAT to /1 would put
+    // every IPv6 visitor in a single bucket, the exact failure this normalization removes.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.ipv6_prefix' => 'abc']);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '2001:db8:1:2::1'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x']);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '3fff:aaaa:bbbb:cccc::1'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x'])
+        ->assertStatus(401);
+});
+
+it('refuses a prefix so short it would be a global bucket', function () {
+    // `6` is a plausible typo for `64`; honouring it would hand one visitor the whole 2000::/6.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.ipv6_prefix' => 6]);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '2001:db8:1:2::1'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x']);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '3fff:aaaa:bbbb:cccc::1'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x'])
+        ->assertStatus(401);
+});
+
+it('does not 500 the public signed verify route when the guard is not declared', function () {
+    // The verification limiter resolves a user by guard name, and the auth manager THROWS for an
+    // undeclared guard. That route is anonymous, so a misconfiguration must not become a 500 there.
+    config(['lukk.guard' => 'nonexistent']);
+
+    expect($this->getJson('/auth/email/verify/1/badhash')->getStatusCode())->not->toBe(500);
+});

@@ -339,11 +339,18 @@ class LukkServiceProvider extends ServiceProvider
                 // `unique` rule and sends no mail, so an identity bucket there would bound nothing —
                 // while handing anyone a remote, IP-independent way to deny a chosen address the
                 // ability to register at all.
-                $guard = Lukk::currentGuard();
+                // Resolved ONLY for this limiter: touching the auth manager for the others would
+                // resolve a guard before their own middleware runs. And `user($guard)` THROWS for a
+                // guard the app hasn't declared — this limiter also fronts the public signed verify
+                // route, so that would turn a misconfiguration into a 500 on an anonymous endpoint.
+                if ($key === 'email_verification') {
+                    $guard = Lukk::currentGuard();
+                    $user = isset(config('auth.guards')[$guard]) ? $request->user($guard) : null;
 
-                if ($key === 'email_verification' && ($user = $request->user($guard)) !== null) {
-                    $limits[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
-                        ->by('lukk-email-verification|'.$guard.'|user|'.$user->getAuthIdentifier());
+                    if ($user !== null) {
+                        $limits[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
+                            ->by('lukk-email-verification|'.$guard.'|user|'.$user->getAuthIdentifier());
+                    }
                 }
 
                 return $limits;
