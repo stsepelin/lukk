@@ -33,22 +33,33 @@ class ConfirmPassword
         // Keyed on the user id, like the two-factor lock and unlike the login lock: the caller is
         // already authenticated, so there is a resolved account here and no enumeration concern.
         if ($this->lockouts?->locked('confirm', $subject, $this->guard)) {
-            $seconds = $this->lockouts->availableIn('confirm', $subject, $this->guard);
+            $this->throwLocked($subject);
+        }
 
-            throw ValidationException::withMessages([
-                'password' => [$seconds === null
-                    ? __('This account is locked. Contact support to restore access.')
-                    : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
-            ])->status(423);
+        // Reserved before the credential check, for the same reason as the login path: reading
+        // `locked()` and counting afterwards lets N concurrent requests each get a verification.
+        if ($this->lockouts !== null
+            && $this->lockouts->recordFailure('confirm', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
+            $this->throwLocked($subject);
         }
 
         if (! $this->users->validateCredentials($user, ['password' => $password])) {
-            $this->lockouts?->recordFailure('confirm', $subject, $this->guard);
-
             throw ValidationException::withMessages(['password' => [__('The provided password is incorrect.')]]);
         }
 
-        // "Consecutive" is the whole point of the cap: any success ends the run.
+        // "Consecutive" is the whole point of the cap: any success ends the run — which also
+        // returns the slot reserved above, so a correct password never costs the user an attempt.
         $this->lockouts?->release('confirm', $subject, $this->guard);
+    }
+
+    private function throwLocked(string $subject): never
+    {
+        $seconds = $this->lockouts?->availableIn('confirm', $subject, $this->guard);
+
+        throw ValidationException::withMessages([
+            'password' => [$seconds === null
+                ? __('This account is locked. Contact support to restore access.')
+                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+        ])->status(423);
     }
 }

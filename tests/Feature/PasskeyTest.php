@@ -3,9 +3,11 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
+use Lukk\Models\Lockout;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
 use Lukk\Tests\Fixtures\User;
@@ -219,4 +221,42 @@ it('meters confirm-passkey on the shared confirm budget', function () {
     $this->withToken($access)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => 'nope', 'credential' => ['id' => 'cred-1'],
     ])->assertStatus(429);
+});
+
+it('refuses a credential id too long for its own primary key', function () {
+    // WebAuthn L3 permits a 1023-byte raw id (1364 base64url chars) but `credential_id` is the
+    // varchar(255) primary key: a longer one is a 500 on MySQL strict, or a silent truncation that
+    // no later assertion can match — locking the user out of the credential they just registered.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+
+    // Complete a REAL ceremony — the challenge has to match, or the request fails before the length
+    // guard and this test proves nothing.
+    $challenge = $this->withToken($access)->withHeaders($headers)
+        ->postJson('/auth/passkeys/registration-options')->assertOk()->json('challenge');
+
+    $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys', [
+        'name' => 'Too long',
+        'credential' => ['challenge' => $challenge, 'id' => str_repeat('A', 300), 'public_key' => 'PUB', 'sign_count' => 0],
+    ])->assertStatus(422);
+
+    expect(app(PasskeyRepository::class)->findByCredentialId(str_repeat('A', 300)))->toBeNull();
+});
+
+it('clears a confirm lock on a successful passkey assertion', function () {
+    // "Consecutive" was only honoured for the password authenticator: a passkey-primary user could
+    // carry confirm failures planted by a token thief and lock on their next typo.
+    config(['lukk.features.lockout' => true, 'lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-lock', 0);
+    app(LockoutRepository::class)->recordFailure('confirm', (string) $user->getKey(), 'api');
+
+    $start = $this->postJson('/auth/passkeys/login-options')->json();
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-lock', 'sign_count' => 1],
+    ])->assertOk();
+
+    expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });

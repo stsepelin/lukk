@@ -72,3 +72,17 @@ it('lists the default guard plus every configured guard', function () {
     expect(Lukk::guardNames())->toBe(['api', 'admin', 'partner'])
         ->and(Lukk::isMultiGuard())->toBeTrue();
 });
+
+it('refuses a guards entry named after the default guard', function () {
+    // `guardConfig()` early-returns the top-level config for the default guard's name, so overrides
+    // placed here are silently DROPPED — while `isMultiGuard()` still flips on, enabling refresh
+    // guard scoping (a mass logout on existing `guard IS NULL` rows) and mounting a duplicate route
+    // group. `guardNames()` de-duplicates, so nothing downstream can notice. Fail loudly instead.
+    config([
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'users'],
+        'lukk.guards' => ['api' => ['audience' => ['https://other.test'], 'secret' => str_repeat('c', 64)]],
+    ]);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'is the default guard');
+});

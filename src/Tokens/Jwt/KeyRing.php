@@ -150,7 +150,14 @@ class KeyRing
 
         $details = openssl_pkey_get_details($public);
 
-        if (str_starts_with($this->config['algorithm'], 'ES')) {
+        // Branch on the KEY's type, not on the configured algorithm. Trusting the algorithm meant a
+        // mismatched keypair (an RSA PEM under ES256) indexed `$details['ec']` on an RSA key and
+        // published a structurally invalid JWK — `{"kty":"EC","crv":"","x":"","y":""}` — instead of
+        // failing. Signing is already broken at that point; the JWKS should say so, not paper over
+        // it. `null` is this method's existing "malformed key" contract.
+        $type = $details['type'] ?? null;
+
+        if ($type === OPENSSL_KEYTYPE_EC && str_starts_with($this->config['algorithm'], 'ES')) {
             // [JWK curve name, field size in bytes]. openssl strips leading zero bytes
             // from x/y, but RFC 7518 §6.2.1.2 requires each coordinate to be the full
             // field length, left-padded — else a ~1/256 short coordinate breaks strict
@@ -167,11 +174,15 @@ class KeyRing
             ];
         }
 
-        return [
-            'kty' => 'RSA',
-            'n' => $this->base64Url($details['rsa']['n']),
-            'e' => $this->base64Url($details['rsa']['e']),
-        ];
+        if ($type === OPENSSL_KEYTYPE_RSA && str_starts_with($this->config['algorithm'], 'RS')) {
+            return [
+                'kty' => 'RSA',
+                'n' => $this->base64Url($details['rsa']['n']),
+                'e' => $this->base64Url($details['rsa']['e']),
+            ];
+        }
+
+        return null;
     }
 
     private function base64Url(string $bytes): string

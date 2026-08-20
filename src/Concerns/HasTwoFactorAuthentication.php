@@ -41,6 +41,11 @@ trait HasTwoFactorAuthentication
      */
     public function generateRecoveryCodes(int $count): array
     {
+        // Clamped, like the lockout's max_attempts. `range(1, 0)` counts DOWN and returns [1, 0],
+        // so a configured 0 silently produced two codes, and a negative value produced |n|+1 — the
+        // opposite of what was asked for either way.
+        $count = max(1, min(100, $count));
+
         $codes = array_map(fn () => RecoveryCode::generate(), range(1, $count));
 
         $this->forceFill([

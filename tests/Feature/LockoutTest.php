@@ -448,3 +448,65 @@ it('still counts an identifier that names no account, so being locked is not an 
     failLogin('ghost@y.com')->assertStatus(423);
     expect(Lockout::where('subject', 'idn:ghost@y.com')->exists())->toBeTrue();
 });
+
+it('consumes the attempt before verifying, so concurrency cannot overrun the cap', function () {
+    // Check-then-act: reading `locked()` and counting AFTER the credential check let N concurrent
+    // requests all pass the gate and all reach Hash::check — realized verifications were
+    // `max_attempts + concurrency`. The count is now taken first, transactionally, so a request
+    // that loses the race is refused without a verification.
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    // Exactly `max_attempts` (3) failures are allowed to reach the password check...
+    failLogin()->assertStatus(422);
+    failLogin()->assertStatus(422);
+    failLogin()->assertStatus(422);
+
+    // ...and the counter is spent, so nothing further is verified.
+    failLogin()->assertStatus(423);
+    expect(Lockout::where('purpose', 'login')->value('attempts'))->toBe(3);
+
+    // A request arriving while the cap is already spent is refused without incrementing further,
+    // so the count cannot drift above the cap under load.
+    failLogin()->assertStatus(423);
+    expect(Lockout::where('purpose', 'login')->value('attempts'))->toBe(3);
+});
+
+it('does not charge a successful login an attempt', function () {
+    // The reservation is released on success, so the counter still means "consecutive failures"
+    // from the outside — it is only held for the duration of the credential check.
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+
+    expect(Lockout::where('purpose', 'login')->exists())->toBeFalse();
+});
+
+it('refuses a request that lost the reservation race, without verifying the credential', function () {
+    // The state a concurrent overrun leaves behind: several requests passed the "not locked" gate
+    // together and incremented past the cap before any of them locked the row. Seeded directly,
+    // because it is by definition not reachable one request at a time.
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    Lockout::create([
+        'purpose' => 'login', 'subject' => 'id:'.$user->getKey(), 'guard' => 'api',
+        'attempts' => 3, 'locked_at' => null,
+    ]);
+
+    // `locked_at` is null, so the gate lets it through — the reservation is what stops it. Even the
+    // CORRECT password is refused, which is what "no verification happened" looks like from outside.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertStatus(423);
+});
+
+it('refuses a confirm request that lost the reservation race', function () {
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+    Lockout::create([
+        'purpose' => 'confirm', 'subject' => (string) $user->getKey(), 'guard' => 'api',
+        'attempts' => 3, 'locked_at' => null,
+    ]);
+
+    app('auth')->forgetGuards();
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])->assertStatus(423);
+});

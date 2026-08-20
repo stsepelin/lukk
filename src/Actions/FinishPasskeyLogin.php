@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Actions;
 
 use Illuminate\Validation\ValidationException;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
@@ -22,6 +23,9 @@ class FinishPasskeyLogin
         private readonly PasskeyChallengeStore $challenges,
         private readonly WebAuthnCeremony $ceremony,
         private readonly PasskeyRepository $passkeys,
+        // Null unless `features.lockout` is on.
+        private readonly ?LockoutRepository $lockouts = null,
+        private readonly ?string $guard = null,
     ) {}
 
     public function __invoke(string $ceremonyId, array $response): int|string
@@ -45,6 +49,12 @@ class FinishPasskeyLogin
         }
 
         $this->guardAgainstClone($stored, $newSignCount);
+
+        // A successful assertion ends the run, the same way a successful password does. Without
+        // this, "consecutive" was only honoured for the password authenticator: a passkey-primary
+        // user could carry 99 confirm failures planted months earlier by a token thief and lock on
+        // their next typo, having done nothing wrong in between.
+        $this->lockouts?->release('confirm', (string) $stored->userId, $this->guard);
         // Never lower the ratchet. The guard above already throws on a regression, so this is
         // belt-and-braces — but a rebound ceremony must not be able to walk the counter backwards.
         $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount));

@@ -22,6 +22,7 @@ use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\EnableTwoFactor;
+use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Actions\RegenerateRecoveryCodes;
 use Lukk\Actions\Register;
 use Lukk\Actions\ResetPassword;
@@ -166,6 +167,14 @@ class LukkServiceProvider extends ServiceProvider
     private function registerPasskeys(): void
     {
         $this->app->singleton(PasskeyRepository::class, DatabasePasskeyRepository::class);
+
+        // Bound explicitly rather than auto-resolved: the nullable `?LockoutRepository` means
+        // "feature off", and the container would happily inject the always-bound repository and
+        // make that distinction disappear.
+        $this->app->bind(FinishPasskeyLogin::class, fn ($app) => new FinishPasskeyLogin(
+            $app->make(PasskeyChallengeStore::class), $app->make(WebAuthnCeremony::class),
+            $app->make(PasskeyRepository::class), $this->lockouts($app), Lukk::currentGuard(),
+        ));
 
         $this->app->singleton(PasskeyChallengeStore::class, fn () => new PasskeyChallengeStore(
             $this->cacheStore(), (int) $this->config()['passkeys']['challenge_ttl'],

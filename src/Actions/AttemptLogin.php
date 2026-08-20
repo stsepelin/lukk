@@ -42,11 +42,19 @@ class AttemptLogin
         $this->ensureIsNotLocked($request, $subject);
         $this->ensureIsNotThrottled($request);
 
+        // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
+        // the credential check is check-then-act: N concurrent requests all read "not locked", all
+        // reach `Hash::check`, and all count afterwards — so the realized number of password
+        // verifications was `max_attempts + concurrency`, not `max_attempts`. The increment is
+        // transactional and row-locked, so consuming it first makes the count authoritative at the
+        // moment it is taken. Costs one write per attempt, and only when the feature is on: a hard
+        // consecutive cap is not something a decaying counter can approximate.
+        $this->reserve($subject);
+
         try {
             $user = $this->resolve($request);
         } catch (ValidationException $e) {
             $this->limiter->increment($request);
-            $this->lockouts?->recordFailure('login', $subject, $this->limiter->guard());
 
             throw $e;
         }
@@ -69,13 +77,40 @@ class AttemptLogin
      * themselves, this bounds a RUN and is held until something releases it. 423 rather than 429
      * because "retry later" may be untrue — with `release_after` at 0 it needs intervention.
      */
+    /**
+     * Consume this attempt against the cap, and refuse if it was the one that hit it.
+     *
+     * A success releases the row immediately below, so the counter still means "consecutive
+     * failures" from the outside — it is only *held* for the duration of the credential check.
+     */
+    private function reserve(string $subject): void
+    {
+        if ($this->lockouts === null) {
+            return;
+        }
+
+        // Compare the POST-increment count, not `locked()`. The row locks at `>= max`, so gating on
+        // it would refuse the very attempt that reached the cap and give `max - 1` usable tries.
+        // `> max` keeps the documented meaning — `max` failures happen, then the account is locked —
+        // while the atomic increment means only `max` requests can ever win a slot, however many
+        // arrive at once.
+        if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
+            $this->throwLocked($subject);
+        }
+    }
+
     private function ensureIsNotLocked(Request $request, string $subject): void
     {
         if ($this->lockouts === null || ! $this->lockouts->locked('login', $subject, $this->limiter->guard())) {
             return;
         }
 
-        $seconds = $this->lockouts->availableIn('login', $subject, $this->limiter->guard());
+        $this->throwLocked($subject);
+    }
+
+    private function throwLocked(string $subject): never
+    {
+        $seconds = $this->lockouts?->availableIn('login', $subject, $this->limiter->guard());
 
         throw ValidationException::withMessages([
             $this->field() => [$seconds === null

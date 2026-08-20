@@ -30,6 +30,11 @@ class DatabaseLockoutRepository implements LockoutRepository
         private readonly int $releaseAfter,
     ) {}
 
+    public function maxAttempts(): int
+    {
+        return $this->maxAttempts;
+    }
+
     public function locked(string $purpose, string $subject, ?string $guard): bool
     {
         if (! $this->usable($subject)) {

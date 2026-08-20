@@ -21,6 +21,16 @@ interface LockoutRepository
     public function recordFailure(string $purpose, string $subject, ?string $guard): int;
 
     /**
+     * The configured consecutive-failure cap.
+     *
+     * The actions reserve an attempt by incrementing BEFORE verifying a credential, then compare
+     * the returned count against this — so concurrent requests can't all pass a "not locked yet"
+     * read and each get a verification. That comparison is policy, so it belongs in the action;
+     * the number lives here because this is what clamps and owns it.
+     */
+    public function maxAttempts(): int;
+
+    /**
      * Clear the counter — a successful authentication, a password reset, or an explicit release.
      * Returns how many locks were actually cleared, so an operator tool can tell a hit from a miss.
      * Implementations MUST fire `AccountReleased` when they clear something, so an audit log sees

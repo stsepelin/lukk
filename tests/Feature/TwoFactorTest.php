@@ -6,6 +6,7 @@ use Illuminate\Cache\RateLimiter;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Lukk\Contracts\TwoFactorProvider;
+use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\User;
 use PragmaRX\Google2FA\Google2FA;
 
@@ -226,7 +227,8 @@ it('throttles challenge verification per account, independent of the IP route li
     // Saturate ONLY the action's per-account limiter; the route's per-IP limiter
     // stays clean, so a 429 here proves the account-keyed check fired — not the
     // throttle middleware (which the other lock-out tests trip first).
-    $key = 'lukk:2fa-challenge:'.$user->id;
+    // Guard-scoped, like every other lukk bucket.
+    $key = 'lukk:2fa-challenge:'.config('lukk.guard', 'api').':'.$user->id;
     $max = (int) config('lukk.rate_limits.two_factor.max_attempts');
     foreach (range(1, $max) as $ignored) {
         app(RateLimiter::class)->hit($key);
@@ -325,16 +327,18 @@ it('does not let a junk recovery_code smuggle a TOTP guess past the lock', funct
         $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => '000000']);
     }
 
+    // The two credentials are now mutually exclusive, so the smuggling shape is refused outright
+    // — one request can no longer buy two verifications off a single limiter slot either.
     app('auth')->forgetGuards();
     $this->postJson('/auth/two-factor-challenge', [
         'challenge_token' => $challenge(), 'code' => '000000', 'recovery_code' => 'not-a-real-code',
-    ])->assertStatus(423);
+    ])->assertStatus(422)->assertJsonValidationErrors(['code']);
 
-    // Not even with the RIGHT code — a lock that the caller can shrug off isn't a lock.
+    // And the lock still holds for a plain code attempt — including the RIGHT code, since a lock
+    // the caller can shrug off isn't a lock.
     app('auth')->forgetGuards();
-    $this->postJson('/auth/two-factor-challenge', [
-        'challenge_token' => $challenge(), 'code' => currentOtp($secret), 'recovery_code' => 'not-a-real-code',
-    ])->assertStatus(423);
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => currentOtp($secret)])
+        ->assertStatus(423);
 });
 
 it('still lets a recovery code alone out of a two-factor lock', function () {
@@ -356,4 +360,39 @@ it('still lets a recovery code alone out of a two-factor lock', function () {
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'recovery_code' => 'RECOVERY-CODE-1'])
         ->assertOk()
         ->assertJsonStructure(['access_token']);
+});
+
+it('does not let recovery-code failures drive the two-factor lock', function () {
+    // The cap exists for a 6-digit secret. Counting failures against a 119-bit one would hand
+    // anyone holding a challenge token a way to lock the account without guessing a TOTP at all.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+
+    $challenge = fn () => test()->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    foreach (range(1, 5) as $i) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'recovery_code' => 'wrong-code'])
+            ->assertStatus(422);
+    }
+
+    expect(Lockout::where('purpose', 'two_factor')->exists())->toBeFalse();
+});
+
+it('refuses a two-factor request that lost the reservation race', function () {
+    // As with login: the state left by concurrent requests that all passed the gate together.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+    Lockout::create([
+        'purpose' => 'two_factor', 'subject' => (string) $user->getKey(), 'guard' => 'api',
+        'attempts' => 3, 'locked_at' => null,
+    ]);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
+        ->assertStatus(423);
 });
