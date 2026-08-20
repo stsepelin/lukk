@@ -244,7 +244,8 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
-        $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProviderFor(Lukk::currentGuard())));
+        $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
+            $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
             $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
@@ -335,17 +336,19 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
-        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register'] as $key => $name) {
-            $limiter->for($name, function ($request) use ($key) {
+        foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'] as $key => $name) {
+            $limiter->for($name, function ($request) use ($key, $name) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
                 $max = (int) ($limit['max_attempts'] ?? 30);
                 $decay = (int) ($limit['decay_seconds'] ?? 60);
 
                 $limits = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
 
-                // Per-IP alone stops bounding the authenticated resend once the address is genuinely
+                // Per-IP alone stops bounding an AUTHENTICATED endpoint once the address is genuinely
                 // the visitor's: rotating IPs is cheap, so bucket on the identity the endpoint acts
                 // on as well. Laravel applies every limit returned, so the tighter of the two wins.
+                // For step-up confirmation the per-user bucket is the load-bearing one — a caller
+                // with a stolen token is a single identity behind however many addresses they like.
                 //
                 // Guard-scoped, and resolved from lukk's own guard: the same limiter also guards the
                 // UNAUTHENTICATED signed verify route, where `$request->user()` would otherwise
@@ -360,13 +363,13 @@ class LukkServiceProvider extends ServiceProvider
                 // resolve a guard before their own middleware runs. And `user($guard)` THROWS for a
                 // guard the app hasn't declared — this limiter also fronts the public signed verify
                 // route, so that would turn a misconfiguration into a 500 on an anonymous endpoint.
-                if ($key === 'email_verification') {
+                if ($key === 'email_verification' || $key === 'confirm') {
                     $guard = Lukk::currentGuard();
                     $user = isset(config('auth.guards')[$guard]) ? $request->user($guard) : null;
 
                     if ($user !== null) {
                         $limits[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
-                            ->by('lukk-email-verification|'.$guard.'|user|'.$user->getAuthIdentifier());
+                            ->by($name.'|'.$guard.'|user|'.$user->getAuthIdentifier());
                     }
                 }
 
@@ -393,6 +396,28 @@ class LukkServiceProvider extends ServiceProvider
             $limiter->for("lukk-{$guardName}-refresh", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
                 decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
+
+            // The extra guards carry confirm-password too, and they need the SAME per-user bucket as
+            // the default guard — these are the higher-privilege audiences multi-guard exists for,
+            // so per-IP alone would hand a thief with a stolen admin token 5 password guesses per
+            // source /64 per minute. This limiter is attached to exactly one route, inside this
+            // guard's own group, after `lukk.set-guard:{$guardName}` and after `auth:{$guardName}`
+            // (framework priority runs AuthenticatesRequests before ThrottleRequests), so resolving
+            // this guard's user here is both correct and the only guard it can touch.
+            $limiter->for("lukk-{$guardName}-confirm", function ($request) use ($guardName, $limits) {
+                $max = (int) ($limits['confirm']['max_attempts'] ?? 5);
+                $decay = (int) ($limits['confirm']['decay_seconds'] ?? 60);
+
+                $out = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
+                $user = isset(config('auth.guards')[$guardName]) ? $request->user($guardName) : null;
+
+                if ($user !== null) {
+                    $out[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
+                        ->by("lukk-{$guardName}-confirm|{$guardName}|user|".$user->getAuthIdentifier());
+                }
+
+                return $out;
+            });
         }
     }
 

@@ -199,3 +199,24 @@ it('rejects registering an already-registered credential', function () {
         'credential' => ['challenge' => $challenge, 'id' => 'cred-dup', 'public_key' => 'PUB', 'sign_count' => 0],
     ])->assertStatus(422);
 });
+
+it('meters confirm-passkey on the shared confirm budget', function () {
+    // DoS/CPU metering, not brute-force defence: an assertion is a signature, not a guessable
+    // secret. That is also why it is not gated by the confirm lockout.
+    config(['lukk.rate_limits.confirm.max_attempts' => 2]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-1', 0);
+    $access = $user->startSession()->accessToken;
+
+    foreach (range(1, 2) as $i) {
+        $this->app['auth']->forgetGuards();
+        $this->withToken($access)->postJson('/auth/confirm-passkey', [
+            'ceremony_id' => 'nope', 'credential' => ['id' => 'cred-1'],
+        ])->assertStatus(422);
+    }
+
+    $this->app['auth']->forgetGuards();
+    $this->withToken($access)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => 'nope', 'credential' => ['id' => 'cred-1'],
+    ])->assertStatus(429);
+});

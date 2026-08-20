@@ -210,6 +210,28 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Step-Up Confirmation
+        |--------------------------------------------------------------------------
+        |
+        | Guards `POST /auth/confirm-password` and `/auth/confirm-passkey`. These
+        | are authenticated, so the meaningful bucket is the USER, not the address:
+        | a caller holding a stolen access token is one identity behind however
+        | many IPs they like. Both a per-user and a per-IP limit are applied, and
+        | the tighter wins.
+        |
+        | Without this the sudo re-auth was an unmetered password oracle for anyone
+        | already holding a token — the same secret the login route throttles twice
+        | over. Keep it tight; a legitimate user confirms a handful of times a day.
+        |
+        */
+
+        'confirm' => [
+            'max_attempts' => (int) env('LUKK_CONFIRM_MAX_ATTEMPTS', 5),
+            'decay_seconds' => (int) env('LUKK_CONFIRM_DECAY', 60),
+        ],
+
+        /*
+        |--------------------------------------------------------------------------
         | Refresh
         |--------------------------------------------------------------------------
         |

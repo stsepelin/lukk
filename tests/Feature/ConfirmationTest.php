@@ -83,3 +83,54 @@ it('expires the confirmation after the configured window', function () {
         ->postJson('/_test/sensitive')
         ->assertStatus(423);
 });
+
+// ---------------------------------------------------------------------------
+// Throttling. `/auth/confirm-password` re-verifies the SAME secret as login, so
+// leaving it unmetered made the sudo gate an unlimited password oracle for
+// anyone already holding an access token.
+// ---------------------------------------------------------------------------
+
+/** One failed confirmation, with guards forgotten so each attempt is a fresh request (see CLAUDE.md). */
+function failConfirm(string $access, array $server = [])
+{
+    app('auth')->forgetGuards();
+
+    return test()->withToken($access)->withServerVariables($server)
+        ->postJson('/auth/confirm-password', ['password' => 'wrong-pw']);
+}
+
+it('throttles password confirmation instead of allowing unlimited guesses', function () {
+    config(['lukk.rate_limits.confirm.max_attempts' => 3]);
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    failConfirm($access)->assertStatus(422);
+    failConfirm($access)->assertStatus(422);
+    failConfirm($access)->assertStatus(422);
+
+    failConfirm($access)->assertStatus(429);
+});
+
+it('buckets confirmation per user, so one account cannot throttle another', function () {
+    // Distinct addresses, or the per-IP half of the limit would fire first and prove nothing.
+    config(['lukk.rate_limits.confirm.max_attempts' => 2]);
+    $victim = User::factory()->create()->startSession()->accessToken;
+    $other = User::factory()->create()->startSession()->accessToken;
+
+    failConfirm($victim, ['REMOTE_ADDR' => '203.0.113.1']);
+    failConfirm($victim, ['REMOTE_ADDR' => '203.0.113.1']);
+    failConfirm($victim, ['REMOTE_ADDR' => '203.0.113.1'])->assertStatus(429);
+
+    failConfirm($other, ['REMOTE_ADDR' => '203.0.113.2'])->assertStatus(422);
+});
+
+it('bounds a token thief who rotates addresses, because the bucket is the user', function () {
+    // The per-IP limit alone is worthless here: a stolen token is one identity behind as many
+    // addresses as the attacker cares to use.
+    config(['lukk.rate_limits.confirm.max_attempts' => 2]);
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    failConfirm($access, ['REMOTE_ADDR' => '198.51.100.1']);
+    failConfirm($access, ['REMOTE_ADDR' => '198.51.100.2']);
+
+    failConfirm($access, ['REMOTE_ADDR' => '198.51.100.3'])->assertStatus(429);
+});
