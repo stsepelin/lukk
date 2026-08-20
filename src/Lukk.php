@@ -29,6 +29,9 @@ class Lukk
     /** @var (Closure(Request): array<string,mixed>)|null */
     public static ?Closure $registerValidation = null;
 
+    /** @var (Closure(Request): string)|null */
+    public static ?Closure $rateLimitKeyUsing = null;
+
     /** @var class-string|null */
     public static ?string $refreshTokenModel = null;
 
@@ -40,6 +43,88 @@ class Lukk
     public static function authenticateUsing(Closure $callback): void
     {
         self::$authenticateUsing = $callback;
+    }
+
+    /**
+     * Replace how every lukk throttle identifies a caller.
+     *
+     * The default is the request IP, with IPv6 collapsed to its /64 (see `rateLimitKey`). Override
+     * it to key on something else entirely — a tenant, an API-gateway client id, a CDN's own
+     * visitor token — when the source address isn't the right identity for your deployment.
+     *
+     * The callback runs on every throttled request, so keep it cheap and pure — and note two
+     * things. It must return something the caller cannot forge: this value also buckets the login
+     * limiter, so a spoofable header would let an attacker mint a fresh bucket per request and walk
+     * through the per-origin login limit. And the return is used verbatim as part of a cache key, so
+     * namespace anything untrusted. Under a long-running worker (Octane) the closure outlives the
+     * request that registered it — derive everything from the `$request` argument, never capture it.
+     */
+    public static function rateLimitKeyUsing(Closure $callback): void
+    {
+        self::$rateLimitKeyUsing = $callback;
+    }
+
+    /**
+     * The bucket every lukk throttle is keyed on.
+     *
+     * IPv4 is used verbatim. IPv6 is collapsed to its `/64` because that is what a single
+     * subscriber is typically handed — keying on the full address would let one visitor mint
+     * effectively unlimited buckets and walk straight through every per-IP limit. That only starts
+     * to matter once the address is really the visitor's: behind a BFF or reverse proxy it is the
+     * proxy until the deployment forwards the real client, so treat this as the second half of
+     * setting that up.
+     *
+     * An IPv4-mapped address (`::ffff:1.2.3.4`) is unwrapped to its IPv4 form first, so it doesn't
+     * collapse into a single shared `::/64` bucket with every other mapped address.
+     */
+    public static function rateLimitKey(Request $request): string
+    {
+        $fallback = self::normalizeIp((string) $request->ip());
+
+        if (self::$rateLimitKeyUsing !== null) {
+            $key = (string) call_user_func(self::$rateLimitKeyUsing, $request);
+
+            // An empty return would silently put EVERY caller in one bucket — the app looks fine
+            // until the whole deployment 429s at once. Fall back rather than fail open that way.
+            return $key !== '' ? $key : $fallback;
+        }
+
+        return $fallback;
+    }
+
+    private static function normalizeIp(string $ip): string
+    {
+        if ($ip === '' || ! str_contains($ip, ':')) {
+            return $ip; // IPv4, or nothing to normalize
+        }
+
+        $packed = @inet_pton($ip);
+
+        if ($packed === false || strlen($packed) !== 16) {
+            return $ip; // not an address we recognise — key on it verbatim rather than guess
+        }
+
+        // Prefixes that carry an IPv4 address in their low 32 bits. Truncating these to a /64 would
+        // bucket every one of them together — for NAT64 in particular that is a whole IPv6-only
+        // client population sharing a single counter, i.e. a self-inflicted 429 storm.
+        foreach ([str_repeat("\0", 10)."\xff\xff", "\x00\x64\xff\x9b".str_repeat("\0", 8)] as $embedded) {
+            if (str_starts_with($packed, $embedded)) {
+                return (string) inet_ntop(substr($packed, 12));
+            }
+        }
+
+        $prefix = (int) (config('lukk.rate_limits.ipv6_prefix') ?: 64);
+        $prefix = max(1, min(128, $prefix));
+        $whole = intdiv($prefix, 8);
+        $bits = $prefix % 8;
+
+        $masked = substr($packed, 0, $whole);
+
+        if ($bits > 0) {
+            $masked .= chr(ord($packed[$whole]) & (0xFF << (8 - $bits)) & 0xFF);
+        }
+
+        return inet_ntop(str_pad($masked, 16, "\0")).'/'.$prefix;
     }
 
     /**

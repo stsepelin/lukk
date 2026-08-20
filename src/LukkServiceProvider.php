@@ -321,9 +321,32 @@ class LukkServiceProvider extends ServiceProvider
         foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
+                $max = (int) ($limit['max_attempts'] ?? 30);
+                $decay = (int) ($limit['decay_seconds'] ?? 60);
 
-                return (new Limit(maxAttempts: (int) ($limit['max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
-                    ->by($request->ip());
+                $limits = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
+
+                // Per-IP alone stops bounding the authenticated resend once the address is genuinely
+                // the visitor's: rotating IPs is cheap, so bucket on the identity the endpoint acts
+                // on as well. Laravel applies every limit returned, so the tighter of the two wins.
+                //
+                // Guard-scoped, and resolved from lukk's own guard: the same limiter also guards the
+                // UNAUTHENTICATED signed verify route, where `$request->user()` would otherwise
+                // resolve the app's default guard and share a bucket with a colliding id from an
+                // unrelated provider — the isolation lukk's multi-guard work exists to prevent.
+                //
+                // Deliberately NOT mirrored on registration: a duplicate signup is a 422 from the
+                // `unique` rule and sends no mail, so an identity bucket there would bound nothing —
+                // while handing anyone a remote, IP-independent way to deny a chosen address the
+                // ability to register at all.
+                $guard = Lukk::currentGuard();
+
+                if ($key === 'email_verification' && ($user = $request->user($guard)) !== null) {
+                    $limits[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
+                        ->by('lukk-email-verification|'.$guard.'|user|'.$user->getAuthIdentifier());
+                }
+
+                return $limits;
             });
         }
 
@@ -331,7 +354,7 @@ class LukkServiceProvider extends ServiceProvider
             $limit = (array) ($this->config()['rate_limits']['login'] ?? []);
 
             return (new Limit(maxAttempts: (int) ($limit['ip_max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
-                ->by($request->ip());
+                ->by(Lukk::rateLimitKey($request));
         });
 
         // Per-guard login/refresh limiters for the additional guards' core-session routes, so an
@@ -341,11 +364,11 @@ class LukkServiceProvider extends ServiceProvider
 
             $limiter->for("lukk-{$guardName}-login", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['login']['ip_max_attempts'] ?? 30),
-                decaySeconds: (int) ($limits['login']['decay_seconds'] ?? 60)))->by($request->ip()));
+                decaySeconds: (int) ($limits['login']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
             $limiter->for("lukk-{$guardName}-refresh", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
-                decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by($request->ip()));
+                decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
         }
     }
 

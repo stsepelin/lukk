@@ -244,3 +244,17 @@ class RegistersMarkedUser
         ]);
     }
 }
+
+it('answers a malformed identifier with 422, never a 500 — even from the throttle', function () {
+    // Throttle middleware runs BEFORE the FormRequest, so anything reading raw input there has to
+    // tolerate a malformed type. A per-identifier registration limit once broke exactly this.
+    $this->postJson('/auth/register', ['email' => ['a', 'b'], 'password' => 'x'])->assertStatus(422);
+    $this->postJson('/auth/register', ['email' => ['x' => 'y'], 'password' => 'x'])->assertStatus(422);
+});
+
+it('bounds the signup identifier length on this unauthenticated endpoint', function () {
+    // `email` + `unique` against an unbounded string is real work for an anonymous caller.
+    $this->postJson('/auth/register', ['name' => 'A', 'email' => str_repeat('a', 300).'@y.com', 'password' => 'x'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('email');
+});

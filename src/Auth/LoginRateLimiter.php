@@ -7,6 +7,7 @@ namespace Lukk\Auth;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Lukk\Lukk;
 
 /**
  * Login throttle: failures-only, over two buckets that trip independently.
@@ -59,7 +60,7 @@ class LoginRateLimiter
 
     public function key(Request $request): string
     {
-        return $this->guard.'|'.$this->identifier($request).'|'.$request->ip();
+        return $this->guard.'|'.$this->identifier($request).'|'.Lukk::rateLimitKey($request);
     }
 
     /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood

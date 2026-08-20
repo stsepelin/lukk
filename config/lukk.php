@@ -116,11 +116,28 @@ return [
     | Rate Limits
     |--------------------------------------------------------------------------
     |
-    | Every throttle in one place, each as { max_attempts, decay_seconds }.
+    | Every throttle below is keyed on the caller's IP, with IPv6 collapsed to
+    | its /64 (one subscriber is typically handed a whole /64, so keying on the
+    | full address would let a single visitor mint unlimited buckets). Behind a
+    | BFF or reverse proxy that address is the PROXY until the deployment
+    | forwards the real client — see the deployment docs. Replace the identity
+    | entirely with Lukk::rateLimitKeyUsing() if the source address is not the
+    | right bucket for you.
+    |
+    | The authenticated email-verification resend carries a second, per-user
+    | limit as well, because rotating IPs is cheap once the per-IP limit is
+    | genuinely per-visitor.
+    |
+    | "ipv6_prefix" is the mask applied to an IPv6 caller. 64 suits residential
+    | and mobile networks, where a subscriber holds a whole /64. Lower it (56,
+    | 48) if your attackers hold larger delegations; raise it (128 = per address)
+    | if your users share a /64 — an office or campus LAN does.
     |
     */
 
     'rate_limits' => [
+
+        'ipv6_prefix' => (int) env('LUKK_RATE_LIMIT_IPV6_PREFIX', 64),
 
         /*
         |--------------------------------------------------------------------------
