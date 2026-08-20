@@ -759,6 +759,13 @@ return [
         | when the protocol requirement outweighs that, and set "release_after" so
         | the denial is bounded.
         |
+        | The counter keys on the "username" field above. If you use
+        | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set
+        | "username" to match it — otherwise lukk never sees an identifier to count
+        | against, and the lockout does nothing (it refuses to count an empty
+        | subject rather than put every caller in one shared, never-decaying
+        | bucket).
+        |
         */
 
         'lockout' => false,

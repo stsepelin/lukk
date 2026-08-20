@@ -331,21 +331,6 @@ class LukkServiceProvider extends ServiceProvider
      * doesn't deep-merge nested arrays, so a missing key would resolve to 0 — and
      * `Limit(0)` would lock everyone out.
      */
-    /**
-     * The lockout keys on `lukk.username`, but `Lukk::authenticateUsing` can authenticate on a field
-     * lukk never sees — and then every login keys on the same empty subject. The repository refuses
-     * to lock on an empty subject, so the failure mode is "silently does nothing" rather than
-     * "locks the whole application", but silently-does-nothing is still not what was asked for.
-     */
-    private function warnOnUnkeyableLockout(): void
-    {
-        if (($this->config()['features']['lockout'] ?? false) && Lukk::$authenticateUsing !== null) {
-            error_log('[lukk] features.lockout is on alongside Lukk::authenticateUsing. The lockout counts '
-                .'failures against `lukk.username` ('.(string) ($this->config()['username'] ?? 'email').'); if your '
-                .'callback authenticates on another field, set lukk.username to match or the lockout cannot key on it.');
-        }
-    }
-
     private function registerRateLimiters(): void
     {
         $limiter = $this->app->make(RateLimiter::class);

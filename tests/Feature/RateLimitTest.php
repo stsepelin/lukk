@@ -255,3 +255,31 @@ it('does not 500 the public signed verify route when the guard is not declared',
 
     expect($this->getJson('/auth/email/verify/1/badhash')->getStatusCode())->not->toBe(500);
 });
+
+it('keys an unparseable address verbatim rather than guessing at a prefix', function () {
+    // Symfony filters XFF entries through FILTER_VALIDATE_IP so this is unreachable from a
+    // forwarded header, but REMOTE_ADDR comes from the SAPI — key on it as-is rather than
+    // silently bucketing it with everything else that fails to parse.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+
+    $this->withServerVariables(['REMOTE_ADDR' => 'not:an:address:at:all:!!'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x']);
+
+    $this->withServerVariables(['REMOTE_ADDR' => 'also:not:an:address:!!'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x'])
+        ->assertStatus(401);
+});
+
+it('masks a prefix that is not a whole number of bytes', function () {
+    // /60 splits mid-byte (60 % 8 = 4), so the mask has to clear the low nibble of the boundary
+    // byte as well as drop the whole bytes after it.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.ipv6_prefix' => 60]);
+
+    $this->withServerVariables(['REMOTE_ADDR' => '2001:db8:1:aa00::1'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x']);
+
+    // Differs only below bit 60, so it must land in the same bucket.
+    $this->withServerVariables(['REMOTE_ADDR' => '2001:db8:1:aa0f::9'])
+        ->postJson('/auth/refresh', ['refresh_token' => 'x'])
+        ->assertStatus(429);
+});

@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\AccountLocked;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\User;
@@ -211,4 +214,54 @@ it('prunes spent counters but never a lock that is still held', function () {
 
     // The two stale probe counters go; the held lock stays, or pruning would be a release path.
     expect(Lockout::query()->pluck('subject')->all())->toBe(['victim@y.com']);
+});
+
+it('rejects an unknown --purpose rather than releasing something else', function () {
+    $this->artisan('lukk:release', ['subject' => 'x@y.com', '--purpose' => 'nonsense'])->assertFailed();
+});
+
+it('restarts the run after an auto-release rather than leaving it one attempt from locking', function () {
+    config(['lukk.lockout.release_after' => 60]);
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    for ($i = 0; $i < 3; $i++) {
+        failLogin();
+    }
+    failLogin()->assertStatus(423);
+
+    $this->travel(61)->seconds();
+
+    // A fresh run: the next failure is attempt 1, not attempt 4 re-locking immediately.
+    failLogin()->assertStatus(422);
+    expect(Lockout::query()->where('subject', 'victim@y.com')->value('attempts'))->toBe(1);
+});
+
+it('prunes nothing, without erroring, when the table was never published', function () {
+    Schema::drop('lukk_lockouts');
+
+    $this->artisan('lukk:prune')->assertSuccessful();
+});
+
+it('recovers when it loses the insert race for a brand-new subject', function () {
+    // The real race: two first-failures both miss the row and both INSERT, and the loser hits the
+    // unique index. Left uncaught that is a QueryException — a 500 on /auth/login — AND the loser's
+    // guess goes uncounted, so deliberate concurrency would be strictly better for an attacker.
+    // Reproduced deterministically by inserting the winner's row from inside the loser's `creating`
+    // event, so the loser's INSERT collides exactly as it would under load.
+    $winner = true;
+    Lockout::creating(function ($model) use (&$winner) {
+        if (! $winner) {
+            return;
+        }
+        $winner = false;
+        DB::table('lukk_lockouts')->insert([
+            'id' => (string) Str::ulid(), 'purpose' => $model->purpose, 'subject' => $model->subject,
+            'guard' => $model->guard, 'attempts' => 4, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    });
+
+    // The loser re-reads the winner's row and increments it, rather than throwing.
+    expect(app(LockoutRepository::class)->recordFailure('login', 'raced@y.com', 'api'))->toBe(5);
+
+    Lockout::flushEventListeners();
 });
