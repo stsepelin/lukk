@@ -116,11 +116,58 @@ return [
     | Rate Limits
     |--------------------------------------------------------------------------
     |
-    | Every throttle in one place, each as { max_attempts, decay_seconds }.
+    | Every throttle below is keyed on the caller's IP, with IPv6 collapsed to
+    | its /64 (one subscriber is typically handed a whole /64, so keying on the
+    | full address would let a single visitor mint unlimited buckets). Behind a
+    | BFF or reverse proxy that address is the PROXY until the deployment
+    | forwards the real client — see the deployment docs. Replace the identity
+    | entirely with Lukk::rateLimitKeyUsing() if the source address is not the
+    | right bucket for you.
+    |
+    | The authenticated email-verification resend carries a second, per-user
+    | limit as well, because rotating IPs is cheap once the per-IP limit is
+    | genuinely per-visitor.
+    |
+    | "ipv6_prefix" is the mask applied to an IPv6 caller. 64 suits residential
+    | and mobile networks, where a subscriber holds a whole /64. Lower it (56,
+    | 48) if your attackers hold larger delegations; raise it (128 = per address)
+    | if your users share a /64 — an office or campus LAN does.
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Account Lockout
+    |--------------------------------------------------------------------------
+    |
+    | Only used when features.lockout is on. "max_attempts" is the consecutive
+    | failure cap — NIST SP 800-63B §5.2.2 says no more than 100, so treat that
+    | as a ceiling, not a target. The counter is cleared by any successful
+    | authentication, never by time.
+    |
+    | "release_after" auto-lifts a lock that many seconds after it was set; 0
+    | holds it until a password reset, `php artisan lukk:release`, or your own
+    | code clears it.
+    |
+    | The two settings pull against each other, so choose deliberately. 0 is the
+    | strict §5.2.2 reading — a run broken only by a SUCCESS — but it means an
+    | attacker who locks an account has denied it until someone intervenes.
+    | Setting it trades that for a decaying cap: 100 / 3600 is no longer "100
+    | consecutive, ever", it is 100 per hour, which is exactly OWASP ASVS V2.2.1
+    | ("no more than 100 failed attempts per hour on a single account") and which
+    | this package does NOT otherwise meet (the per-account throttle allows
+    | ~1,200/hour). Most deployments should prefer that trade.
+    |
+    */
+
+    'lockout' => [
+        'max_attempts' => (int) env('LUKK_LOCKOUT_MAX_ATTEMPTS', 100),
+        'release_after' => (int) env('LUKK_LOCKOUT_RELEASE_AFTER', 0),
+    ],
+
     'rate_limits' => [
+
+        'ipv6_prefix' => (int) env('LUKK_RATE_LIMIT_IPV6_PREFIX', 64),
 
         /*
         |--------------------------------------------------------------------------
@@ -695,6 +742,33 @@ return [
         */
 
         'two_factor' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Account Lockout
+        |--------------------------------------------------------------------------
+        |
+        | NIST SP 800-63B §5.2.2 requires a verifier to limit CONSECUTIVE failed
+        | authentication attempts on one account to no more than 100. The throttles
+        | above are decaying windows — they bound a rate, not a run — so satisfying
+        | the clause needs a persistent counter. Requires the published lockout
+        | migration.
+        |
+        | Off by default because a hard lockout is a denial-of-service primitive:
+        | anyone who knows an address can burn its budget deliberately. Turn it on
+        | when the protocol requirement outweighs that, and set "release_after" so
+        | the denial is bounded.
+        |
+        | The counter keys on the "username" field above. If you use
+        | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set
+        | "username" to match it — otherwise lukk never sees an identifier to count
+        | against, and the lockout does nothing (it refuses to count an empty
+        | subject rather than put every caller in one shared, never-decaying
+        | bucket).
+        |
+        */
+
+        'lockout' => false,
 
         /*
         |--------------------------------------------------------------------------

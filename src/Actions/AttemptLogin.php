@@ -11,6 +11,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Auth\LoginRateLimiter;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
 
 /**
@@ -24,23 +25,55 @@ class AttemptLogin
     public function __construct(
         private readonly UserProvider $users,
         private readonly LoginRateLimiter $limiter,
+        // Null unless `features.lockout` is on — the consecutive-failure cap is opt-in because a
+        // hard lockout is also a denial-of-service primitive against a known account.
+        private readonly ?LockoutRepository $lockouts = null,
     ) {}
 
     public function __invoke(Request $request): Authenticatable
     {
+        // Lock first: a locked account whose decaying bucket is also full would otherwise be told
+        // "try again in N seconds", which with manual-only release is exactly the untruth that
+        // choosing 423 over 429 exists to avoid.
+        $this->ensureIsNotLocked($request);
         $this->ensureIsNotThrottled($request);
 
         try {
             $user = $this->resolve($request);
         } catch (ValidationException $e) {
             $this->limiter->increment($request);
+            $this->lockouts?->recordFailure('login', $this->limiter->subject($request), $this->limiter->guard());
 
             throw $e;
         }
 
         $this->limiter->clear($request);
+        // "Consecutive" is the whole point of the cap: any success ends the run.
+        $this->lockouts?->release('login', $this->limiter->subject($request), $this->limiter->guard());
 
         return $user;
+    }
+
+    /**
+     * NIST SP 800-63B §5.2.2. Distinct from the throttles above: those bound a RATE and clear
+     * themselves, this bounds a RUN and is held until something releases it. 423 rather than 429
+     * because "retry later" may be untrue — with `release_after` at 0 it needs intervention.
+     */
+    private function ensureIsNotLocked(Request $request): void
+    {
+        $subject = $this->limiter->subject($request);
+
+        if ($this->lockouts === null || ! $this->lockouts->locked('login', $subject, $this->limiter->guard())) {
+            return;
+        }
+
+        $seconds = $this->lockouts->availableIn('login', $subject, $this->limiter->guard());
+
+        throw ValidationException::withMessages([
+            $this->field() => [$seconds === null
+                ? __('This account is locked. Contact support to restore access.')
+                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+        ])->status(423);
     }
 
     private function resolve(Request $request): Authenticatable

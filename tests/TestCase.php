@@ -60,6 +60,9 @@ class TestCase extends Orchestra
         // core refresh_tokens migration here for the suite.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
+        // Publish-only too; the lockout suite needs the table and it's inert while the feature is off.
+        $this->loadMigrationsFrom(__DIR__.'/../database/lockout');
+
         Schema::create('users', fn (Blueprint $table) => $this->defineUsersTable($table));
 
         Schema::create('password_reset_tokens', function (Blueprint $table) {

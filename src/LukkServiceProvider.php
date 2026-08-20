@@ -38,8 +38,10 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Console\GenerateKeysCommand;
 use Lukk\Console\GenerateSecretCommand;
 use Lukk\Console\PruneTokensCommand;
+use Lukk\Console\ReleaseLockoutCommand;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\EmailVerificationResponse;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\LoginResponse;
 use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\PasskeyRepository;
@@ -62,6 +64,7 @@ use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
 use Lukk\Http\Responses\RefreshResponse as RefreshResponseImpl;
 use Lukk\Http\Responses\RegisterResponse as RegisterResponseImpl;
 use Lukk\Http\Responses\TwoFactorChallengeResponse as TwoFactorChallengeResponseImpl;
+use Lukk\Lockout\DatabaseLockoutRepository;
 use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Passkeys\SpomkyWebAuthnCeremony;
@@ -132,7 +135,7 @@ class LukkServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->registerPublishing();
-            $this->commands([GenerateSecretCommand::class, GenerateKeysCommand::class, PruneTokensCommand::class]);
+            $this->commands([GenerateSecretCommand::class, GenerateKeysCommand::class, PruneTokensCommand::class, ReleaseLockoutCommand::class]);
         }
     }
 
@@ -228,10 +231,23 @@ class LukkServiceProvider extends ServiceProvider
         ));
         // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
         // admin login authenticates against the admins table, not the users table.
-        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class)));
+        $this->app->bind(LockoutRepository::class, function () {
+            $lockout = (array) ($this->config()['lockout'] ?? []);
+            // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
+            // account on its owner's first typo — the `Limit(0)` failure class this package already
+            // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
+            $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100;
+            $after = is_numeric($lockout['release_after'] ?? null) ? (int) $lockout['release_after'] : 0;
+
+            return new DatabaseLockoutRepository(max(1, min(100, $max)), max(0, $after));
+        });
+
+        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProviderFor(Lukk::currentGuard())));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
-        $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
+        $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
+            $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(
             $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
 
@@ -243,6 +259,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             (int) $this->config()['rate_limits']['two_factor']['max_attempts'],
             (int) $this->config()['rate_limits']['two_factor']['decay_seconds'],
+            $this->lockouts($app), Lukk::currentGuard(),
         ));
         $this->app->bind(RegenerateRecoveryCodes::class, fn () => new RegenerateRecoveryCodes(
             (int) $this->config()['two_factor']['recovery_codes']));
@@ -321,9 +338,39 @@ class LukkServiceProvider extends ServiceProvider
         foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key) {
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
+                $max = (int) ($limit['max_attempts'] ?? 30);
+                $decay = (int) ($limit['decay_seconds'] ?? 60);
 
-                return (new Limit(maxAttempts: (int) ($limit['max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
-                    ->by($request->ip());
+                $limits = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
+
+                // Per-IP alone stops bounding the authenticated resend once the address is genuinely
+                // the visitor's: rotating IPs is cheap, so bucket on the identity the endpoint acts
+                // on as well. Laravel applies every limit returned, so the tighter of the two wins.
+                //
+                // Guard-scoped, and resolved from lukk's own guard: the same limiter also guards the
+                // UNAUTHENTICATED signed verify route, where `$request->user()` would otherwise
+                // resolve the app's default guard and share a bucket with a colliding id from an
+                // unrelated provider — the isolation lukk's multi-guard work exists to prevent.
+                //
+                // Deliberately NOT mirrored on registration: a duplicate signup is a 422 from the
+                // `unique` rule and sends no mail, so an identity bucket there would bound nothing —
+                // while handing anyone a remote, IP-independent way to deny a chosen address the
+                // ability to register at all.
+                // Resolved ONLY for this limiter: touching the auth manager for the others would
+                // resolve a guard before their own middleware runs. And `user($guard)` THROWS for a
+                // guard the app hasn't declared — this limiter also fronts the public signed verify
+                // route, so that would turn a misconfiguration into a 500 on an anonymous endpoint.
+                if ($key === 'email_verification') {
+                    $guard = Lukk::currentGuard();
+                    $user = isset(config('auth.guards')[$guard]) ? $request->user($guard) : null;
+
+                    if ($user !== null) {
+                        $limits[] = (new Limit(maxAttempts: $max, decaySeconds: $decay))
+                            ->by('lukk-email-verification|'.$guard.'|user|'.$user->getAuthIdentifier());
+                    }
+                }
+
+                return $limits;
             });
         }
 
@@ -331,7 +378,7 @@ class LukkServiceProvider extends ServiceProvider
             $limit = (array) ($this->config()['rate_limits']['login'] ?? []);
 
             return (new Limit(maxAttempts: (int) ($limit['ip_max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
-                ->by($request->ip());
+                ->by(Lukk::rateLimitKey($request));
         });
 
         // Per-guard login/refresh limiters for the additional guards' core-session routes, so an
@@ -341,12 +388,18 @@ class LukkServiceProvider extends ServiceProvider
 
             $limiter->for("lukk-{$guardName}-login", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['login']['ip_max_attempts'] ?? 30),
-                decaySeconds: (int) ($limits['login']['decay_seconds'] ?? 60)))->by($request->ip()));
+                decaySeconds: (int) ($limits['login']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
             $limiter->for("lukk-{$guardName}-refresh", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
-                decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by($request->ip()));
+                decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
         }
+    }
+
+    /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
+    private function lockouts($app): ?LockoutRepository
+    {
+        return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
     }
 
     private function registerPublishing(): void
@@ -359,6 +412,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->publishesMigrations([__DIR__.'/../database/migrations' => database_path('migrations')], 'lukk-migrations');
         $this->publishesMigrations([__DIR__.'/../database/two-factor' => database_path('migrations')], 'lukk-two-factor-migrations');
         $this->publishesMigrations([__DIR__.'/../database/passkeys' => database_path('migrations')], 'lukk-passkey-migrations');
+        $this->publishesMigrations([__DIR__.'/../database/lockout' => database_path('migrations')], 'lukk-lockout-migrations');
     }
 
     /**

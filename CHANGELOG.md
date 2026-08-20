@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Account lockout (`features.lockout`, opt-in, off by default)** — an absolute cap on *consecutive* failed authentication attempts, satisfying **NIST SP 800-63B §5.2.2** ("the verifier SHALL limit consecutive failed authentication attempts on a single account to no more than 100"). The existing throttles are decaying windows: they bound a *rate*, not a *run*, so lifetime guesses were unbounded — roughly 7,200/day against a 6-digit TOTP code. Covers both password login (keyed on the normalized identifier) and the two-factor challenge (keyed on the user), each with its own counter and guard-scoped, so burning one doesn't spend the other's budget.
+
+  Counters live in a new `lukk_lockouts` table (publish `lukk-lockout-migrations`) because "consecutive" can't be expressed by a cache entry that expires — and a cache flush would silently release every lock. `Lockout` storage sits behind a `LockoutRepository` contract, so it's swappable like `RefreshTokenRepository`.
+
+  **A hard lockout is also a denial-of-service primitive** — anyone who knows an address can burn its budget deliberately — which is why it ships off, and why release has five paths: any successful authentication clears the run (that's what "consecutive" means), a **password reset** clears it (proving control of the address is stronger evidence than the password, so this is the self-service way out), `php artisan lukk:release <subject>` for operators, the repository API for your own code, and an optional `lockout.release_after` that auto-lifts and bounds the denial. Every path fires `AccountReleased`, so an audit log sees the unlock and not just the lock. A locked account answers **423** rather than 429, because with manual-only release "retry later" would be untrue. `AccountLocked` fires once on the transition — a locked-out user gets no other signal.
+
+Two honest caveats. Setting `release_after` **trades the strict reading**: a run broken by time rather than by a success is no longer "consecutive", so 100/3600s is a 100-per-hour cap — which is exactly OWASP ASVS V2.2.1, and better than the package's current ~1,200/hour, but not §5.2.2's lifetime bound. And a recovery code is deliberately **not** gated by a two-factor lock: at ~119 bits it isn't brute-forceable, and gating it would strand a user whose second factor an attacker burned on purpose.
+
+- **`Lukk::rateLimitKeyUsing()`** — replace the identity every lukk throttle buckets on. The default is the request IP; override it when the source address isn't the right bucket for your deployment (a shared API gateway, a tenant, a CDN's own visitor token).
+
+### Changed
+
+- **Every throttle now collapses an IPv6 caller to their `/64`.** A subscriber is typically handed a whole `/64`, so keying on the full address let one visitor mint effectively unlimited buckets and walk through every per-IP limit. IPv4 is unchanged, and an IPv4-mapped address (`::ffff:1.2.3.4`) is unwrapped to its IPv4 form rather than collapsing every mapped address into one shared `::/64` bucket — the same unwrapping applies to NAT64's `64:ff9b::/96`, so an IPv6-only client population behind a translation gateway isn't bucketed as one caller. This only starts to matter once the address is genuinely the visitor's — behind a BFF it is the proxy until the deployment forwards the real client — which is exactly when per-IP limits stop being a single shared bucket and start needing to hold.
+- **The authenticated email-verification resend gained a second, per-user limit** alongside the per-IP one. Rotating IPs is cheap once per-IP buckets are genuinely per-visitor, so a single session could otherwise resend without limit. It reuses the endpoint's existing `max_attempts`/`decay_seconds` (no new configuration; Laravel applies every returned limit and the tighter wins) and is guard-scoped, resolving the user from lukk's own guard — the same limiter also guards the unauthenticated signed verify route, where the app's default guard could otherwise share a bucket with a colliding id from an unrelated provider. Registration deliberately did **not** get the same treatment: a duplicate signup is a `422` from the `unique` rule and sends no mail, so an identity bucket there would bound nothing while handing anyone a remote, IP-independent way to deny a chosen address the ability to register.
+- **`rate_limits.ipv6_prefix`** (env `LUKK_RATE_LIMIT_IPV6_PREFIX`, default `64`) tunes the IPv6 mask. `64` suits residential and mobile networks; lower it if your attackers hold larger delegations, or raise it toward `128` if your users share a `/64` — an office or campus LAN does.
+
+### Fixed
+
+- **`POST /auth/register` bounds the identifier length** (`max:255`, matching `name` and `password`). `email` + `unique` against an unbounded string was avoidable work for an anonymous caller (ASVS V2.1).
+
 ## [0.4.0] - 2026-07-07
 
 ### Added

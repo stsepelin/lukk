@@ -38,9 +38,11 @@ class RegisterRequest extends FormRequest
 
         return [
             'name' => ['required', 'string', 'max:255'],
+            // max:255 here too — `email`/`unique` on an unbounded string is real work on an
+            // unauthenticated endpoint, and every realistic identifier fits (ASVS V2.1).
             $field => $field === 'email'
-                ? ['required', 'string', 'email', Rule::unique($this->userModel(), 'email')]
-                : ['required', 'string', Rule::unique($this->userModel(), $field)],
+                ? ['required', 'string', 'max:255', 'email', Rule::unique($this->userModel(), 'email')]
+                : ['required', 'string', 'max:255', Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
             'password' => ['required', 'confirmed', 'max:255', Password::defaults()],
         ];
