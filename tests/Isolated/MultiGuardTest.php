@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Route;
 use Lukk\Tests\Fixtures\Admin;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\MultiGuardTestCase;
@@ -120,4 +121,98 @@ it('revokes only the target guard\'s families on logout-all, despite colliding i
     // The admin family is dead; the users family (same id) is untouched.
     $this->postJson('/admin/auth/refresh', ['refresh_token' => $adminPair->refreshToken])->assertStatus(401);
     $this->postJson('/auth/refresh', ['refresh_token' => $userPair->refreshToken])->assertOk();
+});
+
+it('throttles the extra guard\'s confirm-password on its own limiter', function () {
+    // A `throttle:lukk-admin-confirm` that the provider never registered would 500 the route, so
+    // this pins the per-guard registration as much as the bucketing. The per-guard limiters read
+    // their config once at boot (like the login/refresh ones beside them), so this uses the
+    // shipped default of 5 rather than overriding it at runtime.
+    Admin::factory()->create(['email' => 'root@corp.com']);
+    $access = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])
+        ->json('access_token');
+
+    foreach (range(1, 5) as $i) {
+        $this->app['auth']->forgetGuards();
+        $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
+            ->assertStatus(422);
+    }
+
+    $this->app['auth']->forgetGuards();
+    $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
+        ->assertStatus(429);
+
+    // A separate bucket from the default guard's, which is untouched.
+    $this->app['auth']->forgetGuards();
+    $this->postJson('/auth/confirm-password', ['password' => 'wrong-pw'])->assertStatus(401);
+});
+
+it('refuses a step-up confirmation earned on another guard, even for a colliding id', function () {
+    // `lukk.confirm` used to resolve its verifier from `lukk.set-guard`, which never runs on a
+    // consumer's own route — so an admin route verified step-up against the USERS guard's key and
+    // audience, and a confirmation earned on the users guard satisfied the admin gate.
+    Route::middleware(['auth:admin', 'lukk.confirm'])
+        ->delete('/_test/admin-sensitive', fn () => response()->json(['ok' => true]));
+
+    $user = User::factory()->create(['email' => 'attacker@x.com']);
+    $admin = Admin::factory()->create(['email' => 'root@corp.com']);
+
+    // The premise of the attack: ids collide across the two providers.
+    expect((string) $user->getKey())->toBe((string) $admin->getKey());
+
+    forget();
+    $confirmation = $this->withToken($user->startSession()->accessToken)
+        ->postJson('/auth/confirm-password', ['password' => 'password'])
+        ->assertOk()->json('confirmation_token');
+
+    // A stolen admin access token plus a users-guard confirmation must not open the gate.
+    forget();
+    $this->withToken($admin->startSession()->accessToken)
+        ->withHeaders(['X-Lukk-Confirmation' => $confirmation])
+        ->deleteJson('/_test/admin-sensitive')
+        ->assertStatus(423);
+});
+
+it('accepts a step-up confirmation earned on the guard that owns the route', function () {
+    // The mirror of the bug: verifying under the wrong guard also meant an admin's OWN
+    // confirmation, minted at `admin/auth/confirm-password`, could never satisfy the gate.
+    Route::middleware(['auth:admin', 'lukk.confirm'])
+        ->delete('/_test/admin-sensitive', fn () => response()->json(['ok' => true]));
+
+    $admin = Admin::factory()->create(['email' => 'root@corp.com']);
+
+    forget();
+    $access = $admin->startSession()->accessToken;
+    $confirmation = $this->withToken($access)
+        ->postJson('/admin/auth/confirm-password', ['password' => 'password'])
+        ->assertOk()->json('confirmation_token');
+
+    forget();
+    $this->withToken($access)
+        ->withHeaders(['X-Lukk-Confirmation' => $confirmation])
+        ->deleteJson('/_test/admin-sensitive')
+        ->assertOk();
+});
+
+it('gives the extra guard\'s confirm-password a per-user bucket, not just per-IP', function () {
+    // Per-IP alone would hand a thief holding a stolen admin token 5 password guesses per source
+    // /64 per minute — and the extra guards are the higher-privilege audiences multi-guard exists
+    // for. Rotating the address must not buy more attempts.
+    $admin = Admin::factory()->create(['email' => 'root@corp.com']);
+
+    forget();
+    $access = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])
+        ->json('access_token');
+
+    foreach (range(1, 5) as $i) {
+        forget();
+        $this->withToken($access)->withServerVariables(['REMOTE_ADDR' => "198.51.100.{$i}"])
+            ->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
+            ->assertStatus(422);
+    }
+
+    forget();
+    $this->withToken($access)->withServerVariables(['REMOTE_ADDR' => '198.51.100.99'])
+        ->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
+        ->assertStatus(429);
 });

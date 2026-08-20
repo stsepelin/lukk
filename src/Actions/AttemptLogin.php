@@ -35,21 +35,31 @@ class AttemptLogin
         // Lock first: a locked account whose decaying bucket is also full would otherwise be told
         // "try again in N seconds", which with manual-only release is exactly the untruth that
         // choosing 423 over 429 exists to avoid.
-        $this->ensureIsNotLocked($request);
+        // Resolved once and reused: the gate, the failure count and the release must all name the
+        // same bucket, and re-deriving it per call would mean three provider lookups.
+        $subject = $this->lockoutSubject($request);
+
+        $this->ensureIsNotLocked($request, $subject);
         $this->ensureIsNotThrottled($request);
 
         try {
             $user = $this->resolve($request);
         } catch (ValidationException $e) {
             $this->limiter->increment($request);
-            $this->lockouts?->recordFailure('login', $this->limiter->subject($request), $this->limiter->guard());
+            $this->lockouts?->recordFailure('login', $subject, $this->limiter->guard());
 
             throw $e;
         }
 
         $this->limiter->clear($request);
         // "Consecutive" is the whole point of the cap: any success ends the run.
-        $this->lockouts?->release('login', $this->limiter->subject($request), $this->limiter->guard());
+        $this->lockouts?->release('login', $subject, $this->limiter->guard());
+        // A step-up lock counts failures against the SAME password, so a successful login is proof
+        // enough to clear it — and it's the only self-service escape from a confirm lock an attacker
+        // set with a stolen access token (they cannot log in without the password, so this hands
+        // them nothing). One extra query on the successful-login path, and only when the feature is
+        // on; `release()` does a non-locking existence check first, so it is usually a single SELECT.
+        $this->lockouts?->release('confirm', (string) $user->getAuthIdentifier(), $this->limiter->guard());
 
         return $user;
     }
@@ -59,10 +69,8 @@ class AttemptLogin
      * themselves, this bounds a RUN and is held until something releases it. 423 rather than 429
      * because "retry later" may be untrue — with `release_after` at 0 it needs intervention.
      */
-    private function ensureIsNotLocked(Request $request): void
+    private function ensureIsNotLocked(Request $request, string $subject): void
     {
-        $subject = $this->limiter->subject($request);
-
         if ($this->lockouts === null || ! $this->lockouts->locked('login', $subject, $this->limiter->guard())) {
             return;
         }
@@ -132,6 +140,27 @@ class AttemptLogin
     }
 
     /** The identifier field (config `lukk.username`) — the request field + the error key. */
+    /**
+     * The lockout subject for this attempt. Costs one provider lookup, and only when the feature is
+     * on — see `LoginRateLimiter::lockoutSubject()` for why the identifier alone is not safe to key
+     * on. The lookup reads `lukk.username`, which is the same field the counter has always keyed
+     * on, so a `Lukk::authenticateUsing` callback that authenticates elsewhere is no worse off than
+     * before (config/lukk.php documents that it must set `lukk.username` to match).
+     */
+    private function lockoutSubject(Request $request): string
+    {
+        if ($this->lockouts === null) {
+            return '';
+        }
+
+        $identifier = (string) $request->input($this->field());
+
+        return LoginRateLimiter::lockoutSubject(
+            $this->users->retrieveByCredentials([$this->field() => $identifier]),
+            $identifier,
+        );
+    }
+
     private function field(): string
     {
         return (string) config('lukk.username', 'email');

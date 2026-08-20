@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\AccountLocked;
 use Lukk\Models\Lockout;
@@ -59,7 +60,7 @@ it('counts consecutive failures, so a success in between clears the run', functi
     // The run restarted, so two more failures don't reach the cap of three.
     failLogin()->assertStatus(422);
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'victim@y.com')->value('attempts'))->toBe(2);
+    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(2);
 });
 
 it('locks one account without touching another', function () {
@@ -84,7 +85,7 @@ it('fires AccountLocked once, on the transition', function () {
 
     // A locked-out user gets no other signal, so an app needs exactly one notification to hang off.
     Event::assertDispatchedTimes(AccountLocked::class, 1);
-    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'victim@y.com');
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::first()->getKey());
 });
 
 it('auto-releases once release_after has elapsed', function () {
@@ -213,7 +214,7 @@ it('prunes spent counters but never a lock that is still held', function () {
     $this->artisan('lukk:prune')->assertSuccessful();
 
     // The two stale probe counters go; the held lock stays, or pruning would be a release path.
-    expect(Lockout::query()->pluck('subject')->all())->toBe(['victim@y.com']);
+    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::first()->getKey()]);
 });
 
 it('rejects an unknown --purpose rather than releasing something else', function () {
@@ -233,7 +234,7 @@ it('restarts the run after an auto-release rather than leaving it one attempt fr
 
     // A fresh run: the next failure is attempt 1, not attempt 4 re-locking immediately.
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'victim@y.com')->value('attempts'))->toBe(1);
+    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(1);
 });
 
 it('prunes nothing, without erroring, when the table was never published', function () {
@@ -246,22 +247,204 @@ it('recovers when it loses the insert race for a brand-new subject', function ()
     // The real race: two first-failures both miss the row and both INSERT, and the loser hits the
     // unique index. Left uncaught that is a QueryException — a 500 on /auth/login — AND the loser's
     // guess goes uncounted, so deliberate concurrency would be strictly better for an attacker.
-    // Reproduced deterministically by inserting the winner's row from inside the loser's `creating`
-    // event, so the loser's INSERT collides exactly as it would under load.
-    $winner = true;
-    Lockout::creating(function ($model) use (&$winner) {
-        if (! $winner) {
+    //
+    // The winner's row has to be committed BEFORE the loser's INSERT opens its savepoint, or the
+    // rollback to that savepoint would take the winner's row with it. So it is inserted from a
+    // `DB::listen` hook on the lookup SELECT that just missed — the exact instant the real winner
+    // would have committed — rather than from the loser's own `creating` event.
+    $armed = true;
+    DB::listen(function ($query) use (&$armed) {
+        // Match the LOOKUP specifically. A looser `lukk_lockouts` match also catches the
+        // `hasTable` probe that runs first, which would insert the row before the lookup — the
+        // lookup would then find it, no INSERT would collide, and this test would pass while
+        // exercising nothing.
+        if (! $armed || ! str_contains($query->sql, 'from "lukk_lockouts" where "purpose"')) {
             return;
         }
-        $winner = false;
+        $armed = false;
         DB::table('lukk_lockouts')->insert([
-            'id' => (string) Str::ulid(), 'purpose' => $model->purpose, 'subject' => $model->subject,
-            'guard' => $model->guard, 'attempts' => 4, 'created_at' => now(), 'updated_at' => now(),
+            'id' => (string) Str::ulid(), 'purpose' => 'login', 'subject' => 'idn:raced@y.com',
+            'guard' => 'api', 'attempts' => 4, 'created_at' => now(), 'updated_at' => now(),
         ]);
     });
 
     // The loser re-reads the winner's row and increments it, rather than throwing.
-    expect(app(LockoutRepository::class)->recordFailure('login', 'raced@y.com', 'api'))->toBe(5);
+    expect(app(LockoutRepository::class)->recordFailure('login', 'idn:raced@y.com', 'api'))->toBe(5);
+});
 
-    Lockout::flushEventListeners();
+// ---------------------------------------------------------------------------
+// Step-up confirmation. Same secret as login, so it counts toward the same
+// §5.2.2 cap — keyed on the user id, since the caller is already authenticated.
+// ---------------------------------------------------------------------------
+
+/** One failed step-up confirmation. */
+function failStepUp(string $access)
+{
+    app('auth')->forgetGuards();
+
+    return test()->withToken($access)->postJson('/auth/confirm-password', ['password' => 'wrong-pw']);
+}
+
+it('locks step-up confirmation after a run of consecutive failures', function () {
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    failStepUp($access)->assertStatus(422);
+    failStepUp($access)->assertStatus(422);
+    failStepUp($access)->assertStatus(422); // hits the cap of three
+
+    failStepUp($access)->assertStatus(423);
+
+    // The lock holds against the right password too — otherwise it isn't a lock.
+    app('auth')->forgetGuards();
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])
+        ->assertStatus(423);
+
+    expect(Lockout::where('purpose', 'confirm')->where('subject', (string) $user->getKey())->exists())->toBeTrue();
+});
+
+it('keeps the confirm and login counters separate, so burning one does not spend the other', function () {
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access)->assertStatus(423);
+
+    // Step-up is locked; login is untouched and still takes its own full run.
+    failLogin()->assertStatus(422);
+});
+
+it('clears a step-up lock on a successful login, the self-service way out', function () {
+    // An attacker with a stolen access token can lock step-up; they cannot log in without the
+    // password, so letting a successful login clear it hands them nothing.
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access)->assertStatus(423);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+
+    app('auth')->forgetGuards();
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])->assertOk();
+});
+
+it('clears a step-up lock on a password reset, since those failures are now meaningless', function () {
+    config(['lukk.features.password_reset' => true, 'lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access)->assertStatus(423);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/reset-password', [
+        'email' => 'victim@y.com',
+        'token' => Password::broker()->createToken($user),
+        'password' => 'new-password-1',
+        'password_confirmation' => 'new-password-1',
+    ])->assertOk();
+
+    expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
+});
+
+it('releases a confirm lock from the console', function () {
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access);
+    failStepUp($access)->assertStatus(423);
+
+    $this->artisan('lukk:release', ['subject' => (string) $user->getKey(), '--purpose' => 'confirm'])
+        ->assertSuccessful();
+
+    app('auth')->forgetGuards();
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])->assertOk();
+});
+
+it('bounds the subject in bytes, so a transliteration blow-up cannot 500 the login route', function () {
+    // `LoginRequest` caps the identifier at 255 CHARACTERS, but transliteration expands up to ~6x:
+    // 43 copies of `㈱` pass validation and come out at 258 bytes. That overflows the `subject`
+    // column (varchar 255) and the database cache store's `key` column — MySQL 1406 / PG 22001,
+    // both a 500 on an unauthenticated endpoint. SQLite doesn't enforce the length, so this asserts
+    // on the stored value rather than relying on the engine to catch it.
+    $long = str_repeat('㈱', 43);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => $long, 'password' => 'wrong'])->assertStatus(422);
+
+    $subject = (string) Lockout::where('purpose', 'login')->value('subject');
+
+    expect(strlen($subject))->toBeLessThanOrEqual(255)
+        ->and($subject)->toStartWith('idn:sha256:');
+});
+
+it('releases a user-id lock whose case matters, like a ULID', function () {
+    // Only the `login` subject is a normalized identifier. Lower-casing a `two_factor`/`confirm`
+    // subject breaks a ULID (uppercase Crockford base32) everywhere comparison is binary, so the
+    // documented operator escape hatch would silently no-op.
+    $ulid = (string) Str::ulid();
+    app(LockoutRepository::class)->recordFailure('two_factor', $ulid, 'api');
+
+    $this->artisan('lukk:release', ['subject' => $ulid, '--purpose' => 'two_factor'])->assertSuccessful();
+
+    expect(Lockout::where('subject', $ulid)->exists())->toBeFalse();
+});
+
+it('does not let a look-alike account share, or clear, another account\'s lock', function () {
+    // The subject used to be `transliterate(lower(trim(...)))`, which is many-to-one across real
+    // accounts: `аdmin@y.com` (Cyrillic а) folds onto `admin@y.com`. Both shared one lock row, and
+    // since a password reset releases on that subject, whoever controlled the look-alike could lock
+    // the victim, reset their OWN password, clear the victim's lock, and repeat — reducing the
+    // §5.2.2 cap back to the decaying throttle it exists to replace.
+    config(['lukk.features.password_reset' => true]);
+    $victim = User::factory()->create(['email' => 'admin@y.com', 'password' => bcrypt('correct')]);
+    $lookalike = User::factory()->create(['email' => "\u{0430}dmin@y.com", 'password' => bcrypt('correct')]);
+
+    // Same normalization, different accounts — the premise of the attack.
+    expect(LoginRateLimiter::normalize($lookalike->email))
+        ->toBe(LoginRateLimiter::normalize($victim->email));
+
+    foreach (range(1, 3) as $i) {
+        failLogin('admin@y.com');
+    }
+    failLogin('admin@y.com')->assertStatus(423);
+
+    // The look-alike is a different account, so it holds a different counter and is not locked.
+    failLogin("\u{0430}dmin@y.com")->assertStatus(422);
+
+    // And resetting the look-alike's password must not release the victim's lock.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/reset-password', [
+        'email' => $lookalike->email,
+        'token' => Password::broker()->createToken($lookalike),
+        'password' => 'new-password-1',
+        'password_confirmation' => 'new-password-1',
+    ])->assertOk();
+
+    failLogin('admin@y.com')->assertStatus(423);
+});
+
+it('still counts an identifier that names no account, so being locked is not an existence oracle', function () {
+    foreach (range(1, 3) as $i) {
+        failLogin('ghost@y.com');
+    }
+
+    // A non-existent address locks exactly like a real one — otherwise 423-vs-422 would answer
+    // "does this account exist?" for free.
+    failLogin('ghost@y.com')->assertStatus(423);
+    expect(Lockout::where('subject', 'idn:ghost@y.com')->exists())->toBeTrue();
 });

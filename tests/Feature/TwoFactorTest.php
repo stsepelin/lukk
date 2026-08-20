@@ -309,3 +309,51 @@ it('keeps the two-factor lock separate from the login lock for the same account'
         ->assertOk()
         ->assertJson(['two_factor' => true]);
 });
+
+it('does not let a junk recovery_code smuggle a TOTP guess past the lock', function () {
+    // The exemption is for a recovery-code-ONLY attempt. Keyed on the field's mere presence, it
+    // handed the cap away: the challenge action tries the TOTP code first, so attaching any junk
+    // recovery code resumed brute-forcing the 6-digit space against a locked account.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+
+    $challenge = fn () => test()->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    for ($i = 0; $i < 3; $i++) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => '000000']);
+    }
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge(), 'code' => '000000', 'recovery_code' => 'not-a-real-code',
+    ])->assertStatus(423);
+
+    // Not even with the RIGHT code — a lock that the caller can shrug off isn't a lock.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge(), 'code' => currentOtp($secret), 'recovery_code' => 'not-a-real-code',
+    ])->assertStatus(423);
+});
+
+it('still lets a recovery code alone out of a two-factor lock', function () {
+    // The exemption itself must survive the fix above: a recovery code is ~119 bits, single-use and
+    // hashed, so a consecutive cap protects nothing — and gating it would strand a user whose
+    // second factor an attacker deliberately burned.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+
+    $challenge = fn () => test()->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    for ($i = 0; $i < 3; $i++) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => '000000']);
+    }
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertOk()
+        ->assertJsonStructure(['access_token']);
+});

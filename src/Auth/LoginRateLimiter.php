@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Auth;
 
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Lukk\Lukk;
@@ -70,12 +71,6 @@ class LoginRateLimiter
         return 'acct|'.$this->guard.'|'.$this->identifier($request);
     }
 
-    /** The normalized account identifier an account lockout counts consecutive failures against. */
-    public function subject(Request $request): string
-    {
-        return $this->identifier($request);
-    }
-
     /** The guard this limiter is scoped to, so a lock on one guard can't reach another. */
     public function guard(): string
     {
@@ -84,6 +79,55 @@ class LoginRateLimiter
 
     private function identifier(Request $request): string
     {
-        return Str::transliterate(Str::lower(trim((string) $request->input($this->username))));
+        return self::normalize((string) $request->input($this->username));
+    }
+
+    /**
+     * The lockout subject for a login attempt: IDENTITY when the identifier names an account,
+     * the normalized identifier when it doesn't.
+     *
+     * The persistent counter must not key on `normalize()` alone. That map is many-to-one across
+     * distinct accounts — `аdmin@x.com` (Cyrillic а) and `ADMIN@x.com` (on any engine whose unique
+     * index compares binary) both fold onto `admin@x.com` — so two real accounts shared one lock
+     * row. Since a password reset releases on that subject, whoever controlled a look-alike account
+     * could lock the victim, reset their own password, clear the victim's lock, and repeat: the
+     * §5.2.2 cap degraded back to the decaying throttle it exists to replace.
+     *
+     * The fallback keeps the two properties that made normalization right in the first place: an
+     * identifier naming no account still gets a counter, so being locked is not an existence
+     * oracle, and look-alikes of a non-account still collapse into one bucket rather than minting
+     * a fresh run each.
+     */
+    public static function lockoutSubject(?Authenticatable $user, string $identifier): string
+    {
+        if ($user !== null) {
+            return 'id:'.$user->getAuthIdentifier();
+        }
+
+        $normalized = self::normalize($identifier);
+
+        // Stay empty when there is nothing to key on. Prefixing an empty identifier would produce
+        // the non-empty `idn:`, slipping past the repository's empty-subject refusal and putting
+        // every unkeyable caller into ONE never-decaying bucket — locking the whole application at
+        // attempt 100. That refusal is the guard; don't hand it a truthy value.
+        return $normalized === '' ? '' : 'idn:'.$normalized;
+    }
+
+    /**
+     * The canonical bucket/lock subject for an identifier.
+     *
+     * Bounded in BYTES, not characters. `LoginRequest` caps the input at `max:255` characters, but
+     * transliteration expands up to ~6x — 43 copies of `㈱` pass validation and come out at 258
+     * bytes. That overflows `lukk_lockouts.subject` (varchar 255) and, on Laravel's default
+     * `database` cache store, the `cache.key` column too: MySQL strict mode raises 1406 and
+     * PostgreSQL 22001, both surfacing as a 500 on the unauthenticated `/auth/login`. Long values
+     * are hashed rather than truncated, so two distinct long identifiers can't be folded into one
+     * shared bucket by the fix itself.
+     */
+    public static function normalize(string $identifier): string
+    {
+        $normalized = Str::transliterate(Str::lower(trim($identifier)));
+
+        return strlen($normalized) > 190 ? 'sha256:'.hash('sha256', $normalized) : $normalized;
     }
 }

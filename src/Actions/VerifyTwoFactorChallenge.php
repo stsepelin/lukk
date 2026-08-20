@@ -45,7 +45,14 @@ class VerifyTwoFactorChallenge
         // A recovery code is the way OUT of a lock, so it must not be gated by one: it's ~119 bits
         // of entropy, single-use and salted+hashed, so a consecutive cap protects nothing there —
         // while gating it would strand a user whose second factor an attacker deliberately burned.
-        if ($recoveryCode === null && $this->lockouts?->locked('two_factor', $subject, $this->guard)) {
+        //
+        // The exemption is for a recovery-code-ONLY attempt. Keying it on the mere PRESENCE of the
+        // field handed the cap away: `ChallengeTwoFactor` tries the TOTP code first, so attaching
+        // any junk recovery code to a guess skipped the lock and resumed brute-forcing the 6-digit
+        // space — including against an account already locked.
+        $recoveryOnly = ($code === null || $code === '') && $recoveryCode !== null && $recoveryCode !== '';
+
+        if (! $recoveryOnly && $this->lockouts?->locked('two_factor', $subject, $this->guard)) {
             $seconds = $this->lockouts->availableIn('two_factor', $subject, $this->guard);
 
             throw ValidationException::withMessages([
