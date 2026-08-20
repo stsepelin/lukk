@@ -135,6 +135,28 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Account Lockout
+    |--------------------------------------------------------------------------
+    |
+    | Only used when features.lockout is on. "max_attempts" is the consecutive
+    | failure cap — NIST SP 800-63B §5.2.2 says no more than 100, so treat that
+    | as a ceiling, not a target. The counter is cleared by any successful
+    | authentication, never by time.
+    |
+    | "release_after" auto-lifts a lock that many seconds after it was set; 0
+    | holds it until `php artisan lukk:release` or your own code clears it.
+    | Manual-only is the strictest reading, but it means an attacker who locks an
+    | account has denied it until someone intervenes.
+    |
+    */
+
+    'lockout' => [
+        'max_attempts' => (int) env('LUKK_LOCKOUT_MAX_ATTEMPTS', 100),
+        'release_after' => (int) env('LUKK_LOCKOUT_RELEASE_AFTER', 0),
+    ],
+
     'rate_limits' => [
 
         'ipv6_prefix' => (int) env('LUKK_RATE_LIMIT_IPV6_PREFIX', 64),
@@ -712,6 +734,26 @@ return [
         */
 
         'two_factor' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Account Lockout
+        |--------------------------------------------------------------------------
+        |
+        | NIST SP 800-63B §5.2.2 requires a verifier to limit CONSECUTIVE failed
+        | authentication attempts on one account to no more than 100. The throttles
+        | above are decaying windows — they bound a rate, not a run — so satisfying
+        | the clause needs a persistent counter. Requires the published lockout
+        | migration.
+        |
+        | Off by default because a hard lockout is a denial-of-service primitive:
+        | anyone who knows an address can burn its budget deliberately. Turn it on
+        | when the protocol requirement outweighs that, and set "release_after" so
+        | the denial is bounded.
+        |
+        */
+
+        'lockout' => false,
 
         /*
         |--------------------------------------------------------------------------

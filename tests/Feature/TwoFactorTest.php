@@ -270,3 +270,42 @@ it('reports zero remaining when the recovery-code column is not a list', functio
 
     expect($user->recoveryCodesRemaining())->toBe(0);
 });
+
+it('locks a user after a run of failed two-factor codes, which is the clause\'s real gap', function () {
+    // The per-account 2FA limiter is a decaying 5/60s window, so lifetime guesses were unbounded —
+    // roughly 7,200/day against a 6-digit code. This is the cap NIST SP 800-63B §5.2.2 asks for.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+
+    $challenge = fn () => test()->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    for ($i = 0; $i < 3; $i++) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => '000000'])
+            ->assertStatus(422);
+    }
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge(), 'code' => '000000'])
+        ->assertStatus(423);
+});
+
+it('keeps the two-factor lock separate from the login lock for the same account', function () {
+    // Different authenticators, different runs — burning one must not spend the other's budget.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+    $user = User::factory()->create(['email' => 'victim@y.com']);
+    confirmedTwoFactor($user);
+
+    for ($i = 0; $i < 3; $i++) {
+        app('auth')->forgetGuards();
+        $challenge = $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'password'])->json('challenge_token');
+        $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => '000000']);
+    }
+
+    // 2FA is locked, but the password step still works — it has its own untouched counter.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'password'])
+        ->assertOk()
+        ->assertJson(['two_factor' => true]);
+});

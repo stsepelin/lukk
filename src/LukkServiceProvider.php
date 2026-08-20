@@ -38,8 +38,10 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Console\GenerateKeysCommand;
 use Lukk\Console\GenerateSecretCommand;
 use Lukk\Console\PruneTokensCommand;
+use Lukk\Console\ReleaseLockoutCommand;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\EmailVerificationResponse;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\LoginResponse;
 use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\PasskeyRepository;
@@ -62,6 +64,7 @@ use Lukk\Http\Responses\LogoutResponse as LogoutResponseImpl;
 use Lukk\Http\Responses\RefreshResponse as RefreshResponseImpl;
 use Lukk\Http\Responses\RegisterResponse as RegisterResponseImpl;
 use Lukk\Http\Responses\TwoFactorChallengeResponse as TwoFactorChallengeResponseImpl;
+use Lukk\Lockout\DatabaseLockoutRepository;
 use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Passkeys\SpomkyWebAuthnCeremony;
@@ -132,7 +135,7 @@ class LukkServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->registerPublishing();
-            $this->commands([GenerateSecretCommand::class, GenerateKeysCommand::class, PruneTokensCommand::class]);
+            $this->commands([GenerateSecretCommand::class, GenerateKeysCommand::class, PruneTokensCommand::class, ReleaseLockoutCommand::class]);
         }
     }
 
@@ -228,7 +231,13 @@ class LukkServiceProvider extends ServiceProvider
         ));
         // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
         // admin login authenticates against the admins table, not the users table.
-        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin($this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class)));
+        $this->app->bind(LockoutRepository::class, fn () => new DatabaseLockoutRepository(
+            (int) ($this->config()['lockout']['max_attempts'] ?? 100),
+            (int) ($this->config()['lockout']['release_after'] ?? 0),
+        ));
+
+        $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProviderFor(Lukk::currentGuard())));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
@@ -243,6 +252,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             (int) $this->config()['rate_limits']['two_factor']['max_attempts'],
             (int) $this->config()['rate_limits']['two_factor']['decay_seconds'],
+            $this->lockouts($app), Lukk::currentGuard(),
         ));
         $this->app->bind(RegenerateRecoveryCodes::class, fn () => new RegenerateRecoveryCodes(
             (int) $this->config()['two_factor']['recovery_codes']));
@@ -379,6 +389,12 @@ class LukkServiceProvider extends ServiceProvider
         }
     }
 
+    /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
+    private function lockouts($app): ?LockoutRepository
+    {
+        return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
+    }
+
     private function registerPublishing(): void
     {
         $this->publishes([__DIR__.'/../config/lukk.php' => config_path('lukk.php')], 'lukk-config');
@@ -389,6 +405,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->publishesMigrations([__DIR__.'/../database/migrations' => database_path('migrations')], 'lukk-migrations');
         $this->publishesMigrations([__DIR__.'/../database/two-factor' => database_path('migrations')], 'lukk-two-factor-migrations');
         $this->publishesMigrations([__DIR__.'/../database/passkeys' => database_path('migrations')], 'lukk-passkey-migrations');
+        $this->publishesMigrations([__DIR__.'/../database/lockout' => database_path('migrations')], 'lukk-lockout-migrations');
     }
 
     /**

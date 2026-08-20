@@ -70,6 +70,18 @@ class LoginRateLimiter
         return 'acct|'.$this->guard.'|'.$this->identifier($request);
     }
 
+    /** The normalized account identifier an account lockout counts consecutive failures against. */
+    public function subject(Request $request): string
+    {
+        return $this->identifier($request);
+    }
+
+    /** The guard this limiter is scoped to, so a lock on one guard can't reach another. */
+    public function guard(): string
+    {
+        return $this->guard;
+    }
+
     private function identifier(Request $request): string
     {
         return Str::transliterate(Str::lower(trim((string) $request->input($this->username))));

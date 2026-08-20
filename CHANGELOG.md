@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Account lockout (`features.lockout`, opt-in, off by default)** — an absolute cap on *consecutive* failed authentication attempts, satisfying **NIST SP 800-63B §5.2.2** ("the verifier SHALL limit consecutive failed authentication attempts on a single account to no more than 100"). The existing throttles are decaying windows: they bound a *rate*, not a *run*, so lifetime guesses were unbounded — roughly 7,200/day against a 6-digit TOTP code. Covers both password login (keyed on the normalized identifier) and the two-factor challenge (keyed on the user), each with its own counter and guard-scoped, so burning one doesn't spend the other's budget.
+
+  Counters live in a new `lukk_lockouts` table (publish `lukk-lockout-migrations`) because "consecutive" can't be expressed by a cache entry that expires — and a cache flush would silently release every lock. `Lockout` storage sits behind a `LockoutRepository` contract, so it's swappable like `RefreshTokenRepository`.
+
+  **A hard lockout is also a denial-of-service primitive** — anyone who knows an address can burn its budget deliberately — which is why it ships off, and why release has four paths: any successful authentication clears the run (that's what "consecutive" means), `php artisan lukk:release <subject>` for operators, the repository API for your own code, and an optional `lockout.release_after` that auto-lifts the lock and bounds the denial. A locked account answers **423** rather than 429, because with manual-only release "retry later" would be untrue. An `AccountLocked` event fires once on the transition — a locked-out user gets no other signal — with `AccountReleased` on the way back.
+
 - **`Lukk::rateLimitKeyUsing()`** — replace the identity every lukk throttle buckets on. The default is the request IP; override it when the source address isn't the right bucket for your deployment (a shared API gateway, a tenant, a CDN's own visitor token).
 
 ### Changed
