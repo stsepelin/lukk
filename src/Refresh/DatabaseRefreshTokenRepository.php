@@ -74,6 +74,16 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         $this->scoped()->whereKey($id)->update(['rotated_at' => now()]);
     }
 
+    public function countLiveTokens(string $familyId): int
+    {
+        return $this->scoped()
+            ->where('family_id', $familyId)
+            ->whereNull('rotated_at')
+            ->whereNull('revoked_at')
+            ->where('expires_at', '>=', now()->getTimestamp())
+            ->count();
+    }
+
     public function revokeFamily(string $familyId): void
     {
         $this->scoped()
@@ -82,20 +92,20 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->update(['revoked_at' => now()]);
     }
 
-    public function revokeUserFamilies(int|string $userId): array
+    public function revokeUserFamilies(int|string $userId, ?callable $before = null): array
     {
-        return $this->revokeActiveFamilies($userId, null);
+        return $this->revokeActiveFamilies($userId, null, $before);
     }
 
-    public function revokeUserFamiliesExcept(int|string $userId, string $exceptFamilyId): array
+    public function revokeUserFamiliesExcept(int|string $userId, string $exceptFamilyId, ?callable $before = null): array
     {
-        return $this->revokeActiveFamilies($userId, $exceptFamilyId);
+        return $this->revokeActiveFamilies($userId, $exceptFamilyId, $before);
     }
 
     /**
      * @return array<int,string>
      */
-    private function revokeActiveFamilies(int|string $userId, ?string $exceptFamilyId): array
+    private function revokeActiveFamilies(int|string $userId, ?string $exceptFamilyId, ?callable $before = null): array
     {
         $constrain = fn (Builder $query): Builder => $query
             ->where('user_id', $userId)
@@ -103,8 +113,17 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->whereNull('revoked_at');
 
         // Atomic: a family created between the read and update would be revoked but never returned (so never denylisted).
-        return DB::transaction(function () use ($constrain) {
+        return DB::transaction(function () use ($constrain, $before) {
             $ids = $constrain($this->scoped())->distinct()->pluck('family_id')->all();
+
+            // `$before` denylists, and it runs BEFORE the update and inside the transaction — the
+            // same ordering `RevokeSession` documents and for the same reason. A leftover denylist
+            // entry after a failed update is harmless and expires; rows revoked in the DB with no
+            // denylist entry would keep authenticating for up to `access_ttl`, which is exactly the
+            // window a user performing "log out everywhere" believes they have closed.
+            if ($before !== null) {
+                $before($ids);
+            }
 
             $constrain($this->scoped())->update(['revoked_at' => now()]);
 

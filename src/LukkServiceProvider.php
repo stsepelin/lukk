@@ -71,6 +71,7 @@ use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Passkeys\SpomkyWebAuthnCeremony;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Support\CacheDenylist;
+use Lukk\Support\CacheStoreGuard;
 use Lukk\Support\OptionalDependency;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
@@ -228,7 +229,8 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(RevokeOtherSessions::class, fn ($app) => new RevokeOtherSessions(
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), $app->make(RevokeSession::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
+            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig()));
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
@@ -504,7 +506,11 @@ class LukkServiceProvider extends ServiceProvider
 
     private function cacheStore(): CacheRepository
     {
-        return $this->app->make('cache')->store($this->config()['denylist_store'] ?? null);
+        $store = $this->app->make('cache')->store($this->config()['denylist_store'] ?? null);
+
+        CacheStoreGuard::assertCanHoldRevocations($store);
+
+        return $store;
     }
 
     private function userProvider(): ?UserProvider
