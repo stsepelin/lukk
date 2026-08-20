@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Events\AccountLocked;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\User;
@@ -122,4 +124,91 @@ it('stays completely inert while the feature is off', function () {
     expect(Lockout::query()->count())->toBe(0);
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+});
+
+it('never locks on an empty subject, which would lock the whole application', function () {
+    // `Lukk::authenticateUsing` can authenticate on a field lukk never sees, and then EVERY login
+    // keys on ''. Unlike a decaying limiter that bucket never heals, so 100 failures anywhere would
+    // lock every account permanently. Refusing to count an empty subject is what stops that.
+    for ($i = 0; $i < 5; $i++) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['password' => 'no-identifier-at-all'])->assertStatus(422);
+    }
+
+    expect(Lockout::query()->count())->toBe(0);
+});
+
+it('does not break login when the feature is on but the table was never published', function () {
+    // The flag is one config line; the migration is a separate publish group. Without a guard this
+    // 500s EVERY login, including with the correct password — a total auth outage from a typo.
+    Schema::drop('lukk_lockouts');
+    $user = User::factory()->create(['email' => 'ok@y.com', 'password' => bcrypt('correct')]);
+
+    failLogin('ok@y.com')->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'ok@y.com', 'password' => 'correct'])->assertOk();
+});
+
+it('refuses a max_attempts of 0, which would lock every account on its owner\'s first typo', function () {
+    // A non-numeric env value casts to 0 and `attempts >= 0` locks immediately. Same footgun class
+    // as a missing rate-limit key resolving to Limit(0).
+    config(['lukk.lockout.max_attempts' => 'one hundred']);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    failLogin()->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+});
+
+it('lets a password reset release the lock — the only self-service way out', function () {
+    $user = User::factory()->create(['email' => 'victim@y.com']);
+
+    for ($i = 0; $i < 3; $i++) {
+        failLogin();
+    }
+    failLogin()->assertStatus(423);
+
+    $token = Password::createToken($user);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/reset-password', [
+        'token' => $token, 'email' => 'victim@y.com',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertOk();
+
+    // Proving control of the address is stronger evidence than the password — being still locked
+    // after it would leave a support ticket as the user's only option.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'new-password-123'])->assertOk();
+});
+
+it('reports honestly when lukk:release finds nothing, and matches a differently-cased subject', function () {
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    for ($i = 0; $i < 3; $i++) {
+        failLogin();
+    }
+
+    // Nothing to release must not report success — during an incident the operator would move on.
+    $this->artisan('lukk:release', ['subject' => 'never-locked@y.com'])->assertFailed();
+
+    // The realistic flow: paste the address as the user wrote it.
+    $this->artisan('lukk:release', ['subject' => '  Victim@Y.com '])->assertSuccessful();
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+});
+
+it('prunes spent counters but never a lock that is still held', function () {
+    User::factory()->create(['email' => 'victim@y.com']);
+    failLogin('probe-a@y.com');
+    failLogin('probe-b@y.com');
+    for ($i = 0; $i < 3; $i++) {
+        failLogin();
+    }
+
+    expect(Lockout::query()->count())->toBe(3);
+
+    $this->travel(31)->days();
+    $this->artisan('lukk:prune')->assertSuccessful();
+
+    // The two stale probe counters go; the held lock stays, or pruning would be a release path.
+    expect(Lockout::query()->pluck('subject')->all())->toBe(['victim@y.com']);
 });

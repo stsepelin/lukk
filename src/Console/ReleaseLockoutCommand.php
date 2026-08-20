@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Lukk\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Str;
 use Lukk\Contracts\LockoutRepository;
-use Lukk\Events\AccountReleased;
 use Lukk\Lukk;
 
 /**
@@ -32,13 +32,20 @@ class ReleaseLockoutCommand extends Command
             return self::FAILURE;
         }
 
-        $subject = (string) $this->argument('subject');
+        // Recording normalizes (trim/lower/transliterate); releasing has to match, or the obvious
+        // operator flow — paste the address out of the support ticket — silently does nothing.
+        $subject = Str::transliterate(Str::lower(trim((string) $this->argument('subject'))));
         // Locks are stamped with the guard that recorded them, so releasing has to name the same
         // one — defaulting to null would silently no-op on a single-guard app.
-        $guard = $this->option('guard') !== null ? (string) $this->option('guard') : Lukk::currentGuard();
+        $guard = ((string) ($this->option('guard') ?? '')) !== '' ? (string) $this->option('guard') : Lukk::currentGuard();
 
-        $lockouts->release($purpose, $subject, $guard);
-        event(new AccountReleased($purpose, $subject, $guard));
+        // `release()` fires AccountReleased itself, so every path (success, reset, console, expiry)
+        // reports through one place rather than only this one.
+        if ($lockouts->release($purpose, $subject, $guard) === 0) {
+            $this->components->warn(sprintf('No %s lock found for [%s] on guard [%s].', $purpose, $subject, $guard));
+
+            return self::FAILURE;
+        }
 
         $this->components->info(sprintf('Released the %s lock on [%s].', $purpose, $subject));
 

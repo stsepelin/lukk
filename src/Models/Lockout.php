@@ -28,7 +28,9 @@ class Lockout extends Model
 
     protected $table = 'lukk_lockouts';
 
-    protected $guarded = [];
+    // `id` guarded: HasUlids only generates one when the attribute is absent, so a mass-assigned
+    // value would win. Nothing request-derived reaches a fill today; this keeps it that way.
+    protected $guarded = ['id'];
 
     protected function casts(): array
     {

@@ -146,9 +146,17 @@ return [
     | authentication, never by time.
     |
     | "release_after" auto-lifts a lock that many seconds after it was set; 0
-    | holds it until `php artisan lukk:release` or your own code clears it.
-    | Manual-only is the strictest reading, but it means an attacker who locks an
-    | account has denied it until someone intervenes.
+    | holds it until a password reset, `php artisan lukk:release`, or your own
+    | code clears it.
+    |
+    | The two settings pull against each other, so choose deliberately. 0 is the
+    | strict §5.2.2 reading — a run broken only by a SUCCESS — but it means an
+    | attacker who locks an account has denied it until someone intervenes.
+    | Setting it trades that for a decaying cap: 100 / 3600 is no longer "100
+    | consecutive, ever", it is 100 per hour, which is exactly OWASP ASVS V2.2.1
+    | ("no more than 100 failed attempts per hour on a single account") and which
+    | this package does NOT otherwise meet (the per-account throttle allows
+    | ~1,200/hour). Most deployments should prefer that trade.
     |
     */
 

@@ -20,9 +20,23 @@ interface LockoutRepository
     /** Record one failure and return the new consecutive count. */
     public function recordFailure(string $purpose, string $subject, ?string $guard): int;
 
-    /** Clear the counter — a successful authentication, or an explicit release. */
-    public function release(string $purpose, string $subject, ?string $guard): void;
+    /**
+     * Clear the counter — a successful authentication, a password reset, or an explicit release.
+     * Returns how many locks were actually cleared, so an operator tool can tell a hit from a miss.
+     * Implementations MUST fire `AccountReleased` when they clear something, so an audit log sees
+     * every unlock and not just the ones that came through the console.
+     */
+    public function release(string $purpose, string $subject, ?string $guard): int;
 
     /** Seconds until an auto-release, or null when the lock is held until released manually. */
     public function availableIn(string $purpose, string $subject, ?string $guard): ?int;
+
+    /**
+     * Drop counters that can no longer matter, returning how many went.
+     *
+     * Needed because a row is created for EVERY failed identifier, existing or not, and one below
+     * the cap is otherwise immortal — an unauthenticated caller would mint rows forever, and the
+     * table would become a log of every address ever probed.
+     */
+    public function prune(int $staleAfterDays): int;
 }

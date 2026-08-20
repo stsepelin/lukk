@@ -231,16 +231,23 @@ class LukkServiceProvider extends ServiceProvider
         ));
         // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
         // admin login authenticates against the admins table, not the users table.
-        $this->app->bind(LockoutRepository::class, fn () => new DatabaseLockoutRepository(
-            (int) ($this->config()['lockout']['max_attempts'] ?? 100),
-            (int) ($this->config()['lockout']['release_after'] ?? 0),
-        ));
+        $this->app->bind(LockoutRepository::class, function () {
+            $lockout = (array) ($this->config()['lockout'] ?? []);
+            // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
+            // account on its owner's first typo — the `Limit(0)` failure class this package already
+            // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
+            $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100;
+            $after = is_numeric($lockout['release_after'] ?? null) ? (int) $lockout['release_after'] : 0;
+
+            return new DatabaseLockoutRepository(max(1, min(100, $max)), max(0, $after));
+        });
 
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ConfirmPassword::class, fn () => new ConfirmPassword($this->userProviderFor(Lukk::currentGuard())));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
-        $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword($app->make(RevokeAllSessions::class), $this->config()));
+        $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
+            $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(
             $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
 
@@ -324,6 +331,21 @@ class LukkServiceProvider extends ServiceProvider
      * doesn't deep-merge nested arrays, so a missing key would resolve to 0 — and
      * `Limit(0)` would lock everyone out.
      */
+    /**
+     * The lockout keys on `lukk.username`, but `Lukk::authenticateUsing` can authenticate on a field
+     * lukk never sees — and then every login keys on the same empty subject. The repository refuses
+     * to lock on an empty subject, so the failure mode is "silently does nothing" rather than
+     * "locks the whole application", but silently-does-nothing is still not what was asked for.
+     */
+    private function warnOnUnkeyableLockout(): void
+    {
+        if (($this->config()['features']['lockout'] ?? false) && Lukk::$authenticateUsing !== null) {
+            error_log('[lukk] features.lockout is on alongside Lukk::authenticateUsing. The lockout counts '
+                .'failures against `lukk.username` ('.(string) ($this->config()['username'] ?? 'email').'); if your '
+                .'callback authenticates on another field, set lukk.username to match or the lockout cannot key on it.');
+        }
+    }
+
     private function registerRateLimiters(): void
     {
         $limiter = $this->app->make(RateLimiter::class);

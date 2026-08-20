@@ -32,8 +32,11 @@ class AttemptLogin
 
     public function __invoke(Request $request): Authenticatable
     {
-        $this->ensureIsNotThrottled($request);
+        // Lock first: a locked account whose decaying bucket is also full would otherwise be told
+        // "try again in N seconds", which with manual-only release is exactly the untruth that
+        // choosing 423 over 429 exists to avoid.
         $this->ensureIsNotLocked($request);
+        $this->ensureIsNotThrottled($request);
 
         try {
             $user = $this->resolve($request);

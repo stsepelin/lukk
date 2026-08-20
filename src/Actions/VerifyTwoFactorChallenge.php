@@ -42,7 +42,10 @@ class VerifyTwoFactorChallenge
         $key = 'lukk:2fa-challenge:'.$userId;
         $subject = (string) $userId;
 
-        if ($this->lockouts?->locked('two_factor', $subject, $this->guard)) {
+        // A recovery code is the way OUT of a lock, so it must not be gated by one: it's ~119 bits
+        // of entropy, single-use and salted+hashed, so a consecutive cap protects nothing there —
+        // while gating it would strand a user whose second factor an attacker deliberately burned.
+        if ($recoveryCode === null && $this->lockouts?->locked('two_factor', $subject, $this->guard)) {
             $seconds = $this->lockouts->availableIn('two_factor', $subject, $this->guard);
 
             throw ValidationException::withMessages([
