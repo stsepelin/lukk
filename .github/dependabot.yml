@@ -11,3 +11,20 @@ updates:
     groups:
       actions:
         patterns: ['*']
+
+  # No committed lock file — this is a library, so `composer.lock` is gitignored and every install
+  # resolves fresh within the declared ranges. That means a transitive advisory (Laravel pulls in
+  # guzzle, commonmark and a few dozen others) clears itself on the next install; there is nothing
+  # here for Dependabot to bump on that account.
+  #
+  # What it IS for: the declared constraints in composer.json. Those go stale silently — a new
+  # major of pest or testbench, or of firebase/php-jwt, never gets tested until someone widens the
+  # range by hand. Grouped, and low-noise by construction: the package has ONE runtime dependency
+  # and everything else is the test harness.
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      composer:
+        patterns: ['*']
