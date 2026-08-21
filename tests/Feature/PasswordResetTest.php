@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Auth\Notifications\ResetPassword as ResetPasswordNotification;
+use Illuminate\Contracts\Hashing\Hasher;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -191,4 +192,54 @@ it('logs in with the new password after a reset', function () {
 
     $this->postJson('/auth/login', ['email' => 'a@b.c', 'password' => 'new-password-123'])
         ->assertOk()->assertJsonStructure(['access_token']);
+});
+
+it('spends equivalent work on an unknown address, so timing cannot enumerate', function () {
+    // The RESPONSE was already constant; the TIMING was not. A known address costs a `Hash::make`
+    // (the broker hashes the reset token before storing it) plus the notification; a miss returned
+    // immediately. The broker's 200ms Timebox pads a fast path up to its budget but cannot claw
+    // back an overrun, and at Laravel's default BCRYPT_ROUNDS=12 bcrypt costs ~70-120ms on top —
+    // measured as fully disjoint distributions, so a single request classified an address.
+    //
+    // Asserted by counting the work rather than by the wall clock, which no CI box can promise.
+    User::factory()->create(['email' => 'known@y.com']);
+
+    $hasher = new class(app('hash')->driver()) implements Hasher
+    {
+        public int $made = 0;
+
+        public function __construct(private readonly Hasher $inner) {}
+
+        public function info($hashedValue): array
+        {
+            return $this->inner->info($hashedValue);
+        }
+
+        public function make($value, array $options = []): string
+        {
+            $this->made++;
+
+            return $this->inner->make($value, $options);
+        }
+
+        public function check($value, $hashedValue, array $options = []): bool
+        {
+            return $this->inner->check($value, $hashedValue, $options);
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            return $this->inner->needsRehash($hashedValue, $options);
+        }
+    };
+
+    Hash::swap($hasher);
+
+    $this->postJson('/auth/forgot-password', ['email' => 'known@y.com'])->assertOk();
+    $onHit = $hasher->made;
+
+    $hasher->made = 0;
+    $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
+
+    expect($onHit)->toBeGreaterThan(0)->and($hasher->made)->toBe($onHit);
 });

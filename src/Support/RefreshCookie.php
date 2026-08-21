@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Support;
 
+use Lukk\Lukk;
+
 /**
  * The refresh-token cookie's name + Secure attribute, resolved together so the set
  * (EmitsTokens), clear (LogoutResponse), and read (TokenController) sites can't drift.
@@ -17,13 +19,36 @@ class RefreshCookie
 {
     public static function secure(): bool
     {
-        return (bool) config('lukk.cookie.secure', true);
+        return (bool) (Lukk::guardConfig()['cookie']['secure'] ?? true);
     }
 
+    /**
+     * The cookie name for the CURRENT guard.
+     *
+     * Every guard used to set the same `__Host-refresh` at `Path=/`. Guards are allowed to share a
+     * host and differ only by path (`assertGuardsIsolated` permits it), so under `cookie_mode`
+     * logging into `admin` overwrote the users cookie and vice versa — each login silently
+     * destroying the other session. No privilege crossing (the repository is guard-scoped, so a
+     * foreign cookie resolves to `unknown` and 401s), but a browser cannot hold both at once.
+     *
+     * The default guard keeps the unsuffixed name, so a single-guard app is untouched.
+     */
     public static function name(): string
     {
-        $name = (string) config('lukk.cookie.refresh_name', '__Host-refresh');
+        $cfg = Lukk::guardConfig();
+        $name = (string) ($cfg['cookie']['refresh_name'] ?? '__Host-refresh');
+        $guard = Lukk::currentGuard();
+
+        if ($guard !== (string) config('lukk.guard', 'api')) {
+            $name .= '-'.$guard;
+        }
 
         return self::secure() ? $name : (string) preg_replace('/^__(Host|Secure)-/', '', $name);
+    }
+
+    /** The refresh TTL in minutes for the CURRENT guard — a per-guard `refresh_ttl` was ignored. */
+    public static function ttlMinutes(): int
+    {
+        return (int) ((int) (Lukk::guardConfig()['refresh_ttl'] ?? 2592000) / 60);
     }
 }

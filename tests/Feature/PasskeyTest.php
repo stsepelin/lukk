@@ -260,3 +260,32 @@ it('clears a confirm lock on a successful passkey assertion', function () {
 
     expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });
+
+it('applies block_unverified_login to passkey login, like the password path', function () {
+    // The passkey path minted a session straight off the credential row, so it never ran the gate.
+    // Reachable in any app that nulls `email_verified_at` on an email change: the user still has a
+    // registered passkey and walks past the block that refuses their password.
+    config(['lukk.features.email_verification' => true, 'lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => null]);
+    storePasskey($user->id, 'cred-unverified', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->json();
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-unverified', 'sign_count' => 1],
+    ])->assertStatus(403);
+});
+
+it('refuses passkey login for a user deleted since registering the credential', function () {
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-orphan', 0);
+    $user->delete();
+
+    $start = $this->postJson('/auth/passkeys/login-options')->json();
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-orphan', 'sign_count' => 1],
+    ])->assertStatus(401);
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});

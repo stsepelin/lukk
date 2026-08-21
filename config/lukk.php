@@ -781,6 +781,15 @@ return [
         | when the protocol requirement outweighs that, and set "release_after" so
         | the denial is bounded.
         |
+        | RETENTION: a counter row is created for every failed identifier, existing or
+        | not — including addresses that name no account, which is deliberate (a
+        | lock that only existed for real accounts would answer "does this account
+        | exist?"). The table therefore accumulates plaintext identifiers an attacker
+        | probed, third parties' addresses among them. "lukk:prune" drops spent rows
+        | (--lockout-days, default 30); if that retention doesn't suit your privacy
+        | posture, shorten it or swap LockoutRepository for one that stores an HMAC
+        | of the subject.
+        |
         | The counter keys on the "username" field above. If you use
         | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set
         | "username" to match it — otherwise lukk never sees an identifier to count

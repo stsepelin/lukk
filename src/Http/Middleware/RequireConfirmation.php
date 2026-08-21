@@ -50,13 +50,14 @@ class RequireConfirmation
      * two providers, satisfied the admin gate. Guards are required to hold distinct audiences
      * (`assertGuardsIsolated`), so verifying under the right one is what closes it.
      *
-     * `Authenticate` calls `shouldUse()` for the guard that passed, so the auth manager's default
-     * driver names it by the time this middleware runs. A guard with no `lukk.guards` entry (a
-     * session `web` guard on a hybrid app) resolves to the default lukk config, which is exactly
-     * what this middleware used before — no behaviour change there.
+     * Resolved from the auth manager rather than from `GuardContext`, deliberately. `Authenticate`
+     * calls `shouldUse()` for the guard that passed, so the manager always names the guard that
+     * authenticated THIS request — whereas `GuardContext` is only reset by `lukk.set-guard`, and a
+     * long-lived worker (Octane) would carry the previous request's value into a consumer route
+     * that never runs it.
      */
     private function challenges(): ChallengeToken
     {
-        return new ChallengeToken(Lukk::guardConfig($this->auth->getDefaultDriver()), $this->denylist);
+        return new ChallengeToken(Lukk::guardConfig((string) $this->auth->getDefaultDriver()), $this->denylist);
     }
 }

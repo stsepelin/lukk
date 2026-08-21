@@ -20,7 +20,25 @@ class GuardContext
 
     public function current(): string
     {
-        return $this->current ?? (string) config('lukk.guard', 'api');
+        if ($this->current !== null) {
+            return $this->current;
+        }
+
+        // No `lukk.set-guard` ran, so this is a consumer's own route — and falling straight back to
+        // the default guard was silently wrong there. `app(RevokeAllSessions::class)($admin->id)`
+        // on an `auth:admin` route revoked the USERS guard's families for a colliding id: the
+        // admin's sessions survived a "revoke everything" call, and an unrelated user's were
+        // destroyed. `Authenticate` calls `shouldUse()` for the guard that passed, so the auth
+        // manager names the guard that actually authenticated this request.
+        //
+        // Only honoured for a guard lukk knows: a hybrid app's session `web` guard has no lukk
+        // identity, and reading config for it would just be the default guard under another name.
+        $resolved = (string) app('auth')->getDefaultDriver();
+        $default = (string) config('lukk.guard', 'api');
+
+        return $resolved === $default || isset(((array) config('lukk.guards', []))[$resolved])
+            ? $resolved
+            : $default;
     }
 
     public function use(?string $name): void

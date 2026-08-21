@@ -20,6 +20,85 @@ but the default is safe.
 
 ---
 
+## Upgrading to 0.5.0 from 0.4.x
+
+Most of 0.5.0 is opt-in (the account lockout) or invisible (the step-up throttle). Four things
+change behaviour on an existing install; only the first two can be noticed by your users.
+
+### The refresh cookie is now named per guard
+
+**Medium impact — only if you use `cookie_mode` *and* [multiple guards](https://stsepelin.github.io/lukk-docs/multiple-guards).** Everyone else: no action.
+
+Every guard used to set the same `__Host-refresh` cookie at `Path=/`. Guards may legitimately share
+a host and differ only by path, so logging into one silently overwrote the other's cookie — each
+login destroying the other session. Non-default guards now get a suffixed name
+(`__Host-refresh-admin`); **the default guard's name is unchanged**, so a single-guard app is
+untouched.
+
+On deploy, sessions held in a non-default guard's cookie stop resolving and those users log in
+again once. Nothing else is affected: the refresh-token rows are untouched, and a stale cookie is
+rejected as `unknown` rather than crossing guards.
+
+A per-guard `cookie_mode`, `refresh_ttl` and `cookie.*` are also honoured now — previously they
+were read from the top level and a guard-level override was silently ignored. If you set one
+expecting it to apply, it now does.
+
+### `RefreshTokenReused` no longer fires for a post-logout retry
+
+**Low impact — check your listener if you have one.**
+
+The event carried `reason` of either `reuse` (a consumed token replayed after the grace window —
+the theft signal) or `revoked` (a client retrying with a token it still held across a logout — an
+ordinary, benign event). Both dispatched, and the docs tell you to treat the event as evidence of
+theft, so a busy install produced a steady drip of false alarms over the one alarm that matters.
+
+It now fires **only** for `reason === 'reuse'`. If you were filtering on `$event->reason` yourself,
+that filter is now redundant but harmless. If you were counting *all* dispatches as a metric, the
+number will drop — that drop is the false positives leaving.
+
+The `revoked` path still force-revokes the family and still rejects the request; only the event
+changed.
+
+### Re-enrolling two-factor is refused instead of silently disabling it
+
+**Low impact — only if your UI lets a user re-open the enrolment screen.**
+
+`POST /auth/two-factor` on an account with **confirmed** 2FA used to overwrite the secret, null
+`two_factor_confirmed_at` and regenerate the recovery codes. `hasEnabledTwoFactor()` then returned
+false, so login stopped challenging: a user who reopened the QR screen out of curiosity and
+wandered off was left unprotected, with nothing an app could hang a notification on.
+
+It now returns **`409`** with a validation error on `two_factor`. To re-enrol, call
+`DELETE /auth/two-factor` first — disabling should be a deliberate act, and that endpoint already
+exists for it. If your UI has a "regenerate QR" button, point it at delete-then-enrol and tell the
+user what it does.
+
+### lukk refuses an `array` or `null` cache store in production
+
+**Low impact — a misconfiguration you want to hear about.**
+
+Token revocation, TOTP replay protection and passkey challenges all live in the cache
+(`denylist_store`, falling back to your default store). An `array` store is per-process, so a
+revoked token stays valid on every other worker and the single-use guarantees are not guarantees —
+and it failed *silently*. Booting with one in `production` now throws with an actionable message.
+
+Outside production nothing changes; the array driver stays the right default for a test suite, and
+lukk's own suite runs on it.
+
+### Custom `LockoutRepository` / `RefreshTokenRepository` implementations
+
+**Medium impact — only if you rebound either contract.** The interfaces gained methods:
+
+- `LockoutRepository::maxAttempts(): int` — the configured cap. Attempts are now *reserved*
+  (incremented before the credential check) and compared against this, so concurrent requests can't
+  each slip past a "not locked yet" read.
+- `RefreshTokenRepository::countLiveTokens(string $familyId): int` — used only for the new
+  `Events\RefreshFamilyForked` signal.
+- `revokeUserFamilies()` / `revokeUserFamiliesExcept()` take an optional
+  `?callable $before = null`, invoked with the family ids **inside** the transaction and before the
+  rows are revoked. That is how the denylist write now happens in the safe order; an implementation
+  that ignores it will revoke rows that were never denylisted.
+
 ## Upgrading to 0.4.0 from 0.3.x
 
 ### `refresh_tokens` gains a nullable `guard` column

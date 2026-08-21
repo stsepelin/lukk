@@ -55,6 +55,7 @@ use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Guards\GuardContext;
+use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
 use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Http\Middleware\RequireConfirmation;
 use Lukk\Http\Middleware\RequireVerifiedEmail;
@@ -168,6 +169,13 @@ class LukkServiceProvider extends ServiceProvider
     private function registerPasskeys(): void
     {
         $this->app->singleton(PasskeyRepository::class, DatabasePasskeyRepository::class);
+
+        // The controller needs THIS guard's user provider, which is not a resolvable type — same
+        // reason the actions below are bound explicitly rather than autowired.
+        $this->app->bind(PasskeyAuthenticatedSessionController::class, fn ($app) => new PasskeyAuthenticatedSessionController(
+            $app->make(FinishPasskeyLogin::class), $app->make(StartSession::class),
+            $this->userProviderFor(Lukk::currentGuard()),
+        ));
 
         // Bound explicitly rather than auto-resolved: the nullable `?LockoutRepository` means
         // "feature off", and the container would happily inject the always-bound repository and

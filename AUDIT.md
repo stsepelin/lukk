@@ -30,6 +30,28 @@ Each is pinned by a regression test; the test name is the contract.
 | `SUBJ-2` | Low | **A transliteration blow-up could 500 the login route.** `LoginRequest` caps the identifier at 255 *characters*, but transliteration expands ~6x in bytes — 43 copies of `㈱` pass validation at 258 bytes, overflowing `lukk_lockouts.subject` and the database cache store's `key` column (MySQL 1406 / PG 22001) on an unauthenticated endpoint. Long subjects are now hashed, not truncated, so distinct identifiers can't be folded together by the fix. |
 | `RELEASE-1` | Low | **`lukk:release` could not release a `two_factor` or `confirm` lock.** Those subjects are user ids recorded verbatim, but the command lower-cased everything — breaking a ULID (uppercase Crockford base32) wherever comparison is binary. Normalization is now applied only to `login`. |
 | `PG-1` | Low | **The unique-violation recovery was itself a 500 on PostgreSQL.** A failed `INSERT` aborts the whole transaction (`25P02` on every later statement), so the `catch` that exists to absorb the first-failure insert race could not run. The insert is now nested, so Laravel emits a `SAVEPOINT`. |
+| `RACE-1` | Medium | **Concurrency could overrun the cap.** The lockout gate was a plain read outside the transaction that later counted, so N concurrent requests all passed it and all reached the credential check — realized verifications were `max_attempts + concurrency`. Attempts are now *reserved*: incremented transactionally, then compared against the cap, so only `max_attempts` requests can win a slot. Applied to login, step-up confirmation and the two-factor challenge; a success releases the reservation, so a correct credential never costs an attempt. |
+| `RT-1` | Medium | **A family revoke could lose a race with a concurrent rotation.** Under READ COMMITTED the set-based `UPDATE`'s snapshot can miss a successor row inserted by an in-flight rotate, leaving a live token; once the family's denylist entry expired its descendants authenticated again, so a logout-all or reuse kill undid itself ~15 min later. Rotation now re-checks the denylist after persisting the successor. **Not reproduced — see the caveat below.** |
+| `RT-2` | Low | **The refresh token was accepted from the query string.** `$request->input()` unions the query for every content type, so a 30-day opaque credential could land in access logs, proxy logs and `Referer` (RFC 9700 §4.3.2). Body only now. |
+| `RT-3` | Low | **The bulk revokes denylisted after the DB write**, inverting the ordering `RevokeSession` documents. A cache failure partway left families revoked but still authenticating for up to `access_ttl` — during the one operation a user performs *because* they believe they're compromised. The denylist write moved inside the repository's transaction, before the update. |
+| `EVT-1` | Info | **`RefreshTokenReused` fired for ordinary post-logout retries** (`reason='revoked'`), which apps are told to treat as theft. Alert fatigue over the one alarm that matters. Now dispatched only for genuine reuse. **Behaviour change — see UPGRADE.md.** |
+| `DL-1`/`CFG-1` | Low | **An `array`/`null` cache store silently disabled revocation**, TOTP replay protection and passkey challenges: per-process storage means a revoked token stays valid on every other worker. Refused in production, where it can only be a misconfiguration. |
+| `PWD-1` | Low | **`/auth/forgot-password` was timing-distinguishable.** The broker's 200 ms `Timebox` pads a fast path but cannot claw back bcrypt's overrun, so a hit and a miss had disjoint distributions and one request classified an address. The miss now burns equivalent work, as the login path already did. |
+| `PK-2` | Low | **Passkey login skipped `block_unverified_login`** and never resolved the user, so a deleted account still got a refresh-token row. It now resolves through the provider and runs the same gates as the password path. |
+| `2FA-2` | Low | **Re-enrolling silently disabled confirmed 2FA** — the secret was overwritten and `two_factor_confirmed_at` nulled, so a user who reopened the QR screen and wandered off was left unprotected with no signal. Refused with `409` now. **Behaviour change — see UPGRADE.md.** |
+| `2FA-1` | Info | The two-factor limiter key carried no guard prefix, unlike every other lukk bucket. |
+| `2FA-3` | Info | `code` and `recovery_code` are now mutually exclusive; sending both bought two verifications off one limiter slot. Recovery-code failures also no longer drive the TOTP cap — that cap exists for a 6-digit secret, and counting failures against a 119-bit one let anyone holding a challenge token lock the account without guessing a TOTP. |
+| `CONFIRM-2` | Info | A successful passkey assertion now releases the `confirm` lock, so "consecutive" is honoured for passkey-primary users too. |
+| `GUARD-2` | Low | **Container-resolved actions targeted the default guard.** `app(RevokeAllSessions::class)` on an `auth:admin` route revoked the *users* guard's families for a colliding id — the admin's sessions survived a "revoke everything" and an unrelated user's were destroyed. `GuardContext` now falls back to the guard that actually authenticated the request. |
+| `COOKIE-1` | Low | **Every guard shared one `__Host-refresh` cookie** and the global `refresh_ttl`, so under `cookie_mode` each login destroyed the other guard's session. Name and TTL are per-guard now; the default guard keeps the unsuffixed name. **Behaviour change — see UPGRADE.md.** |
+| `VAL-1` | Low | `ResetPasswordRequest` had no `max` on `password`, so a reset could set a password `/auth/login` would then refuse — locking the user out of the account they just recovered. |
+| `VAL-2` | Low | `email` and `token` were unbounded on the public reset endpoints. |
+| `IP-1` | Info | `rateLimitKey()` guarded a custom key against being empty but not its own fallback. |
+| `DB-1` | Info | `credential_id` is a varchar(255) primary key but WebAuthn permits a 1023-byte id — a 500, or a silent truncation no later assertion could match. |
+| `DB-2` | Info | The lockout table's retention/PII implication is now documented next to `features.lockout`. |
+| `CFG-2` | Info | `range(1, 0)` counts down, so `recovery_codes = 0` produced two codes. Clamped. |
+| `JWKS-1` | Info | `kty` came from the configured algorithm rather than the key, publishing a structurally invalid JWK on a mismatch instead of failing. |
+| `CFG-1b` | Info | A `lukk.guards` entry named after the default guard was silently dropped while still enabling multi-guard mode. Throws now. |
 
 Residual from `SUBJ-1`, accepted: the decaying **throttle** still keys on the normalized
 identifier, so two look-alike accounts share a rate-limit bucket and can throttle each other. That
@@ -42,35 +64,20 @@ INSERT ever collided. Worth remembering as a shape of false assurance.
 
 ## Open
 
-Not exploited in the deployment's default configuration, or requiring a design change. Ordered by
-severity, then by how cheap the fix is.
+Nothing outstanding from the 2026-08-20 audit. Two accepted residuals, deliberately not "fixed":
 
-| ID | Sev | Finding | Note |
-|---|---|---|---|
-| `RT-1` | Medium | **A family revoke can lose a race with a concurrent rotation on PostgreSQL.** `revokeFamily` is a set-based `UPDATE`; under READ COMMITTED its snapshot can miss a successor row inserted by an in-flight rotate transaction. The survivor keeps rotating, and once the family's denylist entry expires (`access_ttl + leeway`) its descendants authenticate again — so logout-all or a reuse kill can undo itself ~15 min later. | Reasoned from isolation semantics; **not reproduced** — needs a real PostgreSQL instance. Verify before triaging. Cheapest fix: re-check the denylist inside the rotate transaction after persisting the successor. |
-| `RACE-1` | Medium | **Check-then-act between the lockout gate and the counter.** `locked()` is a plain read outside the transaction that later increments, so N concurrent requests all pass the gate and all reach `Hash::check`. Realized verifications are `max_attempts + concurrency`. Laravel's own `RateLimiter` has the same shape, so the throttle in front doesn't absorb it. | Not reproduced (needs true parallelism against MySQL/PG). Fix is to reserve the attempt before verifying rather than counting after. |
-| `RT-3` | Low | `RevokeAllSessions` / `RevokeOtherSessions` DB-revoke *before* denylisting, inverting the ordering `RevokeSession` documents and obeys. A cache failure partway leaves families revoked but not denylisted, live until `access_ttl`. | Logout-all is exactly the operation performed under suspicion of compromise. |
-| `DL-1` | Low | The denylist fails **closed** on a throwing cache (verified) but silently on a *cleared* one: `cache:clear` during a deploy, or memcached LRU eviction, resurrects every token revoked in the preceding `access_ttl` — including reuse-detection kills. Nothing asserts at boot that `denylist_store` is shared, durable and non-evicting. | |
-| `CFG-1` | Low | An `array`/`null` cache store silently disables TOTP replay defence and the denylist, with no boot-time check. | Same class as `DL-1`; one guard closes both. |
-| `PWD-1` | Low | `/auth/forgot-password` is timing-distinguishable at Laravel's default `BCRYPT_ROUNDS=12` — the broker's 200 ms `Timebox` pads a fast path but cannot claw back bcrypt's overrun. Measured disjoint distributions (unknown 205–220 ms, registered 279–335 ms): one request classifies an address. | Cost-dependent, not universal. `AttemptLogin::timingHash()` already solves this on the login path. |
-| `PK-2` | Low | Passkey login skips `block_unverified_login` and `Lukk::authenticateUsing` — the documented seam for "is this account disabled?". | The three entry points should share one trait. |
-| `2FA-2` | Low | `POST /auth/two-factor` on an already-confirmed account silently deactivates 2FA (nulls `two_factor_confirmed_at`, regenerates recovery codes). A user who reopens the QR and abandons it is left unprotected with no signal. | Step-up gated, so not an escalation — but a silent downgrade where `DELETE` is explicit. |
-| `GUARD-2` | Low | Actions resolved from the container outside a lukk route group silently target the default guard, so a consumer's `app(RevokeAllSessions::class)(...)` on an `auth:admin` route revokes the *users* guard's families for a colliding id. The `$user->revokeAllSessions()` helper is correct. | |
-| `COOKIE-1` | Low | Under multi-guard + `cookie_mode`, all guards share one `__Host-refresh` cookie name and the global `refresh_ttl`; per-guard overrides are ignored. Each login destroys the other's session. | Session destruction, not privilege crossing. |
-| `VAL-1` | Low | `ResetPasswordRequest` has no `max` on `password` while login and registration cap at 255 — resetting to a longer password locks the user out of `/auth/login` with no explanation. | |
-| `VAL-2` | Low | `ForgotPasswordRequest` / `ResetPasswordRequest` accept unbounded `email` and `token` on unauthenticated endpoints. | CPU only; throttled at 6/min/IP. |
-| `IP-1` | Info | `Lukk::rateLimitKey()` refuses an empty *custom* key but not its own fallback: a null `$request->ip()` would bucket every caller together. No reachable path found under FPM. | One-line defensive fix. |
-| `CONFIRM-2` | Info | A successful passkey login or `confirm-passkey` doesn't release the `confirm` lock, so "consecutive" is only honoured for the password authenticator. | One line, mirroring `AttemptLogin`. |
-| `2FA-1` | Info | The 2FA per-account limiter key carries no guard prefix, unlike every other lukk bucket. Unreachable today (2FA mounts only on the default guard); live the moment features extend to extra guards. | |
-| `2FA-3` | Info | A failed *recovery-code* attempt increments the `two_factor` counter even though the recovery path is exempt from the lock — failures against a 119-bit secret count toward a cap meant for a 6-digit one. Submitting both fields also yields two verifications per limiter slot. | |
-| `EVT-1` | Info | `RefreshTokenReused` fires for `reason='revoked'` — an ordinary post-logout retry — as well as genuine reuse. Alert fatigue over the one alarm that matters. | |
-| `DB-1` | Info | `passkeys.credential_id` is `VARCHAR(255)`; WebAuthn permits 1023 raw bytes (1364 base64url). An over-length ID is a 500 or a silent self-DoS. No takeover path. | |
-| `DB-2` | Info | `lukk_lockouts.subject` stores plaintext identifiers, including addresses that name no account (typos, third parties probed by an attacker). Retention/PII note. | |
-| `CFG-2` | Info | `recovery_codes = 0` yields **2** codes via `range(1, 0)`; negative values count up in magnitude. No clamp, unlike the lockout's. | |
-| `JWKS-1` | Info | `kty` is chosen from the configured algorithm rather than the key, so a mismatched keypair publishes a structurally invalid JWK instead of failing loudly. No private material exposed. | |
-| `CFG-1b` | Info | A `lukk.guards` entry named after the default guard is silently dropped while still flipping `isMultiGuard()` on — turning on guard scoping (mass logout on existing `guard IS NULL` rows) and mounting a duplicate route group. | Should throw at boot. |
-| `RT-2` | Low | `POST /auth/refresh` accepts the refresh token from the **query string** (`$request->input()` unions the query for every content type), putting a 30-day opaque credential into access logs, proxy logs and `Referer`. | Fix is `post()`/`json()` rather than `input()`. |
-| `RT-4` | Info | A thief who replays within `grace_seconds` gets a sibling minted, and both chains then rotate independently forever without ever tripping reuse. The accepted concurrency trade-off, but family fan-out is neither counted nor reported. | Deliberate; see `CLAUDE.md`. |
+| ID | Note |
+|---|---|
+| `SUBJ-1` (residual) | The decaying **throttle** still keys on the normalized identifier, so two look-alike accounts share a rate-limit bucket and can throttle each other. That bucket decays in `decay_seconds` and grants no release primitive, and keying it on identity would put a user-provider lookup in front of every login attempt, including unauthenticated floods. The persistent lockout — the part that mattered — keys on identity. |
+| `RT-4` (by design) | The grace window still mints a sibling for a within-grace re-consumption, so a thief racing inside it gets a parallel chain. That is the trade that stops a multi-tab or SSR client logging itself out, and `CLAUDE.md` protects it. It is no longer *invisible*: `Events\RefreshFamilyForked` reports a family carrying more live tokens than concurrency explains. Acting on it automatically would mean revoking on suspicion — the false logout the window exists to prevent — so it stays advisory. |
+
+### Carried caveat
+
+`RT-1` is fixed but **was never reproduced**: it needs a live PostgreSQL instance, which this audit
+did not have. The reasoning is from PG's documented READ COMMITTED semantics plus the SQL emitted,
+and the fix (re-checking the denylist inside the rotate transaction) is correct on any engine. If
+you ever have a PG box to hand, the repro is two connections: one `BEGIN; SELECT … FOR UPDATE`, the
+other running `revokeFamily`, then insert + commit and check `revoked_at` on the new row.
 
 ## Verified sound
 

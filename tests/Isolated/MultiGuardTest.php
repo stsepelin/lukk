@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
+use Lukk\Actions\RevokeAllSessions;
 use Lukk\Tests\Fixtures\Admin;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\MultiGuardTestCase;
@@ -215,4 +216,55 @@ it('gives the extra guard\'s confirm-password a per-user bucket, not just per-IP
     $this->withToken($access)->withServerVariables(['REMOTE_ADDR' => '198.51.100.99'])
         ->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
         ->assertStatus(429);
+});
+
+it('gives each guard its own refresh cookie, so one login cannot destroy the other', function () {
+    // Every guard set the same `__Host-refresh` at Path=/. Guards may share a host and differ only
+    // by path, so under cookie_mode logging into admin overwrote the users cookie and vice versa —
+    // each login silently destroying the other session. The default guard keeps the plain name, so
+    // a single-guard app is untouched.
+    config(['lukk.cookie_mode' => true]);
+    User::factory()->create(['email' => 'user@corp.com']);
+    Admin::factory()->create(['email' => 'root@corp.com']);
+
+    forget();
+    $users = $this->postJson('/auth/login', ['email' => 'user@corp.com', 'password' => 'password'])->assertOk();
+
+    forget();
+    $admin = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])->assertOk();
+
+    $name = fn ($response) => collect($response->headers->getCookies())->first()->getName();
+
+    expect($name($users))->toBe('__Host-refresh')
+        ->and($name($admin))->toBe('__Host-refresh-admin')
+        ->and($name($users))->not->toBe($name($admin));
+});
+
+it('resolves the acting guard for an action taken on a consumer route', function () {
+    // `app(RevokeAllSessions::class)` outside lukk's own route group fell back to the DEFAULT guard,
+    // so a "revoke everything" on an `auth:admin` route left the admin's sessions alive and
+    // destroyed an unrelated user's — the two ids collide across providers.
+    Route::middleware('auth:admin')->delete('/_test/wipe', function () {
+        app(RevokeAllSessions::class)(request()->user()->getAuthIdentifier());
+
+        return response()->json(['ok' => true]);
+    });
+
+    $user = User::factory()->create();
+    $admin = Admin::factory()->create();
+    expect((string) $user->getKey())->toBe((string) $admin->getKey());
+
+    forget();
+    $userPair = $user->startSession();
+    forget();
+    $adminPair = $admin->startSession();
+
+    forget();
+    $this->withToken($adminPair->accessToken)->deleteJson('/_test/wipe')->assertOk();
+
+    // The admin's session is gone; the colliding user's survives.
+    forget();
+    $this->postJson('/admin/auth/refresh', ['refresh_token' => $adminPair->refreshToken])->assertStatus(401);
+    forget();
+    $this->postJson('/auth/refresh', ['refresh_token' => $userPair->refreshToken])->assertOk();
 });

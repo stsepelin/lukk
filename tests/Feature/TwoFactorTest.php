@@ -396,3 +396,21 @@ it('refuses a two-factor request that lost the reservation race', function () {
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
         ->assertStatus(423);
 });
+
+it('refuses to re-enrol over confirmed two-factor instead of silently disabling it', function () {
+    // Re-enrolling overwrote the secret and nulled `two_factor_confirmed_at`, so a user who
+    // reopened the QR screen and wandered off was left with 2FA OFF — and unlike DELETE there was
+    // nothing an app could hang a "your second factor was removed" notification on.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $access = $user->startSession()->accessToken;
+
+    $this->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')->assertStatus(409);
+
+    // Still enabled, still the same secret, still challenging at login.
+    expect($user->fresh()->hasEnabledTwoFactor())->toBeTrue();
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->assertJson(['two_factor' => true]);
+});
