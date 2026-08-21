@@ -10,6 +10,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
@@ -22,6 +23,8 @@ use Lukk\Lukk;
  */
 class AttemptLogin
 {
+    use ThrowsWhenLocked;
+
     public function __construct(
         private readonly UserProvider $users,
         private readonly LoginRateLimiter $limiter,
@@ -95,7 +98,7 @@ class AttemptLogin
         // while the atomic increment means only `max` requests can ever win a slot, however many
         // arrive at once.
         if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
-            $this->throwLocked($subject);
+            $this->throwLocked('login', $subject, $this->field());
         }
     }
 
@@ -105,18 +108,7 @@ class AttemptLogin
             return;
         }
 
-        $this->throwLocked($subject);
-    }
-
-    private function throwLocked(string $subject): never
-    {
-        $seconds = $this->lockouts?->availableIn('login', $subject, $this->limiter->guard());
-
-        throw ValidationException::withMessages([
-            $this->field() => [$seconds === null
-                ? __('This account is locked. Contact support to restore access.')
-                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
-        ])->status(423);
+        $this->throwLocked('login', $subject, $this->field());
     }
 
     private function resolve(Request $request): Authenticatable
@@ -206,5 +198,10 @@ class AttemptLogin
         static $hash;
 
         return $hash ??= Hash::make('lukk-timing-equalizer');
+    }
+
+    private function lockoutGuard(): ?string
+    {
+        return $this->limiter->guard();
     }
 }

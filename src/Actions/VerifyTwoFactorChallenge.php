@@ -7,6 +7,7 @@ namespace Lukk\Actions;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LockoutRepository;
 
@@ -17,6 +18,8 @@ use Lukk\Contracts\LockoutRepository;
  */
 class VerifyTwoFactorChallenge
 {
+    use ThrowsWhenLocked;
+
     public function __construct(
         private readonly ChallengeToken $challengeTokens,
         private readonly ChallengeTwoFactor $challenge,
@@ -57,7 +60,7 @@ class VerifyTwoFactorChallenge
         $recoveryOnly = ($code === null || $code === '') && $recoveryCode !== null && $recoveryCode !== '';
 
         if (! $recoveryOnly && $this->lockouts?->locked('two_factor', $subject, $this->guard)) {
-            $this->throwLocked($subject);
+            $this->throwLocked('two_factor', $subject, 'code');
         }
 
         if ($this->limiter->tooManyAttempts($key, $this->maxAttempts)) {
@@ -77,7 +80,7 @@ class VerifyTwoFactorChallenge
         // limiter above still bounds recovery guessing.
         if (! $recoveryOnly && $this->lockouts !== null
             && $this->lockouts->recordFailure('two_factor', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
-            $this->throwLocked($subject);
+            $this->throwLocked('two_factor', $subject, 'code');
         }
 
         try {
@@ -96,14 +99,8 @@ class VerifyTwoFactorChallenge
         return $user;
     }
 
-    private function throwLocked(string $subject): never
+    private function lockoutGuard(): ?string
     {
-        $seconds = $this->lockouts?->availableIn('two_factor', $subject, $this->guard);
-
-        throw ValidationException::withMessages([
-            'code' => [$seconds === null
-                ? __('This account is locked. Contact support to restore access.')
-                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
-        ])->status(423);
+        return $this->guard;
     }
 }

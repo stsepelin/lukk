@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Change password while signed in (`POST /auth/password`)** — the counterpart to the forgot-password flow, without the email round-trip. Re-verifies the current password, applies `Password::defaults()` to the new one, revokes every **other** session, and fires `Events\PasswordChanged`.
+
+  Asking for the current password is the whole security story: a stolen access token alone must not be enough to take an account over permanently, which is exactly what changing the password would do. Because it checks the same secret as login and step-up, it runs on the **same** budget — the `lukk-confirm` throttle and, with `features.lockout` on, the `confirm` counter. Two independent allowances for guessing one password is just a larger allowance. A success clears **both** the `confirm` and `login` counters, since the failures they hold were against a password that no longer exists — otherwise a user who was being brute-forced, noticed, and changed their password stayed locked out of login on every other device.
+
+  Other sessions die; the one it was done from survives. (A token carrying no `fid` — one minted by a co-issuer sharing the secret — identifies no session here to preserve, so every session is revoked rather than none.) Changing a password is what someone does when they think another party is in the account, so leaving those sessions alive would defeat the point — but logging the user out of the tab they just did it in is a bad answer to a good instinct. The session to keep is read from the caller's own verified token, so it can't be pointed at someone else's to spare it from the sweep.
+
+  On by default (`features.change_password`), like `logout_all`: it needs no configuration, and refusing a signed-in user the ability to change their own password is not a sensible default. Turn it off where passwords live in an identity provider.
+
 - **Account lockout (`features.lockout`, opt-in, off by default)** — an absolute cap on *consecutive* failed authentication attempts, satisfying **NIST SP 800-63B §5.2.2** ("the verifier SHALL limit consecutive failed authentication attempts on a single account to no more than 100"). The existing throttles are decaying windows: they bound a *rate*, not a *run*, so lifetime guesses were unbounded — roughly 7,200/day against a 6-digit TOTP code. Covers both password login (keyed on the normalized identifier) and the two-factor challenge (keyed on the user), each with its own counter and guard-scoped, so burning one doesn't spend the other's budget.
 
   Counters live in a new `lukk_lockouts` table (publish `lukk-lockout-migrations`) because "consecutive" can't be expressed by a cache entry that expires — and a cache flush would silently release every lock. `Lockout` storage sits behind a `LockoutRepository` contract, so it's swappable like `RefreshTokenRepository`.
