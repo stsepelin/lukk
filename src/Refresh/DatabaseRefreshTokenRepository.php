@@ -48,10 +48,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             rotatedAt: $row->rotated_at?->getTimestamp(),
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
+            scope: $row->scope ?? null,
         );
     }
 
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt): void
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
     {
         $attributes = [
             'user_id' => $userId,
@@ -60,6 +61,12 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             'token_hash' => $tokenHash,
             'expires_at' => $expiresAt, // Eloquent datetime cast accepts a unix timestamp
         ];
+
+        // Only when the family owns a grant — a null write would fail on a pre-0.6 schema that
+        // hasn't published the new migration, and null is the default anyway.
+        if ($scope !== null) {
+            $attributes['scope'] = $scope;
+        }
 
         // Only stamp the guard column under multi-guard; a single-guard schema has no such column.
         if ($this->guard !== null) {

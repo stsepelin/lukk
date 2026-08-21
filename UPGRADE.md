@@ -20,6 +20,62 @@ but the default is safe.
 
 ---
 
+## Upgrading to 0.6.0 from 0.5.x
+
+Abilities are new and entirely opt-in — an install that never calls `Lukk::abilitiesUsing()` mints
+byte-identical tokens and needs no action at all. Two things are worth reading if you do opt in.
+
+### A new nullable `scope` column on `refresh_tokens`
+
+**Medium impact — only if you want a session to own a *fixed* set of abilities.** Everyone else:
+no action, including everyone using `abilitiesUsing`.
+
+Migrations are publish-only, so nothing changed under you. Republish and migrate when you want the
+column:
+
+```bash
+php artisan vendor:publish --tag=lukk-migrations
+php artisan migrate
+```
+
+```php
+$table->text('scope')->nullable();
+```
+
+`NULL` — every existing row, and every row lukk writes unless you ask otherwise — means *derived*:
+abilities come from `Lukk::abilitiesUsing()` on each mint, so revoking one takes effect within
+`access_ttl`. A value means *pinned*: `StartSession` was given an explicit grant, and every rotation
+of that family replays it verbatim. That is what a personal access token or a capped impersonation
+session needs, and it is the only reason to add the column. lukk reads it defensively (`$row->scope
+?? null`), so a pre-0.6 schema keeps working — you simply can't pin a grant until you migrate.
+
+### Two contracts gained an optional parameter
+
+**Medium impact — only if you implement `TokenIssuer` or `RefreshTokenRepository` yourself.**
+
+Both gained one optional, defaulted parameter, so a *caller* needs no change — but a PHP
+implementation of an interface must match the signature:
+
+```php
+public function accessToken(int|string $userId, string $familyId, array $claims = [], ?Abilities $abilities = null): array;
+public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void;
+```
+
+A custom repository that ignores `$scope` still works correctly — it just can't pin a grant to a
+family, so every session stays in derived mode.
+
+### `scope` is now a reserved claim
+
+**Low impact — only if `tokenClaimsUsing` sets a claim literally named `scope`.**
+
+Once `abilitiesUsing` is configured, the abilities layer owns `scope` and applies it *after* your
+claims hook, so a `scope` from the hook is discarded. Without this a hook could grant itself
+`admin.*`, and — worse — an empty grant failed to erase one, so `abilitiesUsing` returning `[]` for
+a suspended user still minted the hook's value. If you were using `tokenClaimsUsing` to emit
+`scope`, move it to `abilitiesUsing`; any other claim name is unaffected.
+
+---
+
 ## Upgrading to 0.5.0 from 0.4.x
 
 Most of 0.5.0 is opt-in (the account lockout) or invisible (the step-up throttle). Four things

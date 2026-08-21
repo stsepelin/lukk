@@ -10,6 +10,7 @@ use Lukk\Contracts\TokenIssuer;
 use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
+use Lukk\Support\Abilities;
 use Lukk\Support\RotationOutcome;
 use Lukk\Support\TokenPair;
 
@@ -81,12 +82,15 @@ class RotateRefreshToken
                 $siblings = $this->repository->countLiveTokens($record->familyId);
             }
 
+            // The family's own grant, if it has one, survives rotation — otherwise a personal
+            // access token would quietly become a user-derived one on its first refresh.
             $this->repository->persist(
                 $record->userId,
                 $record->familyId,
                 $record->id,
                 $secretHash,
                 $record->expiresAt,
+                $record->scope,
             );
 
             // A concurrent family revoke is a set-based UPDATE. Under READ COMMITTED (PostgreSQL)
@@ -101,8 +105,26 @@ class RotateRefreshToken
                 return RotationOutcome::revoked($record->familyId);
             }
 
+            // Minted INSIDE the transaction, deliberately. It used to happen after commit, which
+            // meant a throw from `Lukk::abilitiesUsing` — an app callback documented as running on
+            // every refresh, and expected to hit a permission store — left the parent stamped
+            // `rotated_at` while the client never received the successor. The client then retried
+            // with the token it still held, and past the grace window that is indistinguishable
+            // from a replay: reuse detection fired and revoked the whole family. An ordinary
+            // permission-store blip logged every device out. CLAUDE.md calls a false-positive
+            // family revoke a release blocker, so the mint has to fail where it can still roll the
+            // consumption back.
+            //
+            // This does NOT weaken the revoke-then-throw invariant: that one is about the FAMILY
+            // REVOCATION running after commit, which it still does (see `killFamily` below).
+            $access = $this->issuer->accessToken(
+                $record->userId,
+                $record->familyId,
+                abilities: $record->scope === null ? null : Abilities::fromScope($record->scope),
+            );
+
             // +1 for the successor being persisted in this transaction.
-            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1);
+            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access);
         });
 
         if ($outcome->type === 'issued' && $outcome->siblings > $this->forkThreshold()) {
@@ -133,9 +155,7 @@ class RotateRefreshToken
 
     private function pair(RotationOutcome $outcome): TokenPair
     {
-        $access = $this->issuer->accessToken($outcome->userId, $outcome->familyId);
-
-        return new TokenPair($access['token'], $outcome->refreshSecret, $access['expires_in']);
+        return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
     }
 
     private function killFamily(string $familyId, string $reason): never

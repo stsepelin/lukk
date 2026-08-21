@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Support;
 
+use InvalidArgumentException;
+
 /**
  * The `scope` claim: what a token is allowed to do.
  *
@@ -35,10 +37,52 @@ class Abilities
         return new self(is_string($scope) ? array_values(array_filter(explode(' ', $scope), fn ($s) => $s !== '')) : []);
     }
 
-    /** @param array<int, string> $abilities */
+    /**
+     * Build from a granted list, rejecting anything that isn't a legal scope token.
+     *
+     * RFC 6749 §3.3 defines `scope-token = 1*( %x21 / %x23-5B / %x5D-7E )` — space, `"`, `\` and
+     * control characters are excluded, and for a reason that bites here: the claim is
+     * space-delimited, so a grant containing a space parses back as TWO abilities. `['orders.read
+     * admin']` grants `admin`, which nobody issued. That is a privilege escalation the moment a
+     * consumer derives ability names from data — a tenant role, a team name, a DB column — which is
+     * the obvious implementation.
+     *
+     * Throws rather than dropping. A malformed grant is a bug in the calling application, and a
+     * silently narrower token would surface later as a confusing 403 somewhere else; a loud failure
+     * at the first login in development is cheaper than either. The package already throws at boot
+     * for guards sharing an audience, on the same reasoning.
+     */
     public static function fromArray(array $abilities): self
     {
-        return new self(array_values(array_filter(array_map('strval', $abilities), fn ($s) => $s !== '')));
+        $granted = [];
+
+        foreach ($abilities as $ability) {
+            if (! is_string($ability) && ! (is_object($ability) && method_exists($ability, '__toString'))) {
+                throw new InvalidArgumentException(sprintf(
+                    'lukk abilities must be strings; got %s. Check the callback passed to Lukk::abilitiesUsing().',
+                    get_debug_type($ability),
+                ));
+            }
+
+            $ability = (string) $ability;
+
+            if ($ability === '') {
+                continue;
+            }
+
+            if (preg_match('/^[\x21\x23-\x5B\x5D-\x7E]+$/', $ability) !== 1) {
+                throw new InvalidArgumentException(sprintf(
+                    'lukk ability %s is not a valid scope token (RFC 6749 §3.3): it may not contain a space, '
+                    .'a double quote, a backslash, a control character or a non-ASCII byte. The scope claim is '
+                    .'space-delimited, so a space would split one ability into several.',
+                    json_encode($ability),
+                ));
+            }
+
+            $granted[] = $ability;
+        }
+
+        return new self(array_values(array_unique($granted)));
     }
 
     /** The space-delimited claim value, or null when nothing is granted (so no claim is minted). */

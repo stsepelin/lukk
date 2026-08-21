@@ -11,12 +11,13 @@ use Illuminate\Notifications\Notifiable;
 use Lukk\Concerns\HasAbilities;
 use Lukk\Concerns\HasRefreshTokens;
 use Lukk\Concerns\HasTwoFactorAuthentication;
+use Lukk\Contracts\HasTokenAbilities;
 
 /**
  * Minimal Eloquent user for guard/login tests. Carries HasRefreshTokens so the
  * trait's ergonomic helpers (startSession, revokeAllSessions) are exercised too.
  */
-class User extends Authenticatable implements MustVerifyEmail
+class User extends Authenticatable implements HasTokenAbilities, MustVerifyEmail
 {
     use HasAbilities;
     use HasFactory;

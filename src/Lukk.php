@@ -6,10 +6,13 @@ namespace Lukk;
 
 use Closure;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Http\Request;
 use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
 use Lukk\Support\Abilities;
+use Lukk\Support\TokenContext;
+use Lukk\Support\VerifiedToken;
 use RuntimeException;
 
 /**
@@ -149,18 +152,24 @@ class Lukk
     }
 
     /**
-     * Decide what a user's tokens may do — `fn (int|string $userId) => ['orders.read', 'orders.*']`.
+     * Decide what a user's tokens may do —
+     * `fn (int|string $userId, TokenContext $context) => ['orders.read', 'orders.*']`.
      *
      * Takes the id rather than the model, matching `tokenClaimsUsing`, because the issuer mints
-     * from an id and resolving a model there would put a query on every refresh.
+     * from an id and resolving a model there would put a query on every refresh. The
+     * {@see TokenContext} carries what else is known about the mint — the guard, the session's
+     * family id — so a multi-guard install can grant an `admin` token something a `customer` token
+     * never gets, from the same user row.
      *
      * Until this is set, no `scope` claim is minted at all and tokens stay byte-identical to
      * before. Once it is, abilities are **deny by default**: `tokenCan()` and the ability
      * middleware refuse anything not granted. Return `['*']` for an unrestricted token.
      *
-     * Re-evaluated on every refresh, not frozen at login — so revoking an ability takes effect
-     * within `access_ttl` rather than lasting the life of the refresh token. That is the reason
-     * abilities are not stored on the family row.
+     * Re-evaluated on every mint, not frozen at login — so revoking an ability takes effect within
+     * `access_ttl` rather than lasting the life of the refresh token. A session that must instead
+     * carry a FIXED grant (a personal access token, an impersonation session capped below the
+     * target user) passes its abilities to `StartSession`, which stores them on the family row and
+     * replays them through every rotation; this callback is not consulted for those.
      */
     public static function abilitiesUsing(Closure $callback): void
     {
@@ -168,11 +177,22 @@ class Lukk
     }
 
     /** The abilities for a user, or null when the feature was never configured. */
-    public static function abilitiesFor(int|string $userId): ?Abilities
+    public static function abilitiesFor(int|string $userId, TokenContext $context): ?Abilities
     {
-        return self::$abilitiesUsing === null
-            ? null
-            : Abilities::fromArray((array) (self::$abilitiesUsing)($userId));
+        if (self::$abilitiesUsing === null) {
+            return null;
+        }
+
+        $granted = (self::$abilitiesUsing)($userId, $context);
+
+        // A permissions relation returning a Collection is the likeliest real implementation, and a
+        // bare `(array)` cast on one yields a nested array — which used to reach `strval()` and
+        // 500 every login AND every refresh. Normalize the shapes people actually return.
+        if ($granted instanceof Arrayable) {
+            $granted = $granted->all();
+        }
+
+        return Abilities::fromArray(is_array($granted) ? $granted : [$granted]);
     }
 
     /**
@@ -357,9 +377,24 @@ class Lukk
     /**
      * Authenticate a user for the duration of the current test (Sanctum-style).
      */
-    public static function actingAs(Authenticatable $user, string $guard = 'api'): void
+    public static function actingAs(Authenticatable $user, string $guard = 'api', ?array $abilities = null): void
     {
         app('auth')->guard($guard)->setUser($user);
         app('auth')->shouldUse($guard);
+
+        // Without this, a test acting as a user goes through no guard and therefore leaves no
+        // verified token on the request — so `tokenCan()` denies everything and every ability-gated
+        // route 401s, which looks like a bug in the route. Pass `['*']` for the common "abilities
+        // are not what this test is about" case; pass a narrow list to test the gates themselves.
+        if ($abilities !== null) {
+            VerifiedToken::assume(new VerifiedToken(
+                guard: $guard,
+                userId: $user->getAuthIdentifier(),
+                userClass: $user::class,
+                familyId: 'lukk-acting-as',
+                abilities: Abilities::fromArray($abilities),
+                claims: (object) ['sub' => (string) $user->getAuthIdentifier(), 'scope' => Abilities::fromArray($abilities)->toScope()],
+            ));
+        }
     }
 }

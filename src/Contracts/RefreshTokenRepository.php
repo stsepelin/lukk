@@ -20,7 +20,11 @@ interface RefreshTokenRepository
 
     public function findByHashForUpdate(string $hash): ?RefreshTokenRecord;
 
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt): void;
+    /**
+     * @param  ?string  $scope  The family's OWN abilities, pinned for its lifetime (a personal
+     *                          access token, an impersonation cap). Null derives them per mint.
+     */
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void;
 
     public function markRotated(string $id): void;
 

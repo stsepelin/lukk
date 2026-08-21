@@ -6,14 +6,17 @@ namespace Lukk\Tests\Fixtures;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Lukk\Concerns\HasAbilities;
 use Lukk\Concerns\HasRefreshTokens;
+use Lukk\Contracts\HasTokenAbilities;
 
 /**
  * A second authenticatable behind the `admin` guard — a distinct table from User, so ids collide
  * (admins.id == users.id) and the isolation tests can prove tokens/families don't cross guards.
  */
-class Admin extends Authenticatable
+class Admin extends Authenticatable implements HasTokenAbilities
 {
+    use HasAbilities;
     use HasFactory;
     use HasRefreshTokens;
 

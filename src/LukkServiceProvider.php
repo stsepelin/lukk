@@ -121,6 +121,17 @@ class LukkServiceProvider extends ServiceProvider
             $kernel->addToMiddlewarePriorityBefore(AuthenticatesRequests::class, ForceJsonRequest::class);
         }
 
+        // The ability gates read the token the guard put on the request, so they are meaningless
+        // before `auth:api` has run. Middleware executes in the order listed on the route unless it
+        // appears in the priority list, and `Authenticate` does — so a route written
+        // `['lukk.ability:orders.read', 'auth:api']` would otherwise gate first and answer 401 on a
+        // perfectly good token. Sorting them after `Authenticate` makes the declaration order on
+        // the route stop mattering.
+        if (method_exists($kernel, 'addToMiddlewarePriorityAfter')) {
+            $kernel->addToMiddlewarePriorityAfter(AuthenticatesRequests::class, RequireAbility::class);
+            $kernel->addToMiddlewarePriorityAfter(RequireAbility::class, RequireAllAbilities::class);
+        }
+
         if ($this->config()['routes'] ?? true) {
             $this->loadRoutesFrom(__DIR__.'/routes/api.php');
 
@@ -347,7 +358,7 @@ class LukkServiceProvider extends ServiceProvider
             // for another guard fails the audience (and signature, if keys differ) check and returns
             // null before any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
             $verifier = new FirebaseTokenVerifier(Lukk::guardConfig($name), $app->make(Denylist::class));
-            $guard = new JwtGuard($verifier, $provider);
+            $guard = new JwtGuard($verifier, $provider, $name);
 
             return new RequestGuard(fn ($request) => $guard($request), $app->make('request'), $provider);
         });
