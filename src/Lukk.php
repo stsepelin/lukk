@@ -79,7 +79,10 @@ class Lukk
      */
     public static function rateLimitKey(Request $request): string
     {
-        $fallback = self::normalizeIp((string) $request->ip());
+        // `?: 'unknown'` for the same reason the custom key below is guarded: a null `$request->ip()`
+        // would normalize to '' and put EVERY caller in one bucket. Applying the rule to the custom
+        // key but not to our own fallback was the gap.
+        $fallback = self::normalizeIp((string) $request->ip()) ?: 'unknown';
 
         if (self::$rateLimitKeyUsing !== null) {
             $key = (string) call_user_func(self::$rateLimitKeyUsing, $request);
@@ -275,6 +278,15 @@ class Lukk
         $authGuards = (array) config('auth.guards', []);
         $audienceOwners = [];
         $pathMounts = [];
+
+        // `guardConfig()` early-returns the top-level config for the default guard's name, so an
+        // entry under that name in `lukk.guards` has its overrides silently DROPPED — while still
+        // flipping `isMultiGuard()` on, which turns on refresh-token guard scoping (mass logout on
+        // existing `guard IS NULL` rows) and mounts a duplicate route group. `guardNames()`
+        // de-duplicates, so nothing downstream can notice. Refuse instead.
+        if (isset(((array) config('lukk.guards', []))[$default])) {
+            throw new RuntimeException("lukk guard [{$default}] is the default guard; configure it in the top level of config/lukk.php, not under 'guards' — an entry there is ignored while still enabling multi-guard mode.");
+        }
 
         foreach (self::guardNames() as $name) {
             if ($name !== $default && ($authGuards[$name]['driver'] ?? null) !== 'lukk-jwt') {

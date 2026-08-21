@@ -30,6 +30,11 @@ class DatabaseLockoutRepository implements LockoutRepository
         private readonly int $releaseAfter,
     ) {}
 
+    public function maxAttempts(): int
+    {
+        return $this->maxAttempts;
+    }
+
     public function locked(string $purpose, string $subject, ?string $guard): bool
     {
         if (! $this->usable($subject)) {
@@ -150,9 +155,13 @@ class DatabaseLockoutRepository implements LockoutRepository
         }
 
         try {
-            return Lockout::query()->create(
+            // Nested, so Laravel emits a SAVEPOINT: on PostgreSQL a failed INSERT aborts the WHOLE
+            // transaction (25P02 on every later statement), which would make this recovery itself
+            // the 500 on /auth/login that it exists to prevent. Rolling back to the savepoint keeps
+            // the outer transaction — and its `lockForUpdate` — usable. MySQL doesn't need it.
+            return DB::transaction(fn () => Lockout::query()->create(
                 ['purpose' => $purpose, 'subject' => $subject, 'guard' => (string) $guard, 'attempts' => 0]
-            );
+            ));
         } catch (UniqueConstraintViolationException) {
             return $this->query($purpose, $subject, $guard)->lockForUpdate()->firstOrFail();
         }
@@ -164,8 +173,10 @@ class DatabaseLockoutRepository implements LockoutRepository
      * An empty subject would put every caller in ONE bucket — and unlike a decaying limiter, that
      * bucket never heals: 100 failures anywhere would lock the whole application, permanently. It
      * happens for real whenever `Lukk::authenticateUsing` reads a field other than `lukk.username`,
-     * since the identifier this keys on is then never submitted. Refuse rather than lock everyone;
-     * the module warns about that configuration at boot.
+     * since the identifier this keys on is then never submitted. Refuse rather than lock everyone —
+     * "silently does nothing" is the wrong outcome, but it is the survivable one. `config/lukk.php`
+     * documents the constraint next to `features.lockout`; it cannot be checked at boot, because a
+     * package provider boots before the application registers its `authenticateUsing` callback.
      */
     private function usable(string $subject): bool
     {

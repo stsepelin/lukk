@@ -7,8 +7,8 @@ namespace Lukk\Actions;
 use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 
 /**
@@ -44,10 +44,14 @@ class ResetPassword
             // strictly stronger evidence than the password itself — so leaving the account locked
             // after it would mean the user does the one thing the product offers and is still
             // stuck, with no path left but a support ticket.
-            // Keyed off the RESOLVED user rather than the submitted address, and normalized the same
-            // way the failure path records it, so the release actually matches the row.
-            $identifier = (string) $user->{(string) config('lukk.username', 'email')};
-            $this->lockouts?->release('login', Str::transliterate(Str::lower(trim($identifier))), $this->guard);
+            // Keyed off the RESOLVED user, which is also what the failure path records — so this
+            // releases exactly this account's lock and no one else's. Releasing on the normalized
+            // identifier instead meant a look-alike account (`аdmin@` with a Cyrillic а) shared the
+            // row, and resetting either password cleared the other's lock.
+            $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard);
+            // The step-up lock counts failures against the password that just changed, so those
+            // failures are now meaningless. Keyed on the id, which is how the confirm lock records.
+            $this->lockouts?->release('confirm', (string) $user->getAuthIdentifier(), $this->guard);
 
             event(new PasswordReset($user));
 

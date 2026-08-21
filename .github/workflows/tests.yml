@@ -11,10 +11,10 @@ jobs:
     name: Pint (code style)
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: '8.4'
           coverage: none
@@ -42,10 +42,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: ${{ matrix.php }}
           extensions: mbstring, sqlite3, pdo_sqlite
@@ -62,15 +62,80 @@ jobs:
       - name: Run tests
         run: vendor/bin/pest
 
+  concurrency-engines:
+    runs-on: ubuntu-latest
+    name: Concurrency (${{ matrix.engine }})
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: ['pgsql', 'mysql']
+
+    # sqlite :memory: serialises writers, so isolation-level behaviour is invisible in the
+    # default suite. These run against a real engine: they pin the family-revoke/rotation race
+    # which reproduces on PostgreSQL (READ COMMITTED) and not on MySQL.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: lukk
+          POSTGRES_PASSWORD: lukk
+          POSTGRES_DB: lukk
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U lukk" --health-interval 2s
+          --health-timeout 3s --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: lukk
+          MYSQL_DATABASE: lukk
+          MYSQL_USER: lukk
+          MYSQL_PASSWORD: lukk
+        ports: ['33306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -plukk" --health-interval 2s
+          --health-timeout 3s --health-retries 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          # pgsql/mysqli are needed for the ASYNC statement: firing the concurrent revoke without
+          # blocking is the only way to reproduce the interleaving from one process.
+          extensions: mbstring, sqlite3, pdo_sqlite, pdo_pgsql, pgsql, pdo_mysql, mysqli
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Run the concurrency suite
+        env:
+          LUKK_TEST_ENGINE: ${{ matrix.engine }}
+          LUKK_TEST_PGSQL: '1'
+          LUKK_TEST_MYSQL: '1'
+        # The tests skip themselves when the engine is unreachable — right locally, useless here,
+        # where a silent skip is indistinguishable from a pass. So fail on one.
+        run: |
+          set -o pipefail
+          vendor/bin/pest --group=concurrency | tee /tmp/concurrency.log
+          if grep -q 'skipped' /tmp/concurrency.log; then
+            echo "::error::the concurrency suite skipped — the ${{ matrix.engine }} service was not reachable"
+            exit 1
+          fi
+
   coverage:
     runs-on: ubuntu-latest
     name: Coverage (100%)
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: '8.4'
           extensions: mbstring, sqlite3, pdo_sqlite
@@ -89,11 +154,11 @@ jobs:
   all-checks:
     name: All checks passed
     if: always()
-    needs: [lint, tests, coverage]
+    needs: [lint, tests, concurrency-engines, coverage]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job did not succeed
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: exit 1
       - name: All required jobs passed
-        run: echo "lint + matrix + coverage all green."
+        run: echo "lint + matrix + concurrency + coverage all green."

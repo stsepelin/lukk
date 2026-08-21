@@ -40,6 +40,15 @@ class FinishPasskeyRegistration
             $this->fail();
         }
 
+        // `credential_id` is the primary key — varchar(255) — but WebAuthn L3 permits a 1023-byte
+        // raw id, which is 1364 base64url characters. An authenticator emitting one would be a
+        // QueryException (MySQL strict) or, worse, a silent truncation that no later assertion can
+        // ever match — a self-inflicted lockout out of the credential just registered. Refuse it as
+        // a clean validation failure instead, the same shape as the duplicate check below.
+        if (strlen($passkey->credentialId) > 255) {
+            $this->fail();
+        }
+
         // credential_id is globally unique (PK); catch a duplicate as a clean failure, not a raw DB error.
         if ($this->passkeys->findByCredentialId($passkey->credentialId) !== null) {
             $this->fail();

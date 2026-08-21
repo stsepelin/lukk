@@ -101,6 +101,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Family Fork Threshold
+    |--------------------------------------------------------------------------
+    |
+    | Live, unrotated tokens one family may hold before Events\RefreshFamilyForked
+    | fires. The grace window above mints a sibling for a concurrent refresh, so a
+    | family legitimately carries two or three; a family forked by a thief racing
+    | inside the window keeps growing. Advisory only — lukk never revokes on it,
+    | because revoking on suspicion is the false logout the grace window exists to
+    | prevent. Minimum 2.
+    |
+    */
+
+    'fork_threshold' => (int) env('LUKK_FORK_THRESHOLD', 3),
+
+    /*
+    |--------------------------------------------------------------------------
     | Clock Skew Leeway
     |--------------------------------------------------------------------------
     |
@@ -206,6 +222,28 @@ return [
         'two_factor' => [
             'max_attempts' => (int) env('LUKK_2FA_MAX_ATTEMPTS', 5),
             'decay_seconds' => (int) env('LUKK_2FA_DECAY', 60),
+        ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Step-Up Confirmation
+        |--------------------------------------------------------------------------
+        |
+        | Guards `POST /auth/confirm-password` and `/auth/confirm-passkey`. These
+        | are authenticated, so the meaningful bucket is the USER, not the address:
+        | a caller holding a stolen access token is one identity behind however
+        | many IPs they like. Both a per-user and a per-IP limit are applied, and
+        | the tighter wins.
+        |
+        | Without this the sudo re-auth was an unmetered password oracle for anyone
+        | already holding a token — the same secret the login route throttles twice
+        | over. Keep it tight; a legitimate user confirms a handful of times a day.
+        |
+        */
+
+        'confirm' => [
+            'max_attempts' => (int) env('LUKK_CONFIRM_MAX_ATTEMPTS', 5),
+            'decay_seconds' => (int) env('LUKK_CONFIRM_DECAY', 60),
         ],
 
         /*
@@ -758,6 +796,15 @@ return [
         | anyone who knows an address can burn its budget deliberately. Turn it on
         | when the protocol requirement outweighs that, and set "release_after" so
         | the denial is bounded.
+        |
+        | RETENTION: a counter row is created for every failed identifier, existing or
+        | not — including addresses that name no account, which is deliberate (a
+        | lock that only existed for real accounts would answer "does this account
+        | exist?"). The table therefore accumulates plaintext identifiers an attacker
+        | probed, third parties' addresses among them. "lukk:prune" drops spent rows
+        | (--lockout-days, default 30); if that retention doesn't suit your privacy
+        | posture, shorten it or swap LockoutRepository for one that stores an HMAC
+        | of the subject.
         |
         | The counter keys on the "username" field above. If you use
         | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set

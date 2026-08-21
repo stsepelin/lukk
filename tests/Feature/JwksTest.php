@@ -57,3 +57,13 @@ it('left-pads EC JWK coordinates to the curve field size (RFC 7518 §6.2.1.2)', 
         ->and(strlen($decode($jwk['x'])))->toBe(32)
         ->and(strlen($decode($jwk['y'])))->toBe(32); // padded up from 31
 });
+
+it('omits a key whose type does not match the configured algorithm', function () {
+    // `kty` used to be chosen from the ALGORITHM, so an RSA key under ES256 indexed the EC details
+    // of an RSA key and published `{"kty":"EC","crv":"","x":"","y":""}` — a structurally invalid JWK
+    // that a strict consumer chokes on. Signing is already broken at that point; say so loudly.
+    useAsymmetric(rsaKeypair(), 'k1');
+    config(['lukk.algorithm' => 'ES256']);
+
+    $this->getJson('/auth/jwks')->assertOk()->assertExactJson(['keys' => []]);
+});

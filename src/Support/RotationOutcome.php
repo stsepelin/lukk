@@ -15,11 +15,13 @@ class RotationOutcome
         public readonly ?string $familyId = null,
         public readonly int|string|null $userId = null,
         public readonly ?string $refreshSecret = null,
+        /** Live tokens in the family after this rotation — >1 means the grace window minted a sibling. */
+        public readonly int $siblings = 1,
     ) {}
 
-    public static function issued(int|string $userId, string $familyId, string $refreshSecret): self
+    public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings = 1): self
     {
-        return new self('issued', $familyId, $userId, $refreshSecret);
+        return new self('issued', $familyId, $userId, $refreshSecret, $siblings);
     }
 
     public static function unknown(): self

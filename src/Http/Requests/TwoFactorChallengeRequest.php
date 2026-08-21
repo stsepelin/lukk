@@ -24,8 +24,11 @@ class TwoFactorChallengeRequest extends FormRequest
     {
         return [
             'challenge_token' => ['required', 'string'],
-            'code' => ['nullable', 'string'],
-            'recovery_code' => ['nullable', 'string'],
+            // Mutually exclusive. Sending both let one request consume a single rate-limiter slot
+            // while performing TWO independent verifications, doubling the effective guess rate —
+            // and it is meaningless as a request: the caller knows which credential they hold.
+            'code' => ['nullable', 'string', 'prohibits:recovery_code'],
+            'recovery_code' => ['nullable', 'string', 'prohibits:code'],
         ];
     }
 }

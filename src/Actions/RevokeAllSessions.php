@@ -23,8 +23,12 @@ class RevokeAllSessions
 
     public function __invoke(int|string $userId): void
     {
-        foreach ($this->repository->revokeUserFamilies($userId) as $familyId) {
-            $this->denylist->revokeFamily($familyId, $this->config['access_ttl'] + $this->config['leeway']);
-        }
+        // Denylisted inside the repository's transaction and BEFORE the rows are revoked — see
+        // `RevokeSession` for why that direction is the safe one to fail in.
+        $this->repository->revokeUserFamilies($userId, fn (array $ids) => array_map(
+            fn (string $familyId) => $this->denylist->revokeFamily(
+                $familyId, $this->config['access_ttl'] + $this->config['leeway'],
+            ), $ids,
+        ));
     }
 }

@@ -3,9 +3,12 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Lukk\Contracts\Denylist;
+use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
 
@@ -144,4 +147,47 @@ it('denylists the family so its access tokens stop verifying immediately', funct
 
     revokeSession()(familyId());
     expect(verifier()->verify($pair->accessToken))->toBeNull();
+});
+
+it('does not issue a successor into a family whose revoke is already in flight', function () {
+    // `revokeFamily` is a set-based UPDATE; under READ COMMITTED (PostgreSQL) its snapshot can miss
+    // a successor inserted by an in-flight rotation, leaving a live row the holder keeps rotating —
+    // so a logout-all or a reuse kill undoes itself once the denylist entry expires. Both revoke
+    // paths write the denylist BEFORE the rows, so seeing it means a revoke is under way.
+    $pair = User::factory()->create()->startSession();
+
+    // Exactly the intermediate state: denylisted, rows not yet updated.
+    app(Denylist::class)->revokeFamily(familyId(), 900);
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class);
+
+    // And nothing live survives in the family to rotate with later.
+    expect(RefreshToken::query()->whereNull('revoked_at')->count())->toBe(0);
+});
+
+it('reports a family carrying more live tokens than concurrency explains', function () {
+    // The grace window mints a sibling rather than revoking, which is what stops a multi-tab client
+    // logging itself out — and is also what a thief racing inside the window gets. Both chains then
+    // rotate forever without colliding, so nothing else in lukk can see the fork.
+    Event::fake([RefreshFamilyForked::class]);
+    config(['lukk.grace_seconds' => 60]);
+    $pair = User::factory()->create()->startSession();
+
+    // Re-consume the same parent repeatedly, inside grace — each pass mints another sibling.
+    foreach (range(1, 4) as $i) {
+        rotate()($pair->refreshToken);
+    }
+
+    Event::assertDispatched(RefreshFamilyForked::class, fn ($e) => $e->liveTokens > 3);
+});
+
+it('stays quiet for the two or three siblings ordinary concurrency produces', function () {
+    Event::fake([RefreshFamilyForked::class]);
+    config(['lukk.grace_seconds' => 60]);
+    $pair = User::factory()->create()->startSession();
+
+    rotate()($pair->refreshToken);
+    rotate()($pair->refreshToken);
+
+    Event::assertNotDispatched(RefreshFamilyForked::class);
 });

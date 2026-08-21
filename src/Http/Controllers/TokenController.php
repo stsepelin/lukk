@@ -28,6 +28,13 @@ class TokenController
 
     private function presentedRefreshToken(Request $request): string
     {
-        return (string) ($request->input('refresh_token') ?? $request->cookie(RefreshCookie::name()) ?? '');
+        // `input()` unions the QUERY STRING for every content type, so `POST /auth/refresh?refresh_token=…`
+        // worked — putting a 30-day opaque credential into access logs, proxy logs and Referer
+        // headers, the one place a token kept out of caches and hashed at rest must never appear
+        // (RFC 9700 §4.3.2). Body only. `post()` covers form encoding, `json()` the JSON body.
+        $presented = $request->post('refresh_token') ?? $request->json('refresh_token');
+
+        // An array would raise "Array to string conversion" and hash the literal "Array".
+        return is_string($presented) ? $presented : (string) ($request->cookie(RefreshCookie::name()) ?? '');
     }
 }

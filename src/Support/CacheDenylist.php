@@ -23,6 +23,8 @@ class CacheDenylist implements DenylistContract
     public function __construct(array $config)
     {
         $this->store = Cache::store($config['denylist_store'] ?? null);
+
+        CacheStoreGuard::assertCanHoldRevocations($this->store);
     }
 
     public function revokeJti(string $jti, int $ttlSeconds): void

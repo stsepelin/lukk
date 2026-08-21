@@ -44,7 +44,7 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
             Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
             Route::delete('sessions', [SessionController::class, 'destroy'])->middleware($guard);
             Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware($guard);
-            Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware($guard);
+            Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware([$guard, 'throttle:lukk-'.$guardName.'-confirm']);
         });
 }
 
@@ -70,7 +70,9 @@ Route::domain(config('lukk.domain'))
         Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
         Route::delete('sessions', [SessionController::class, 'destroy'])->middleware($guard);
         Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware($guard);
-        Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware($guard);
+        // Throttled like login: it re-verifies the SAME password, so leaving it unmetered made the
+        // sudo gate an unlimited password oracle for anyone already holding an access token.
+        Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware([$guard, 'throttle:lukk-confirm']);
 
         if (config('lukk.features.two_factor')) {
             Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');
@@ -84,7 +86,10 @@ Route::domain(config('lukk.domain'))
         if (config('lukk.features.passkeys')) {
             Route::post('passkeys/login-options', PasskeyLoginOptionsController::class)->middleware('throttle:lukk-passkeys');
             Route::post('passkeys/login', [PasskeyAuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-passkeys');
-            Route::post('confirm-passkey', [ConfirmablePasskeyController::class, 'store'])->middleware($guard);
+            // Shares the confirm budget. A passkey assertion is a signature, not a guessable secret,
+            // so this is DoS/CPU metering rather than brute-force defence — which is also why it is
+            // not gated by the confirm lockout below.
+            Route::post('confirm-passkey', [ConfirmablePasskeyController::class, 'store'])->middleware([$guard, 'throttle:lukk-confirm']);
             Route::get('passkeys', [PasskeyController::class, 'index'])->middleware($guard);
             Route::post('passkeys/registration-options', PasskeyRegistrationOptionsController::class)->middleware($confirmed);
             Route::post('passkeys', [PasskeyController::class, 'store'])->middleware($confirmed);

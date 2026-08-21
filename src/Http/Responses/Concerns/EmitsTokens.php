@@ -6,6 +6,7 @@ namespace Lukk\Http\Responses\Concerns;
 
 use Illuminate\Http\JsonResponse;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Lukk;
 use Lukk\Support\RefreshCookie;
 use Lukk\Support\TokenPair;
 
@@ -24,7 +25,9 @@ trait EmitsTokens
 
     private function tokenResponse(TokenPair $pair): JsonResponse
     {
-        if (! config('lukk.cookie_mode')) {
+        // Per-guard, like the cookie name below: a guard-level `cookie_mode` override was read
+        // from the top-level config and silently ignored.
+        if (! (Lukk::guardConfig()['cookie_mode'] ?? false)) {
             return $this->noStore(response()->json($pair->toArray()));
         }
 
@@ -34,12 +37,10 @@ trait EmitsTokens
             'expires_in' => $pair->expiresIn,
         ]);
 
-        $minutes = (int) (config('lukk.refresh_ttl', 2592000) / 60);
-
         $response->withCookie(cookie()->make(
             name: RefreshCookie::name(),
             value: $pair->refreshToken,
-            minutes: $minutes,
+            minutes: RefreshCookie::ttlMinutes(),
             path: '/',
             domain: null,
             secure: RefreshCookie::secure(),

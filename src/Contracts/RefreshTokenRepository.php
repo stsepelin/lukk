@@ -24,6 +24,15 @@ interface RefreshTokenRepository
 
     public function markRotated(string $id): void;
 
+    /**
+     * How many live (unrotated, unrevoked, unexpired) tokens the family holds.
+     *
+     * Only used for the fan-out signal: the grace window tolerates a re-consumption by minting a
+     * sibling, so legitimate concurrency settles at two or three, while a family forked by a thief
+     * keeps growing. See `Events\RefreshFamilyForked`.
+     */
+    public function countLiveTokens(string $familyId): int;
+
     public function revokeFamily(string $familyId): void;
 
     /**
@@ -32,7 +41,7 @@ interface RefreshTokenRepository
      *
      * @return array<int,string>
      */
-    public function revokeUserFamilies(int|string $userId): array;
+    public function revokeUserFamilies(int|string $userId, ?callable $before = null): array;
 
     /**
      * Revoke every active family for the user except the given one (logout
@@ -40,7 +49,7 @@ interface RefreshTokenRepository
      *
      * @return array<int,string>
      */
-    public function revokeUserFamiliesExcept(int|string $userId, string $exceptFamilyId): array;
+    public function revokeUserFamiliesExcept(int|string $userId, string $exceptFamilyId, ?callable $before = null): array;
 
     public function pruneExpired(): int;
 }

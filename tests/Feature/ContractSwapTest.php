@@ -62,3 +62,21 @@ it('lets an app swap the Denylist implementation behind the contract', function 
 
     expect($fake->revokedFamilies)->toBe(['fam-xyz']);
 });
+
+it('refuses an array cache store in production, where revocation would be invisible', function () {
+    // Everything that makes an ALREADY-ISSUED credential stop working lives in this cache. An array
+    // store is per-process: a revoked token stays valid on every other worker, and the single-use
+    // guarantees are not guarantees. It fails silently, which is what makes it worth refusing.
+    app()->detectEnvironment(fn () => 'production');
+    config(['lukk.denylist_store' => 'array']);
+
+    expect(fn () => app(Denylist::class))
+        ->toThrow(RuntimeException::class, 'cannot use the [ArrayStore] cache store');
+});
+
+it('leaves the array store alone outside production, where it is the right default', function () {
+    // lukk's own suite runs on it.
+    config(['lukk.denylist_store' => 'array']);
+
+    expect(app(Denylist::class))->toBeInstanceOf(Denylist::class);
+});
