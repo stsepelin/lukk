@@ -39,6 +39,8 @@ php artisan lukk:prune                            # delete expired/revoked refre
 - **Concurrency:** keep sibling/grace (the grace branch mints a fresh sibling, never a false logout). Don't switch to strict CAS — direct non-BFF clients can't be forced to single-flight.
 - Default **HS256**; RS256/ES256 + JWKS + `kid` key rotation are implemented behind the contracts (`Tokens\Jwt\KeyRing` resolves signing/verification material; the alg is pinned from config and **never read from the token header** — the alg-confusion defense). Stay on HS256 until an independent verifier actually exists. The grace window is a **deliberate deviation** from RFC 9700 §4.14.2 / OAuth 2.1 (which say a replayed, invalidated refresh token revokes the active one) — matching Okta's 30s rotation grace and Auth0's overlap period. The docs' [Known limitations](https://stsepelin.github.io/lukk-docs/security#known-limitations) record the reasoning; don't quietly "fix" it to strict invalidate-on-replay. The JWKS JWK is hand-encoded from `openssl_pkey_get_details` — do not add a JWK library (one-runtime-dependency rule).
 
+- **CI actions are pinned to commit SHAs**, not tags — a mutable tag can be repointed upstream and would then run unreviewed code with the workflow token. The trailing `# v7.0.1` comment is the human-readable version; Dependabot (`.github/dependabot.yml`) bumps both together. Keep new workflow steps pinned the same way.
+
 ## Gotchas
 
 - **Testing JWT time claims:** `firebase/php-jwt` validates `exp`/`nbf` against real `time()`, but the issuer stamps them from Carbon. **Mint at a travelled clock and verify at the real one** — `$this->travel(±N)->seconds(fn () => issuer()->accessToken(...))`. Don't mutate `JWT::$timestamp`.

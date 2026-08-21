@@ -1,0 +1,13 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs so an upstream tag repoint can't run unreviewed code with the
+  # workflow token. That only stays safe if something bumps them — a pinned SHA never receives a
+  # security fix on its own. Dependabot rewrites the SHA and the `# version` comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
