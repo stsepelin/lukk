@@ -5,6 +5,20 @@ All notable changes to `lukk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Abilities / scopes** — coarse, stateless authorization carried in the access token. `Lukk::abilitiesUsing(fn ($userId) => ['orders.read', 'orders.*'])` mints a `scope` claim; `lukk.ability:a,b` gates a route on **any** of them and `lukk.abilities:a,b` on **all** (Sanctum's split, so the semantics are the ones people already expect); `$user->tokenCan('orders.read')` via the `HasAbilities` trait.
+
+  The wire format is the registered `scope` claim, space-delimited (RFC 6749 §3.3, RFC 9068 §2.2.3), so an API gateway or a non-lukk verifier can read it without knowing about lukk. `*` grants everything and `orders.*` grants the namespace — but a wildcard only ever appears in the *grant*, never in the check, so a caller can't widen their own question by asking `tokenCan('orders.*')`.
+
+  **Deny by default, and inert until configured.** Without `abilitiesUsing` no claim is minted at all and tokens stay byte-identical to 0.5.0. Once it's set, a token with no `scope` grants nothing — because adding `lukk.ability:admin` to a route while forgetting to configure abilities should fail loudly, not wave everyone through.
+
+  Abilities are **re-derived on every refresh**, not frozen at login. Revoking one therefore takes effect within `access_ttl` instead of lasting the life of the refresh token — which is also why they aren't stored on the family row, and why this needs no migration.
+
+  Scope is deliberately coarse: it says what a *token* may do, never which *records* it may touch. Per-object authorization stays your Policies and Gates (OWASP API1 — BOLA).
+
 ## [0.5.0] - 2026-08-21
 
 ### Added

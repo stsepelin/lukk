@@ -58,6 +58,8 @@ use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Guards\GuardContext;
 use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
 use Lukk\Http\Middleware\ForceJsonRequest;
+use Lukk\Http\Middleware\RequireAbility;
+use Lukk\Http\Middleware\RequireAllAbilities;
 use Lukk\Http\Middleware\RequireConfirmation;
 use Lukk\Http\Middleware\RequireVerifiedEmail;
 use Lukk\Http\Middleware\SetGuard;
@@ -102,6 +104,9 @@ class LukkServiceProvider extends ServiceProvider
 
         $router = $this->app->make('router');
         $router->aliasMiddleware('lukk.confirm', RequireConfirmation::class);
+        // `lukk.ability:a,b` = any of them; `lukk.abilities:a,b` = all of them (Sanctum's split).
+        $router->aliasMiddleware('lukk.ability', RequireAbility::class);
+        $router->aliasMiddleware('lukk.abilities', RequireAllAbilities::class);
         $router->aliasMiddleware('lukk.verified', RequireVerifiedEmail::class);
         // Opt-in alias for a consumer's own `auth:api` routes; see docs/installation.md.
         $router->aliasMiddleware('lukk.force-json', ForceJsonRequest::class);

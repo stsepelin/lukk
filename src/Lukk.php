@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
 use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
+use Lukk\Support\Abilities;
 use RuntimeException;
 
 /**
@@ -22,6 +23,9 @@ class Lukk
 
     /** @var (Closure(int|string): array<string,mixed>)|null */
     public static ?Closure $tokenClaimsUsing = null;
+
+    /** @var Closure|null Resolves the abilities a token is minted with. Null = the feature is off. */
+    public static ?Closure $abilitiesUsing = null;
 
     /** @var (Closure(array<string,mixed>): Authenticatable)|class-string|null */
     public static Closure|string|null $registerUsing = null;
@@ -142,6 +146,33 @@ class Lukk
     public static function tokenClaimsUsing(Closure $callback): void
     {
         self::$tokenClaimsUsing = $callback;
+    }
+
+    /**
+     * Decide what a user's tokens may do — `fn (int|string $userId) => ['orders.read', 'orders.*']`.
+     *
+     * Takes the id rather than the model, matching `tokenClaimsUsing`, because the issuer mints
+     * from an id and resolving a model there would put a query on every refresh.
+     *
+     * Until this is set, no `scope` claim is minted at all and tokens stay byte-identical to
+     * before. Once it is, abilities are **deny by default**: `tokenCan()` and the ability
+     * middleware refuse anything not granted. Return `['*']` for an unrestricted token.
+     *
+     * Re-evaluated on every refresh, not frozen at login — so revoking an ability takes effect
+     * within `access_ttl` rather than lasting the life of the refresh token. That is the reason
+     * abilities are not stored on the family row.
+     */
+    public static function abilitiesUsing(Closure $callback): void
+    {
+        self::$abilitiesUsing = $callback;
+    }
+
+    /** The abilities for a user, or null when the feature was never configured. */
+    public static function abilitiesFor(int|string $userId): ?Abilities
+    {
+        return self::$abilitiesUsing === null
+            ? null
+            : Abilities::fromArray((array) (self::$abilitiesUsing)($userId));
     }
 
     /**

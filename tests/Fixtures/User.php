@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Lukk\Concerns\HasAbilities;
 use Lukk\Concerns\HasRefreshTokens;
 use Lukk\Concerns\HasTwoFactorAuthentication;
 
@@ -17,6 +18,7 @@ use Lukk\Concerns\HasTwoFactorAuthentication;
  */
 class User extends Authenticatable implements MustVerifyEmail
 {
+    use HasAbilities;
     use HasFactory;
     use HasRefreshTokens;
     use HasTwoFactorAuthentication;

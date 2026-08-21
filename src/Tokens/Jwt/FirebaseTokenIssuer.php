@@ -43,8 +43,16 @@ class FirebaseTokenIssuer implements TokenIssuer
 
         $custom = Lukk::$tokenClaimsUsing !== null ? (Lukk::$tokenClaimsUsing)($userId) : [];
 
+        // `scope` (RFC 6749 §3.3 / RFC 9068 §2.2.3) — space-delimited, so a non-lukk verifier or an
+        // API gateway can read it. Minted only when `abilitiesUsing` is configured AND grants
+        // something: an unconfigured install keeps byte-identical tokens, and an empty grant means
+        // "nothing", which is already what an absent claim means. Re-derived here rather than
+        // stored on the family, so a revoked ability expires with the access token.
+        $abilities = Lukk::abilitiesFor($userId)?->toScope();
+        $scope = $abilities === null ? [] : ['scope' => $abilities];
+
         // Standard claims always win; per-login claims ($claims) win over the hook.
-        $payload = array_merge($custom, $claims, $standard);
+        $payload = array_merge($custom, $scope, $claims, $standard);
 
         $signing = $this->keys->signingKey();
 
