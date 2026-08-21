@@ -7,6 +7,7 @@ directory and were lost — **keep this file in git**.
 Not a vulnerability disclosure channel. To report something, see the repository's security policy.
 
 - **Last full audit:** 2026-08-20, against `main` at the 0.5.0 release candidate.
+- **Reproduction:** `docker compose up -d`, then `LUKK_TEST_PGSQL=1 vendor/bin/pest --group=concurrency`.
 - **Method:** three parallel white-box passes (auth/rate-limiting/lockout, token crypto/rotation/
   revocation, optional features/data-at-rest), each asked to prove or disprove findings by tracing
   code and reproducing against the real route stack. Findings that could not be turned into a
@@ -31,7 +32,7 @@ Each is pinned by a regression test; the test name is the contract.
 | `RELEASE-1` | Low | **`lukk:release` could not release a `two_factor` or `confirm` lock.** Those subjects are user ids recorded verbatim, but the command lower-cased everything — breaking a ULID (uppercase Crockford base32) wherever comparison is binary. Normalization is now applied only to `login`. |
 | `PG-1` | Low | **The unique-violation recovery was itself a 500 on PostgreSQL.** A failed `INSERT` aborts the whole transaction (`25P02` on every later statement), so the `catch` that exists to absorb the first-failure insert race could not run. The insert is now nested, so Laravel emits a `SAVEPOINT`. |
 | `RACE-1` | Medium | **Concurrency could overrun the cap.** The lockout gate was a plain read outside the transaction that later counted, so N concurrent requests all passed it and all reached the credential check — realized verifications were `max_attempts + concurrency`. Attempts are now *reserved*: incremented transactionally, then compared against the cap, so only `max_attempts` requests can win a slot. Applied to login, step-up confirmation and the two-factor challenge; a success releases the reservation, so a correct credential never costs an attempt. |
-| `RT-1` | Medium | **A family revoke could lose a race with a concurrent rotation.** Under READ COMMITTED the set-based `UPDATE`'s snapshot can miss a successor row inserted by an in-flight rotate, leaving a live token; once the family's denylist entry expired its descendants authenticated again, so a logout-all or reuse kill undid itself ~15 min later. Rotation now re-checks the denylist after persisting the successor. **Not reproduced — see the caveat below.** |
+| `RT-1` | Medium | **A family revoke could lose a race with a concurrent rotation.** Under READ COMMITTED the set-based `UPDATE`'s snapshot can miss a successor row inserted by an in-flight rotate, leaving a live token; once the family's denylist entry expired its descendants authenticated again, so a logout-all or reuse kill undid itself ~15 min later. Rotation now re-checks the denylist after persisting the successor. **Reproduced on PostgreSQL 17 and pinned by `tests/Concurrency/`** — see below. |
 | `RT-2` | Low | **The refresh token was accepted from the query string.** `$request->input()` unions the query for every content type, so a 30-day opaque credential could land in access logs, proxy logs and `Referer` (RFC 9700 §4.3.2). Body only now. |
 | `RT-3` | Low | **The bulk revokes denylisted after the DB write**, inverting the ordering `RevokeSession` documents. A cache failure partway left families revoked but still authenticating for up to `access_ttl` — during the one operation a user performs *because* they believe they're compromised. The denylist write moved inside the repository's transaction, before the update. |
 | `EVT-1` | Info | **`RefreshTokenReused` fired for ordinary post-logout retries** (`reason='revoked'`), which apps are told to treat as theft. Alert fatigue over the one alarm that matters. Now dispatched only for genuine reuse. **Behaviour change — see UPGRADE.md.** |
@@ -71,13 +72,88 @@ Nothing outstanding from the 2026-08-20 audit. Two accepted residuals, deliberat
 | `SUBJ-1` (residual) | The decaying **throttle** still keys on the normalized identifier, so two look-alike accounts share a rate-limit bucket and can throttle each other. That bucket decays in `decay_seconds` and grants no release primitive, and keying it on identity would put a user-provider lookup in front of every login attempt, including unauthenticated floods. The persistent lockout — the part that mattered — keys on identity. |
 | `RT-4` (by design) | The grace window still mints a sibling for a within-grace re-consumption, so a thief racing inside it gets a parallel chain. That is the trade that stops a multi-tab or SSR client logging itself out, and `CLAUDE.md` protects it. It is no longer *invisible*: `Events\RefreshFamilyForked` reports a family carrying more live tokens than concurrency explains. Acting on it automatically would mean revoking on suspicion — the false logout the window exists to prevent — so it stays advisory. |
 
-### Carried caveat
+### Standards basis for the accepted residuals
 
-`RT-1` is fixed but **was never reproduced**: it needs a live PostgreSQL instance, which this audit
-did not have. The reasoning is from PG's documented READ COMMITTED semantics plus the SQL emitted,
-and the fix (re-checking the denylist inside the rotate transaction) is correct on any engine. If
-you ever have a PG box to hand, the repro is two connections: one `BEGIN; SELECT … FOR UPDATE`, the
-other running `revokeFamily`, then insert + commit and check `revoked_at` on the new row.
+Both were re-checked against the primary sources rather than left as judgement calls.
+
+#### `RT-4` — the grace window is a deliberate deviation, and worth naming as one
+
+**RFC 9700 §4.14.2** and **OAuth 2.1 §4.3.1** describe rotation identically, and neither provides for
+a tolerance window:
+
+> the authorization server issues a new refresh token with every access token refresh response. The
+> previous refresh token is invalidated but information about the relationship is retained by the
+> authorization server. If a refresh token is compromised and subsequently used by both the attacker
+> and the legitimate client, one of them will present an invalidated refresh token, which will inform
+> the authorization server of the breach. The authorization server cannot determine which party
+> submitted the invalid refresh token, but it will revoke the active refresh token — *OAuth 2.1 adds:*
+> as well as the access authorization grant associated with it.
+
+Within `grace_seconds` lukk **detects** the replay and deliberately does **not** revoke; it mints a
+sibling. That is a deviation, not a gap in the spec's coverage, and it should be described that way
+rather than as "the spec allows it".
+
+Three things bound it:
+
+- **It is what the deviation buys.** Strict invalidate-on-replay means any concurrent refresh — two
+  tabs, an SSR render racing the client — logs the user out. That false logout is a release blocker
+  for this package, and `CLAUDE.md` protects the branch.
+- **Every major implementation does the same.** Okta ships a 30-second rotation grace period
+  (configurable 0–60), Auth0 a "rotation overlap period", and fosite a grace period in its refresh
+  grant handler. lukk's default of 30s matches Okta's.
+- **The tolerance is one token deep.** Auth0's refinement is that only the *immediately previous*
+  token may be reused within leeway; presenting the second-to-last still trips detection. lukk
+  behaves the same way for a different reason: grace is measured from each token's own `rotated_at`,
+  so an older token in the chain is already past its window and resolves to `reuse`.
+
+Also worth stating plainly: RFC 9700 scopes that MUST to **public clients** obtaining tokens through
+an OAuth flow. lukk is first-party and is not an authorization server — but the architecture docs
+map to these standards, so the deviation belongs in the register either way.
+
+The residual after `RT-4`'s fix is only that a fork cannot be *automatically* acted on.
+`Events\RefreshFamilyForked` now makes it visible; revoking on it automatically would reintroduce
+exactly the false logout the window exists to prevent.
+
+#### `SUBJ-1` residual — not a deviation
+
+**NIST SP 800-63B §5.2.2** scopes the cap to identity, not to a submitted string:
+
+> the verifier SHALL limit consecutive failed authentication attempts on a single account to no more
+> than 100.
+
+That is the control the **lockout** implements, and after `SUBJ-1` it keys on the resolved user id —
+so "a single account" is satisfied literally. The decaying throttle that still keys on the
+normalized identifier is defence in depth *underneath* that clause, not the clause's implementation,
+so the collision does not put lukk outside §5.2.2 or ASVS V2.2.1.
+
+What remains is a cross-account **availability** effect: two look-alike accounts share a rate-limit
+bucket, so one can throttle the other for `decay_seconds`. §5.2.2 explicitly contemplates throttling
+having its own denial-of-service cost and lists mitigations for it, which is the right frame — this
+is a bounded instance of a trade-off the standard already expects, not an unhandled case. It grants
+no release primitive and no extra guesses; those were the parts that made `SUBJ-1` a High.
+
+One §5.2.2 SHOULD is worth recording as met while we are here:
+
+> When the subscriber successfully authenticates, the verifier SHOULD disregard any previous failed
+> attempts for that user from the same IP address.
+
+lukk clears both the throttle buckets and the lockout counter on any successful authentication.
+
+### Carried caveat — now resolved
+
+`RT-1` was originally recorded as reasoned-but-unreproduced. It has since been **reproduced**, and
+the behaviour is exactly as the audit predicted:
+
+| Engine | Result |
+|---|---|
+| PostgreSQL 17 (READ COMMITTED) | Successor row **survives** with `revoked_at IS NULL` — a live token the holder keeps rotating |
+| MySQL 8.4 (REPEATABLE READ) | The `UPDATE` reports 2 rows affected and catches the successor |
+
+`tests/Concurrency/` pins both, running against real engines from `docker-compose.yml` (the default
+suite's sqlite `:memory:` serialises writers, so the behaviour is invisible there). The concurrent
+statement is fired with `pg_send_query`/`MYSQLI_ASYNC` so it can genuinely block on the rotation's
+row lock — a second synchronous handle would just deadlock the test. CI runs the suite against both
+engines and **fails if it skips**, since a silent skip is indistinguishable from a pass.
 
 ## Verified sound
 

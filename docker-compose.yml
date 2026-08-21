@@ -1,0 +1,33 @@
+# Real engines for the concurrency tests. The suite's default is sqlite :memory:, which
+# serialises writers completely — so isolation-level behaviour (RT-1) is invisible there.
+#
+#   docker compose up -d
+#   LUKK_PG=1 LUKK_MYSQL=1 vendor/bin/pest --group=concurrency
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lukk
+      POSTGRES_PASSWORD: lukk
+      POSTGRES_DB: lukk
+    ports: ['55432:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U lukk']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: lukk
+      MYSQL_DATABASE: lukk
+      MYSQL_USER: lukk
+      MYSQL_PASSWORD: lukk
+    ports: ['33306:3306']
+    command: --transaction-isolation=REPEATABLE-READ
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-plukk']
+      interval: 2s
+      timeout: 3s
+      retries: 30
