@@ -101,6 +101,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Family Fork Threshold
+    |--------------------------------------------------------------------------
+    |
+    | Live, unrotated tokens one family may hold before Events\RefreshFamilyForked
+    | fires. The grace window above mints a sibling for a concurrent refresh, so a
+    | family legitimately carries two or three; a family forked by a thief racing
+    | inside the window keeps growing. Advisory only — lukk never revokes on it,
+    | because revoking on suspicion is the false logout the grace window exists to
+    | prevent. Minimum 2.
+    |
+    */
+
+    'fork_threshold' => (int) env('LUKK_FORK_THRESHOLD', 3),
+
+    /*
+    |--------------------------------------------------------------------------
     | Clock Skew Leeway
     |--------------------------------------------------------------------------
     |

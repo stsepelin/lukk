@@ -72,7 +72,7 @@ jobs:
 
     # sqlite :memory: serialises writers, so isolation-level behaviour is invisible in the
     # default suite. These run against a real engine: they pin the family-revoke/rotation race
-    # (AUDIT.md RT-1), which reproduces on PostgreSQL and not on MySQL.
+    # which reproduces on PostgreSQL (READ COMMITTED) and not on MySQL.
     services:
       postgres:
         image: postgres:17-alpine

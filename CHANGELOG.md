@@ -27,7 +27,7 @@ Two honest caveats. Setting `release_after` **trades the strict reading**: a run
 
 ### Security
 
-- **A full audit pass closed 24 findings.** Three parallel white-box reviews against the release candidate (auth/rate-limiting/lockout, token crypto/rotation/revocation, optional features/data-at-rest), each asked to prove findings by reproducing them. The register lives in [AUDIT.md](AUDIT.md) — including what was checked and found sound, so a regression reads as a change rather than a discovery. Highlights beyond the step-up work below:
+- **A full audit pass closed 24 findings.** Three parallel white-box reviews against the release candidate (auth/rate-limiting/lockout, token crypto/rotation/revocation, optional features/data-at-rest), each asked to prove findings by reproducing them. Every finding is fixed and pinned by a regression test; the two accepted trade-offs are documented under [Known limitations](https://stsepelin.github.io/lukk-docs/security#known-limitations). Highlights beyond the step-up work below:
 
   - **Concurrency could overrun the lockout cap** (`RACE-1`). The gate was a plain read outside the transaction that later counted, so N concurrent requests all passed it and all reached the credential check — realized verifications were `max_attempts + concurrency`. Attempts are now reserved: incremented transactionally, then compared against the cap.
   - **A family revoke could lose a race with a concurrent rotation** (`RT-1`), leaving a live token behind so that a logout-all or a reuse kill undid itself once the denylist entry expired. Rotation re-checks the denylist after persisting the successor. Reasoned from PostgreSQL's READ COMMITTED semantics; **not reproduced** — the caveat is recorded rather than dropped.
