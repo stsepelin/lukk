@@ -25,6 +25,18 @@ but the default is safe.
 Most of 0.5.0 is opt-in (the account lockout) or invisible (the step-up throttle). Four things
 change behaviour on an existing install; only the first two can be noticed by your users.
 
+### New route: `POST /auth/password`
+
+**Low impact — informational.**
+
+`features.change_password` defaults to **on**, so upgrading adds one authenticated route. It needs
+no configuration and no migration. If your app manages passwords elsewhere — an identity provider,
+SSO, your own endpoint — set it to `false`.
+
+Note it shares the step-up throttle (`rate_limits.confirm`) and, when `features.lockout` is on, the
+`confirm` lockout counter. That's deliberate: it re-verifies the same secret, so a separate budget
+would just widen the total allowance for guessing one password.
+
 ### The refresh cookie is now named per guard
 
 **Medium impact — only if you use `cookie_mode` *and* [multiple guards](https://stsepelin.github.io/lukk-docs/multiple-guards).** Everyone else: no action.

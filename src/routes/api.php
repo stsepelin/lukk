@@ -15,6 +15,7 @@ use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
 use Lukk\Http\Controllers\PasskeyController;
 use Lukk\Http\Controllers\PasskeyLoginOptionsController;
 use Lukk\Http\Controllers\PasskeyRegistrationOptionsController;
+use Lukk\Http\Controllers\PasswordController;
 use Lukk\Http\Controllers\PasswordResetLinkController;
 use Lukk\Http\Controllers\RecoveryCodeController;
 use Lukk\Http\Controllers\RegisteredUserController;
@@ -73,6 +74,12 @@ Route::domain(config('lukk.domain'))
         // Throttled like login: it re-verifies the SAME password, so leaving it unmetered made the
         // sudo gate an unlimited password oracle for anyone already holding an access token.
         Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware([$guard, 'throttle:lukk-confirm']);
+
+        if (config('lukk.features.change_password')) {
+            // Shares the confirm budget deliberately: it re-verifies the same secret, and two
+            // independent allowances for guessing one password is just a larger allowance.
+            Route::post('password', [PasswordController::class, 'update'])->middleware([$guard, 'throttle:lukk-confirm']);
+        }
 
         if (config('lukk.features.two_factor')) {
             Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');

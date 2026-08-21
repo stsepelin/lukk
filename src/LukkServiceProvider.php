@@ -20,6 +20,7 @@ use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\ChallengeTwoFactor;
+use Lukk\Actions\ChangePassword;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Actions\FinishPasskeyLogin;
@@ -263,6 +264,9 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
+        $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
+            $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
             $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));

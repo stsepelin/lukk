@@ -819,6 +819,25 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Change Password
+        |--------------------------------------------------------------------------
+        |
+        | An authenticated POST /auth/password: re-verify the current password, set
+        | a new one, revoke every OTHER session, fire PasswordChanged. No email
+        | round-trip — the caller already holds a session and can prove the
+        | existing password.
+        |
+        | On by default, like "logout_all": it needs no configuration, and refusing
+        | a signed-in user the ability to change their own password is not a
+        | sensible default. Turn it off where passwords live somewhere else (SSO,
+        | an identity provider, your own endpoint).
+        |
+        */
+
+        'change_password' => (bool) env('LUKK_CHANGE_PASSWORD', true),
+
+        /*
+        |--------------------------------------------------------------------------
         | Passkeys
         |--------------------------------------------------------------------------
         |
