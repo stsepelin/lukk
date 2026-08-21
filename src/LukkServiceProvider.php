@@ -266,7 +266,7 @@ class LukkServiceProvider extends ServiceProvider
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
-            $this->lockouts($app), Lukk::currentGuard()));
+            $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
             $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));

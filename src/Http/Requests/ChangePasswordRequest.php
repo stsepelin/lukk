@@ -26,7 +26,9 @@ class ChangePasswordRequest extends FormRequest
             // `confirmed` wants `password_confirmation`. `different` because silently accepting a
             // no-op would report success for a change that didn't happen — and this endpoint
             // revokes every other session, which is a lot of collateral for a no-op.
-            'password' => ['required', 'confirmed', 'different:current_password', 'max:255', Password::defaults()],
+            'password' => ['required', 'confirmed', 'different:current_password', 'max:255', // A NUL byte makes `Hash::make` throw ("Bcrypt hashing not supported"), which surfaces as a 500
+                // on a public endpoint rather than a 422. Nothing else in the rule set rejects one.
+                'not_regex:/\0/', Password::defaults()],
         ];
     }
 }

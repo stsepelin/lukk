@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Lukk\Actions\ChangePassword;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\ResolvesCurrentFamily;
 use Lukk\Http\Requests\ChangePasswordRequest;
 
 /**
@@ -21,19 +21,18 @@ use Lukk\Http\Requests\ChangePasswordRequest;
 class PasswordController
 {
     use PreventsCaching;
+    use ResolvesCurrentFamily;
 
     public function update(ChangePasswordRequest $request, ChangePassword $change, TokenVerifier $verifier): JsonResponse
     {
-        // The caller's own family, read from their bearer token — this is the session to KEEP.
-        // Taken from the verified token rather than from the request, so it can't be pointed at
-        // someone else's session (or at a family the caller doesn't own) to spare it from the sweep.
-        $claims = $verifier->verify((string) $request->bearerToken());
+        $validated = $request->validated();
 
         $change(
             $request->user(),
-            (string) $request->input('current_password'),
-            (string) $request->input('password'),
-            isset($claims->fid) ? (string) $claims->fid : null,
+            (string) $validated['current_password'],
+            (string) $validated['password'],
+            // The session to KEEP — see the trait for why it comes from the verified token.
+            $this->currentFamilyId($request, $verifier),
         );
 
         return $this->noStore(response()->json(['status' => 'password-changed'], 200));

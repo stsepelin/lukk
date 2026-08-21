@@ -2,11 +2,13 @@
 
 declare(strict_types=1);
 
-use Illuminate\Support\Facades\DB;
+use Firebase\JWT\JWT;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use Lukk\Events\PasswordChanged;
 use Lukk\Models\Lockout;
+use Lukk\Models\RefreshToken;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('change-password');
@@ -174,18 +176,61 @@ it('clears the confirm lock on success, since those failures were against the ol
     expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });
 
-it('does not leave the caller stranded when the token carries no family', function () {
-    // No family id means no "current" session to preserve, so nothing is revoked rather than
-    // everything — silently logging someone out of the session they're using is the worse answer.
-    [$user, $pair] = signedIn();
-    $other = $user->startSession();
+it('revokes every session when the token carries no family', function () {
+    // A token with no `fid` was not minted by this package's session flow — it comes from a
+    // co-issuer sharing the secret (the verify-only topology). There is no lukk-tracked session of
+    // the caller's among these rows to protect, so the sweep must take all of them. Skipping it
+    // returned "password-changed" while every session the user believed they'd killed stayed live.
+    $user = User::factory()->create(['password' => bcrypt('password')]);
+    $a = $user->startSession();
+    app('auth')->forgetGuards();
+    $b = $user->startSession();
+
+    // Minted by hand, because the issuer always stamps `fid` — that is the whole point of the case.
+    $now = now()->getTimestamp();
+    $fidless = JWT::encode([
+        'iss' => config('lukk.issuer'), 'aud' => config('lukk.audience')[0] ?? config('lukk.audience'),
+        'sub' => (string) $user->getKey(), 'jti' => (string) Str::uuid(),
+        'iat' => $now, 'nbf' => $now, 'exp' => $now + 900,
+    ], config('lukk.secret'), 'HS256', head: ['typ' => 'at+jwt']);
 
     app('auth')->forgetGuards();
-    $this->withToken($pair->accessToken)->withoutMiddleware()->postJson('/auth/password', [
+    $this->withToken($fidless)->postJson('/auth/password', [
         'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
-    ]);
+    ])->assertOk();
 
-    expect(DB::table('refresh_tokens')->count())->toBeGreaterThan(0);
+    // Both families gone — asserted on `revoked_at`, not on row count: revocation is a soft update,
+    // so counting rows can never fail and would pin nothing.
+    expect(RefreshToken::query()->whereNull('revoked_at')->count())->toBe(0);
+
+    foreach ([$a, $b] as $dead) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/refresh', ['refresh_token' => $dead->refreshToken])->assertStatus(401);
+    }
+});
+
+it('marks the response uncacheable', function () {
+    // The siblings pin this; without it, deleting `noStore()` from the controller fails no test.
+    [, $pair] = signedIn();
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertHeader('Cache-Control', 'no-store, private');
+});
+
+it('rejects a missing current password without spending a lockout attempt', function () {
+    // `different:current_password` is SKIPPED when the compared key is absent from the payload, so
+    // `required` is the only thing standing between that and a no-op change being accepted.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3]);
+    [$user, $pair] = signedIn();
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'password' => 'password', 'password_confirmation' => 'password',
+    ])->assertStatus(422)->assertJsonValidationErrors(['current_password']);
+
+    expect(Hash::check('password', $user->fresh()->password))->toBeTrue()
+        // A shape error is not a wrong password — it must not consume the cap.
+        ->and(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });
 
 it('refuses a change that lost the reservation race', function () {
@@ -207,4 +252,45 @@ it('refuses a change that lost the reservation race', function () {
     ])->assertStatus(423);
 
     expect(Hash::check('password', $user->fresh()->password))->toBeTrue();
+});
+
+it('clears the LOGIN lock too, so the change actually restores access', function () {
+    // Releasing only the confirm counter left a user who was being brute-forced, noticed, and did
+    // the right thing still locked out of login on every other device — permanently, with
+    // release_after at 0, and the only way out was the reset email this endpoint exists to avoid.
+    config([
+        'lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 2, 'lukk.lockout.release_after' => 0,
+        'lukk.rate_limits.login.max_attempts' => 500, 'lukk.rate_limits.login.ip_max_attempts' => 500,
+        'lukk.rate_limits.login.account_max_attempts' => 500,
+    ]);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('password')]);
+    $pair = $user->startSession();
+
+    foreach (range(1, 3) as $i) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'wrong']);
+    }
+    expect(Lockout::where('purpose', 'login')->exists())->toBeTrue();
+
+    app('auth')->forgetGuards();
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertOk();
+
+    // The whole point: the new password actually works.
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'new-password-1'])->assertOk();
+});
+
+it('rejects a NUL byte in the new password instead of 500ing', function () {
+    // `Hash::make` throws "Bcrypt hashing not supported" on a NUL byte, and nothing else in the
+    // rule set rejects one — so it surfaced as a 500. Shared with register and reset, which had
+    // the same hole.
+    [, $pair] = signedIn();
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password',
+        'password' => "new-password\0evil",
+        'password_confirmation' => "new-password\0evil",
+    ])->assertStatus(422)->assertJsonValidationErrors(['password']);
 });
