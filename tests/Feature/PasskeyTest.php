@@ -2,12 +2,15 @@
 
 declare(strict_types=1);
 
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
+use Lukk\Models\Passkey;
 use Lukk\Support\Abilities;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
@@ -308,4 +311,55 @@ it('refuses a pinned token the passkey list', function () {
     app('auth')->forgetGuards();
     $allowed = start()($user->getKey(), [], ['ci.deploy', Abilities::ACCOUNT]);
     $this->withToken($allowed->accessToken)->getJson('/auth/passkeys')->assertOk();
+});
+
+it('prunes passkeys whose user no longer exists', function () {
+    // Nothing else ever removes these: a passkey has no expiry, so `lukk:prune` had nothing to do
+    // with them, and erasure only reaches an account deleted through lukk's own route. A row deleted
+    // directly, or by a cascade elsewhere, left the credential id, the human-chosen device name and
+    // a last-used timestamp behind permanently.
+    $living = User::factory()->create();
+    $doomed = User::factory()->create();
+    storePasskey($living->getKey(), 'cred-living');
+    storePasskey($doomed->getKey(), 'cred-orphan');
+
+    User::query()->whereKey($doomed->getKey())->delete();   // deleted OUTSIDE lukk's route
+
+    $this->artisan('lukk:prune')->assertSuccessful();
+
+    expect(Passkey::whereKey('cred-orphan')->exists())->toBeFalse()
+        ->and(Passkey::whereKey('cred-living')->exists())->toBeTrue();
+});
+
+it('prunes on a pre-0.6 schema that has no guard column', function () {
+    // The column went into the EXISTING create migration, so every install that already ran it has
+    // no such column until they act on UPGRADE.md. Naming it anyway broke two different ways:
+    // MySQL/PostgreSQL throw `Unknown column` — and `lukk:prune` is `->daily()`, so that takes the
+    // refresh-token and lockout sweeps down every night — while SQLite degrades a double-quoted
+    // identifier matching no column to a STRING LITERAL, so `"guard" is null` is false for every row
+    // and the sweep silently deletes nothing, forever, while reporting success.
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->getKey(), new NewPasskey('live-cred', 'cose', 0), 'Live');
+    app(PasskeyRepository::class)->store(999999, new NewPasskey('dead-cred', 'cose', 0), 'Orphan');
+
+    Schema::table('passkeys', fn (Blueprint $table) => $table->dropColumn('guard'));
+
+    expect(app(PasskeyRepository::class)->pruneOrphaned())->toBe(1)
+        ->and(Passkey::find('dead-cred'))->toBeNull()
+        ->and(Passkey::find('live-cred'))->not->toBeNull();
+});
+
+it('refuses a duplicate credential id as a validation failure, not a database error', function () {
+    // `credential_id` is globally unique (the PK) but the assertion lookup is guard-scoped, so the
+    // registration pre-check has to ask a wider question than that lookup answers. It didn't, so a
+    // duplicate reached the unique index: a 500 rather than a 422, and an existence oracle across
+    // the guard boundary. lukk supports only `none` attestation, so the id is client-chosen.
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->getKey(), new NewPasskey('taken', 'cose', 0), 'Existing');
+
+    expect(app(PasskeyRepository::class)->existsByCredentialId('taken'))->toBeTrue()
+        ->and(app(PasskeyRepository::class)->existsByCredentialId('free'))->toBeFalse();
+
+    // NOTE: under a single guard `scoped()` applies no filter, so this half cannot tell a scoped
+    // check from an unscoped one. The property that matters lives in AccountDeletionMultiGuardTest.
 });

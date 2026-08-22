@@ -87,6 +87,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
+            createdAt: $row->created_at?->getTimestamp(),
         );
     }
 
@@ -181,6 +182,23 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
             return $ids;
         });
+    }
+
+    public function deleteForUser(int|string $userId): int
+    {
+        // `scoped()`, like every other write on this class. It once wasn't, on the reasoning that "a
+        // person asked to be forgotten once, not once per guard" — which assumes one `user_id` means
+        // one person. Under multi-guard the providers are separate tables and `users.id ===
+        // admins.id` is the norm, so the unscoped delete destroyed an unrelated admin's refresh
+        // tokens: a permanent logout of a live account, with no `revoked_at` to explain it and no
+        // denylist entry, because revocation IS scoped. An account is (guard, id), not id.
+        return $this->scoped()->where('user_id', $userId)->delete();
+    }
+
+    public function allForUser(int|string $userId): array
+    {
+        return $this->scoped()->where('user_id', $userId)->orderBy('created_at')
+            ->get()->map(fn ($row) => $this->hydrate($row))->all();
     }
 
     public function pruneExpired(): int

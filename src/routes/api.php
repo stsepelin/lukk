@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
+use Lukk\Http\Controllers\AccountController;
 use Lukk\Http\Controllers\AuthenticatedSessionController;
 use Lukk\Http\Controllers\ConfirmablePasskeyController;
 use Lukk\Http\Controllers\ConfirmablePasswordController;
@@ -99,6 +100,41 @@ Route::domain(config('lukk.domain'))
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
         $sessionRoutes($guard);
+
+        if (config('lukk.features.account_deletion')) {
+            // Step-up confirmed AND gated on its own ability, which are two different controls doing
+            // two different jobs.
+            //
+            // Step-up stops a stolen access token: erasure is irreversible, so authentication alone
+            // must not be enough. It is no longer the only thing standing between a machine token
+            // and this route — confirmations are now bound to the session that earned them — but it
+            // still is not sufficient on its own, because a pin carrying `lukk.account` can earn its
+            // own confirmation.
+            //
+            // Hence `lukk.account.delete`, deliberately not covered by `lukk.account`: that ability
+            // already meant "manage my credentials", and folding erasure into it would have handed
+            // every already-issued token carrying it the power to destroy the account, silently, on
+            // upgrade. It would also invert the ordering — such a token cannot revoke one other
+            // session, but could delete everything.
+            // `ALWAYS`: `features.gate_auth_routes = false` must not reach this gate. That flag
+            // buys back pre-0.6 reach for tokens issued before abilities existed; this route did not
+            // exist then, so switching it off would not restore an old behaviour but hand a narrow
+            // machine token an irreversible new one.
+            $erasure = RequirePinnedAbility::class.':'.RequirePinnedAbility::ALWAYS.','.Abilities::ACCOUNT_DELETE;
+
+            // Metered on the step-up bucket, deliberately shared rather than given its own.
+            //
+            // The export is the widest read lukk offers — identifier, every session's timing, every
+            // passkey's name — and it rode only the broad `api` group limiter while every sibling
+            // sensitive route (confirm-password, change-password, recovery codes) was metered. It is
+            // a sudo-gated account operation, which is exactly what `lukk-confirm` already meters, so
+            // sharing the bucket also stops an attacker who has one confirmation from spending the
+            // window on bulk reads. A separate limiter would need new config keys for no new
+            // behaviour.
+            Route::get('account/export', [AccountController::class, 'export'])
+                ->middleware([...$confirmed, $erasure, 'throttle:lukk-confirm']);
+            Route::delete('account', [AccountController::class, 'destroy'])->middleware([...$confirmed, $erasure]);
+        }
 
         if (config('lukk.features.change_password')) {
             // Shares the confirm budget deliberately: it re-verifies the same secret, and two

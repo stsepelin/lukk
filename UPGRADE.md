@@ -22,8 +22,29 @@ but the default is safe.
 
 ## Upgrading to 0.6.0 from 0.5.x
 
-Abilities are new and entirely opt-in — an install that never calls `Lukk::abilitiesUsing()` mints
-byte-identical tokens and needs no action at all. Two things are worth reading if you do opt in.
+### New routes: `DELETE /auth/account` and `GET /auth/account/export`
+
+**High impact — `features.account_deletion` defaults to ON, so upgrading adds an irreversible route.**
+
+If your application already has its own deletion flow, or deletion is owned by an identity provider,
+or a retention obligation forbids it — turn it off:
+
+```php
+// config/lukk.php
+'features' => ['account_deletion' => false],
+```
+
+Both routes require **step-up confirmation** *and* the `lukk.account.delete` ability. Step-up alone
+is not enough to keep a machine token out: a pin carrying `lukk.account` can earn its *own*
+confirmation. `lukk.account.delete` is deliberately not covered by `lukk.account`, and
+`features.gate_auth_routes = false` does not switch this gate off — that flag exists to restore
+pre-0.6 reach, and these routes have no pre-0.6 behaviour to restore. Erasure force-deletes the user
+row by default — use
+`Lukk::deleteUserUsing()` to anonymize instead, and remember the two-factor columns live *on* that
+row, so a survivor keeps a working authenticator unless the callback clears them.
+
+The export is the auth slice only. Serving it as a complete Art. 15 response would under-disclose;
+append your own domain data.
 
 ### A step-up confirmation is now bound to the session that earned it
 
@@ -44,6 +65,113 @@ Matching is **strict**, which keeps the co-issuer topology working: a token mint
 sharing the secret legitimately carries no `fid`, and neither does a confirmation earned by it, so
 `null === null` still passes. What is refused is an *unbound* confirmation presented by a bearer that
 has one.
+
+### Three contracts gained a method
+
+**Medium impact — only if you implement `RefreshTokenRepository`, `PasskeyRepository` or
+`LockoutRepository` yourself.** Callers need no change.
+
+```php
+// RefreshTokenRepository
++ public function deleteForUser(int|string $userId): int;
++ public function allForUser(int|string $userId): array;
+// PasskeyRepository
++ public function deleteForUser(int|string $userId): int;
++ public function pruneOrphaned(): int;
++ public function existsByCredentialId(string $credentialId): bool;
+// LockoutRepository
++ public function forget(array $subjects, ?string $guard): int;
+```
+
+These are **erasure, not revocation**. `revokeUserFamilies` stamps `revoked_at` and deliberately
+keeps rows so a later replay still resolves to `reuse`; that is right for a logout and wrong for an
+Art. 17 request.
+
+`forget` takes a LIST because one account occupies three key spaces — `id:<user id>`,
+`idn:<normalized identifier>` and the bare user id — and a guard, because two accounts sharing a
+corporate email share a subject. Build the subjects with `LoginRateLimiter::lockoutSubject()`; the
+raw identifier is never a key, so a sweep using it matches nothing.
+
+Both `deleteForUser` implementations must be **guard-scoped**: an account is `(guard, id)`, and
+providers are separate tables where colliding ids are the norm.
+
+**Every `PasskeyRepository` method must now be guard-scoped except one**, not just `deleteForUser` —
+including `findByCredentialId`, which is the assertion lookup and therefore an authentication
+decision. The exception is `existsByCredentialId`, which must be **unscoped**: `credential_id` is
+globally unique, so registration has to ask whether *any* guard holds an id before writing it, or a
+cross-guard duplicate reaches the unique index as a 500 instead of a clean 422. lukk's
+own implementation takes the guard as a constructor argument and is bound with **`bind`, not
+`singleton`**: the active guard is per-request, so a memoized instance carries the previous request's
+guard into the next one. If you bind your own implementation as a singleton, it will.
+
+### A new nullable `guard` column on `passkeys`
+
+**High impact if you run multiple guards *and* use passkeys — otherwise no action.**
+
+`passkeys` had no `guard` column, so every read and write was a bare `where('user_id', ...)`. Under
+multi-guard the providers are separate tables, where `users.id === admins.id` is the ordinary case
+rather than a coincidence — so a credential could not be attributed to the account that owns it.
+Three things followed, and the first is an authentication bypass:
+
+- **`findByCredentialId` is the assertion lookup.** It takes a credential id and *no* user, so it is
+  what decides who just authenticated. Unscoped, an admin's credential resolved on the users guard.
+- **Erasure destroyed the colliding account's credentials.** `DELETE /auth/account` for a customer
+  removed a live administrator's second factor.
+- **Export disclosed them.** `GET /auth/account/export` handed the customer that administrator's
+  device name and last-used timestamp — third-party behavioural data, which Art. 15(4) forbids.
+
+`lukk:prune` compounded all three: it decided orphanhood against a single users table, so every
+other provider's credential was orphaned *by construction*, and the command is scheduled **daily**.
+
+The column lives in the **existing** `create_passkeys_table` migration, so how you get it depends on
+whether you have already run it — same rules as the `scope` column below:
+
+- **Fresh install / passkeys not yet migrated** — nothing to do.
+- **You already ran `create_passkeys_table`** — republishing does not help (`vendor:publish` won't
+  overwrite without `--force`, and `migrate` skips a filename already in the `migrations` table).
+  Add the column, then **backfill it**:
+
+  ```sql
+  ALTER TABLE passkeys ADD COLUMN guard VARCHAR(255) NULL;
+  ```
+
+  ```sql
+  -- Multi-guard only. Every existing row was written by ONE guard; name it, per guard.
+  UPDATE passkeys SET guard = 'api';        -- then correct the rows that belong elsewhere
+  ```
+
+**Backfill or those rows go dark.** `NULL` means "the single-guard default" and is correct for a
+single-guard install — lukk applies no scope and never touches the column, exactly as before. But
+once `lukk.guards` is non-empty, lukk stamps every write with a guard name and scopes every read to
+one, so a `NULL` row is invisible to *all* of them: it cannot be asserted, listed, erased, or
+pruned. It is left alone rather than deleted, deliberately — a sweep must not destroy a credential
+it cannot attribute — but it is also unusable until you name it.
+
+> The same trap already applies to `refresh_tokens.guard` if you adopted `lukk.guards` after 0.4.0
+> without backfilling. Both columns follow the identical rule: `NULL` is the single-guard default,
+> and becomes invisible the moment a second guard exists.
+
+**Going the other way — REMOVING a guard — needs the opposite cleanup, and it fails open.** The
+scope is deliberately asymmetric: a `NULL` row is invisible under multi-guard (it fails closed, above),
+but a *guard-stamped* row is fully visible once `lukk.guards` is empty again, because a single-guard
+install applies no scope at all. For refresh tokens that means old families become revocable by the
+default guard; for passkeys it is sharper, since `findByCredentialId` **is** the authentication
+decision — the removed guard's authenticator would then log in as whichever account holds the same id
+in the default provider. Before you drop a guard from `lukk.guards`, delete or re-home its rows:
+
+```sql
+DELETE FROM passkeys      WHERE guard = 'admin';
+DELETE FROM refresh_tokens WHERE guard = 'admin';
+```
+
+**Storing a passkey now depends on the active guard.** `PasskeyRepository::store()` stamps whichever
+guard is current, so a consumer registering a credential for a non-default guard outside lukk's own
+routes must set it first — `Lukk::useGuard('admin')` — or the row lands on the wrong guard.
+
+### Abilities (scopes)
+
+**Low impact — entirely opt-in.** An install that never calls `Lukk::abilitiesUsing()` mints
+byte-identical tokens and needs no action at all. Two things are worth reading if you do opt in.
 
 ### A new nullable `scope` column on `refresh_tokens`
 

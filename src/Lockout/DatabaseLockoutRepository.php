@@ -120,6 +120,30 @@ class DatabaseLockoutRepository implements LockoutRepository
         return max(0, $this->releaseAfter - (int) $row->locked_at->diffInSeconds(Carbon::now(), absolute: true));
     }
 
+    public function forget(array $subjects, ?string $guard): int
+    {
+        // The only public method here that guarded on nothing. `usable()` covers the four
+        // subject-keyed paths and `prune()` checks inline; this one was safe purely because its
+        // single call site happens to check first. A consumer calling the contract directly on an
+        // install that never published the lockout migration got a raw SQL error. Checked here
+        // rather than through `usable()`, which takes ONE subject and this takes a list.
+        if (! Schema::hasTable((new Lockout)->getTable())) {
+            return 0;
+        }
+
+        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== ''));
+
+        if ($subjects === []) {
+            return 0;
+        }
+
+        // Every purpose, but only THIS guard. Two accounts sharing a corporate email share a lockout
+        // subject, so an unguarded sweep let erasing one account clear a held NIST §5.2.2 login lock
+        // on a different, live, possibly privileged one — reachable by anyone controlling any
+        // account with that identifier.
+        return Lockout::query()->whereIn('subject', $subjects)->where('guard', (string) $guard)->delete();
+    }
+
     public function prune(int $staleAfterDays): int
     {
         if (! Schema::hasTable((new Lockout)->getTable())) {

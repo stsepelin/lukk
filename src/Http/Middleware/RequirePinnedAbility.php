@@ -33,6 +33,21 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  */
 class RequirePinnedAbility
 {
+    /**
+     * Marks a gate that `features.gate_auth_routes = false` does NOT switch off.
+     *
+     * That flag is an opt-out for operators who want their existing personal access tokens to keep
+     * their pre-0.6 reach on the routes that predate abilities. A route introduced WITH the ability
+     * system has no such history: turning the gate off there does not restore an old behaviour, it
+     * grants a new one. Erasure is the case that made this matter — with the flag off, a token
+     * pinned to `['ci.deploy']` could earn its own confirmation and destroy the account, arriving on
+     * upgrade with no re-consent, which is the precise outcome `Abilities::ACCOUNT_DELETE` exists to
+     * prevent.
+     *
+     * `!` is outside the RFC 6749 §3.3 scope charset, so this can never collide with a real ability.
+     */
+    public const ALWAYS = '!always';
+
     public function __construct(private readonly RefreshTokenRepository $repository) {}
 
     public function handle(Request $request, Closure $next, string ...$abilities): Response
@@ -41,9 +56,9 @@ class RequirePinnedAbility
         // made `RequirePinnedAbility::class` with no argument an `ArgumentCountError` — a 500 for
         // ordinary users, not just the denied — and silently dropped everything after the first in
         // `…:a,b`, which is the same syntax meaning ANY-of one line above in the routes file.
-        $required = Abilities::fromArray(
-            array_values(array_filter(array_map('trim', explode(',', implode(',', $abilities))), fn ($a) => $a !== ''))
-        )->all();
+        $tokens = array_values(array_filter(array_map('trim', explode(',', implode(',', $abilities))), fn ($a) => $a !== ''));
+        $always = in_array(self::ALWAYS, $tokens, true);
+        $required = Abilities::fromArray(array_values(array_filter($tokens, fn ($a) => $a !== self::ALWAYS)))->all();
 
         if ($required === []) {
             throw new InvalidArgumentException(
@@ -55,7 +70,7 @@ class RequirePinnedAbility
         // and reading the global block meant a guard could not switch this on for itself — the flag
         // fails open, so the narrowest token the API can issue kept logging that account out
         // everywhere.
-        if (! (Lukk::guardConfig()['features']['gate_auth_routes'] ?? true)) {
+        if (! $always && ! (Lukk::guardConfig()['features']['gate_auth_routes'] ?? true)) {
             return $next($request);
         }
 

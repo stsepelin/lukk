@@ -10,6 +10,7 @@ use Illuminate\Support\Carbon;
 /**
  * @property string $credential_id
  * @property int|string $user_id
+ * @property ?string $guard
  * @property ?string $name
  * @property string $public_key
  * @property int $sign_count

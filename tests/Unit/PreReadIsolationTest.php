@@ -149,6 +149,16 @@ it('refuses to mint when the pre-read disagrees with the locked read', function 
             return $this->inner->revokeUserFamiliesExcept($userId, $exceptFamilyId, $before);
         }
 
+        public function deleteForUser(int|string $userId): int
+        {
+            return $this->inner->deleteForUser($userId);
+        }
+
+        public function allForUser(int|string $userId): array
+        {
+            return $this->inner->allForUser($userId);
+        }
+
         public function pruneExpired(): int
         {
             return $this->inner->pruneExpired();
