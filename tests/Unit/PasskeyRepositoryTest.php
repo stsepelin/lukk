@@ -25,7 +25,7 @@ it('stores and finds a credential, encrypting the public key at rest', function 
         ->and($record->transports)->toBe(['internal'])
         ->and($record->name)->toBe('My iPhone');
 
-    expect(Passkey::find('cred-1')->public_key)->not->toBe('COSE-PUBLIC-KEY');
+    expect(Passkey::findOrFail('cred-1')->public_key)->not->toBe('COSE-PUBLIC-KEY');
 });
 
 it('returns null for an unknown credential', function () {

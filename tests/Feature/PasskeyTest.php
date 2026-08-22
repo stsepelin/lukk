@@ -78,8 +78,8 @@ it('logs in passwordlessly with a passkey and stamps amr=webauthn', function () 
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1],
     ])->assertOk()->json('access_token');
 
-    expect(verifier()->verify($access)->amr)->toBe(['webauthn'])
-        ->and(verifier()->verify($access)->sub)->toBe((string) $user->id);
+    expect(claims($access)->amr)->toBe(['webauthn'])
+        ->and(claims($access)->sub)->toBe((string) $user->id);
 });
 
 it('rejects a replayed assertion (the challenge is single-use)', function () {

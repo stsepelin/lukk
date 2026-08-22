@@ -245,7 +245,7 @@ it('resolves the acting guard for an action taken on a consumer route', function
     // so a "revoke everything" on an `auth:admin` route left the admin's sessions alive and
     // destroyed an unrelated user's — the two ids collide across providers.
     Route::middleware('auth:admin')->delete('/_test/wipe', function () {
-        app(RevokeAllSessions::class)(request()->user()->getAuthIdentifier());
+        app(RevokeAllSessions::class)(actor()->getAuthIdentifier());
 
         return response()->json(['ok' => true]);
     });

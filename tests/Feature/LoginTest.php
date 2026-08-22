@@ -55,7 +55,7 @@ it('stamps amr=[pwd] on a password-only login token', function () {
 
     $access = $this->postJson('/auth/login', ['email' => 'x@y.com', 'password' => 'password'])->json('access_token');
 
-    expect(verifier()->verify($access)->amr)->toBe(['pwd']);
+    expect(claims($access)->amr)->toBe(['pwd']);
 });
 
 it('returns an identical response for an unknown user and a wrong password', function () {

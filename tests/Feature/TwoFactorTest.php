@@ -216,7 +216,7 @@ it('stamps amr=[pwd,otp] on the token issued after a 2FA login', function () {
     $access = $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
         ->json('access_token');
 
-    expect(verifier()->verify($access)->amr)->toBe(['pwd', 'otp']);
+    expect(claims($access)->amr)->toBe(['pwd', 'otp']);
 });
 
 it('throttles challenge verification per account, independent of the IP route limit', function () {

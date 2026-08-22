@@ -57,8 +57,8 @@ it('registers and logs in through the real web-auth ceremony (end-to-end crypto)
         ->assertOk()
         ->json('access_token');
 
-    expect(verifier()->verify($access)->amr)->toBe(['webauthn'])
-        ->and(verifier()->verify($access)->sub)->toBe((string) $user->id);
+    expect(claims($access)->amr)->toBe(['webauthn'])
+        ->and(claims($access)->sub)->toBe((string) $user->id);
 
     // A second login: the authenticator's signature counter has advanced (now > 0),
     // so the real counter step runs — and is accepted (no regression).

@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Actions\StartSession;
+use Lukk\Contracts\HasTokenAbilities;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Support\TokenContext;
@@ -33,6 +35,43 @@ function verifier(): TokenVerifier
 {
     return app(TokenVerifier::class);
 }
+/**
+ * The claims of a token the test asserts is VALID.
+ *
+ * `verify()` is nullable — a rejected token is null — so reading a claim straight off it both hides
+ * the failure mode from the analyser and, when a test regresses, reports "property on null" instead
+ * of the thing that actually broke. Use `verifier()->verify()` directly when the point of the test
+ * IS that verification fails.
+ *
+ * @return stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}
+ */
+function claims(string $token): object
+{
+    $claims = verifier()->verify($token);
+
+    expect($claims)->not->toBeNull();
+    assert($claims !== null);
+
+    return $claims;
+}
+
+/**
+ * The authenticated user inside a test route closure, narrowed.
+ *
+ * `request()->user()` is nullable, but these closures only ever mount behind `auth:{guard}` — the
+ * same reason `ResolvesAuthenticatedUser` exists on the controller side.
+ *
+ * @return Authenticatable&HasTokenAbilities
+ */
+function actor()
+{
+    $user = request()->user();
+
+    assert($user !== null);
+
+    return $user;
+}
+
 function issuer(): TokenIssuer
 {
     return app(TokenIssuer::class);
