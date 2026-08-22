@@ -24,6 +24,12 @@ return new class extends Migration
             $table->uuid('family_id')->index();          // stable across a rotation chain
             $table->char('token_hash', 64)->unique();    // sha256(opaque secret)
             $table->ulid('previous_id')->nullable();     // audit chain pointer
+            // The token's OWN abilities, when it has any. NULL is the normal case and means
+            // "derive from Lukk::abilitiesUsing on every mint", which keeps a revoked ability
+            // taking effect within access_ttl. A value pins the grant for this family's lifetime —
+            // which is what a personal access token or an impersonation cap needs, and what a
+            // callback keyed on the subject cannot express.
+            $table->text('scope')->nullable();
             $table->timestamp('rotated_at')->nullable(); // set when consumed to mint a successor
             $table->timestamp('revoked_at')->nullable()->index(); // hard kill (logout / reuse cascade); indexed for prune
             $table->timestamp('expires_at')->index();    // absolute family ceiling

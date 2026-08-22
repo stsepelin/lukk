@@ -17,5 +17,7 @@ class RefreshTokenRecord
         public readonly ?int $rotatedAt,
         public readonly ?int $revokedAt,
         public readonly int $expiresAt,
+        /** The family's own scope claim, or null to derive it per mint. */
+        public readonly ?string $scope = null,
     ) {}
 }

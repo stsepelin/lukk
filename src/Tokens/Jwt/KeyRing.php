@@ -185,13 +185,29 @@ class KeyRing
         return null;
     }
 
+    /** Memoized signing material; see `privateKey()`. */
+    private string|OpenSSLAsymmetricKey|null $privateKey = null;
+
     private function base64Url(string $bytes): string
     {
         return rtrim(strtr(base64_encode($bytes), '+/', '-_'), '=');
     }
 
+    /**
+     * Memoized, like the verification keys beside it.
+     *
+     * Signing now happens inside the refresh transaction's row lock, and this ran `is_file()`,
+     * `file_get_contents()` and — with a passphrase — `openssl_pkey_get_private()` on EVERY mint. A
+     * disk read and an asymmetric key decrypt while holding `SELECT … FOR UPDATE` is exactly what
+     * moving the consumer callbacks out of that transaction was meant to prevent. RS256/ES256 only,
+     * so it never bit the default HS256 install.
+     */
     private function privateKey(): string|OpenSSLAsymmetricKey
     {
+        if ($this->privateKey !== null) {
+            return $this->privateKey;
+        }
+
         $pem = $this->load($this->config['keys']['private'] ?? '');
         $passphrase = $this->config['keys']['passphrase'] ?? null;
 
@@ -203,10 +219,10 @@ class KeyRing
                 throw new InvalidArgumentException('Could not decrypt the private key — check lukk.keys.passphrase.');
             }
 
-            return $key;
+            return $this->privateKey = $key;
         }
 
-        return $pem;
+        return $this->privateKey = $pem;
     }
 
     /**

@@ -8,6 +8,7 @@ use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
+use Lukk\Support\Abilities;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
 use Lukk\Tests\Fixtures\User;
@@ -288,4 +289,23 @@ it('refuses passkey login for a user deleted since registering the credential', 
     ])->assertStatus(401);
 
     expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
+it('refuses a pinned token the passkey list', function () {
+    // It enumerates the account's second factors — credential ids, the human-chosen device names,
+    // last-use timestamps. Target selection for a social-engineering step, and the write side of the
+    // same objects is already behind `lukk.account`.
+    $user = User::factory()->create();
+    storePasskey($user->getKey(), 'cred-abc');
+
+    $pat = start()($user->getKey(), [], ['ci.deploy']);
+    $this->withToken($pat->accessToken)->getJson('/auth/passkeys')->assertStatus(403);
+
+    app('auth')->forgetGuards();
+
+    // ...an ordinary session still reads it, and so does a pinned token that asked.
+    $this->withToken($user->startSession()->accessToken)->getJson('/auth/passkeys')->assertOk();
+    app('auth')->forgetGuards();
+    $allowed = start()($user->getKey(), [], ['ci.deploy', Abilities::ACCOUNT]);
+    $this->withToken($allowed->accessToken)->getJson('/auth/passkeys')->assertOk();
 });

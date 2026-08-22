@@ -30,7 +30,7 @@ it('issues and verifies an RS256 access token', function () {
     $kp = rsaKeypair();
     $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1');
 
-    $token = (new FirebaseTokenIssuer($config))->accessToken(42, 'fam-1')['token'];
+    $token = (new FirebaseTokenIssuer($config))->accessToken(ctx(42, 'fam-1'))['token'];
     $claims = asymVerifier($config)->verify($token);
 
     expect($claims)->not->toBeNull()
@@ -42,7 +42,7 @@ it('issues and verifies an ES256 access token', function () {
     $kp = ecKeypair();
     $config = asymConfig('ES256', ['k1' => $kp['public']], $kp['private'], 'k1');
 
-    $token = (new FirebaseTokenIssuer($config))->accessToken(7, 'fam')['token'];
+    $token = (new FirebaseTokenIssuer($config))->accessToken(ctx(7, 'fam'))['token'];
 
     expect(asymVerifier($config)->verify($token))->not->toBeNull();
 });
@@ -66,7 +66,7 @@ it('rejects a token signed by a key that is not in the verification set', functi
     $other = rsaKeypair();
     // Issue under one key, but the verifier only knows a different key for that kid.
     $token = (new FirebaseTokenIssuer(asymConfig('RS256', ['k1' => $mint['public']], $mint['private'], 'k1')))
-        ->accessToken(1, 'fam')['token'];
+        ->accessToken(ctx(1, 'fam'))['token'];
 
     expect(asymVerifier(asymConfig('RS256', ['k1' => $other['public']], $other['private'], 'k1'))->verify($token))->toBeNull();
 });
@@ -76,7 +76,7 @@ it('keeps a retired key valid during the rotation overlap, then rejects it once 
     $new = rsaKeypair();
 
     $oldToken = (new FirebaseTokenIssuer(asymConfig('RS256', ['old' => $old['public']], $old['private'], 'old')))
-        ->accessToken(7, 'fam')['token'];
+        ->accessToken(ctx(7, 'fam'))['token'];
 
     // Overlap: new key active and signing, old public key still listed.
     $overlap = asymConfig('RS256', ['new' => $new['public'], 'old' => $old['public']], $new['private'], 'new');
@@ -96,7 +96,7 @@ it('loads keys from inline PEM and from file paths interchangeably', function ()
 
     // private via a bare path, public via an "@path" reference.
     $config = asymConfig('RS256', ['k1' => "@$dir/pub.pem"], "$dir/priv.pem", 'k1');
-    $token = (new FirebaseTokenIssuer($config))->accessToken(3, 'fam')['token'];
+    $token = (new FirebaseTokenIssuer($config))->accessToken(ctx(3, 'fam'))['token'];
 
     expect(asymVerifier($config)->verify($token))->not->toBeNull();
 
@@ -109,7 +109,7 @@ it('decrypts a passphrase-protected private key', function () {
     $kp = rsaKeypair('s3cr3t-pass');
     $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1', 's3cr3t-pass');
 
-    $token = (new FirebaseTokenIssuer($config))->accessToken(9, 'fam')['token'];
+    $token = (new FirebaseTokenIssuer($config))->accessToken(ctx(9, 'fam'))['token'];
 
     expect(asymVerifier($config)->verify($token))->not->toBeNull();
 });
@@ -157,7 +157,7 @@ it('throws a clear error when the private-key passphrase is wrong', function () 
     $kp = rsaKeypair('correct-pass');
     $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1', 'wrong-pass');
 
-    expect(fn () => (new FirebaseTokenIssuer($config))->accessToken(1, 'fam'))
+    expect(fn () => (new FirebaseTokenIssuer($config))->accessToken(ctx(1, 'fam')))
         ->toThrow(InvalidArgumentException::class);
 });
 
@@ -182,4 +182,25 @@ it('builds an EC JWK for ES256', function () {
 
     expect($jwks['keys'][0])->toMatchArray(['kty' => 'EC', 'crv' => 'P-256'])
         ->and($jwks['keys'][0])->toHaveKeys(['x', 'y']);
+});
+
+it('reads and decrypts the signing key once, not on every mint', function () {
+    // Signing happens inside the refresh transaction's row lock. Unmemoized, this ran `is_file()`,
+    // `file_get_contents()` and — with a passphrase — `openssl_pkey_get_private()` on EVERY mint: a
+    // disk read and an asymmetric key decrypt while holding `SELECT … FOR UPDATE`, which is exactly
+    // what moving the consumer callbacks out of that transaction was meant to prevent.
+    $key = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+    openssl_pkey_export($key, $pem, 'sekrit');
+    $path = tempnam(sys_get_temp_dir(), 'lukk-key').'.pem';
+    file_put_contents($path, $pem);
+
+    $config = asymConfig('ES256', ['k1' => openssl_pkey_get_details($key)['key']], '@'.$path, 'k1', 'sekrit');
+
+    $issuer = new FirebaseTokenIssuer($config);
+    expect($issuer->accessToken(ctx(1, 'fam'))['token'])->toBeString();
+
+    // Delete the file: a second mint that still works proves the key was not re-read from disk.
+    unlink($path);
+
+    expect($issuer->accessToken(ctx(1, 'fam'))['token'])->toBeString();
 });

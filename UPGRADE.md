@@ -20,6 +20,187 @@ but the default is safe.
 
 ---
 
+## Upgrading to 0.6.0 from 0.5.x
+
+Abilities are new and entirely opt-in — an install that never calls `Lukk::abilitiesUsing()` mints
+byte-identical tokens and needs no action at all. Two things are worth reading if you do opt in.
+
+### A new nullable `scope` column on `refresh_tokens`
+
+**Medium impact — only if you want a session to own a *fixed* set of abilities.** Everyone else:
+no action, including everyone using `abilitiesUsing`.
+
+The column lives in the **existing** `create_refresh_tokens_table` migration, so how you get it
+depends on whether you have already run that migration:
+
+- **Fresh install / not yet migrated** — nothing to do. Publishing `lukk-migrations` and running
+  `php artisan migrate` creates the column.
+- **You already ran `create_refresh_tokens_table`** (every existing install) — republishing does
+  **not** help. `vendor:publish` won't overwrite your copy without `--force`, and even with it
+  `migrate` skips a filename already recorded in the `migrations` table. Add the column by hand:
+
+  ```sql
+  ALTER TABLE refresh_tokens ADD COLUMN scope TEXT NULL;
+  ```
+
+  or, if you have no refresh tokens worth keeping, roll back and re-run:
+
+  ```bash
+  php artisan migrate:rollback --step=1   # only if this is the last-run migration
+  php artisan migrate
+  ```
+
+Skip it entirely if you don't pin grants — lukk reads the column defensively and the derived path
+works unchanged without it.
+
+```php
+$table->text('scope')->nullable();
+```
+
+`NULL` — every existing row, and every row lukk writes unless you ask otherwise — means *derived*:
+abilities come from `Lukk::abilitiesUsing()` on each mint, so revoking one takes effect within
+`access_ttl`. A value means *pinned*: `StartSession` was given an explicit grant, and every rotation
+of that family replays it verbatim. That is what a personal access token or a capped impersonation
+session needs, and it is the only reason to add the column. lukk reads it defensively (`$row->scope
+?? null`), so a pre-0.6 schema keeps working — you simply can't pin a grant until you migrate.
+
+### The two swap-seam contracts changed shape
+
+**Medium impact — only if you implement `TokenIssuer` or `RefreshTokenRepository` yourself.**
+Callers need no change.
+
+**`TokenIssuer::accessToken()` now takes a context object**, replacing the subject and family
+arguments. Subject + family + guard was already three, and mint-time context keeps growing — a new
+field goes into `TokenContext` without breaking every custom issuer again:
+
+```php
+- public function accessToken(int|string $userId, string $familyId, array $claims = []): array;
++ public function accessToken(TokenContext $context, array $claims = [], ?Abilities $abilities = null): array;
+```
+
+`$abilities` is the grant to stamp as `scope`, **already resolved by the calling Action**. Do not
+derive it in your implementation: ability policy moved out of the issuer precisely so that rebinding
+this contract can't silently drop `scope` — which, since the gates deny by default, would make every
+ability-gated route answer 403 with nothing to explain it.
+
+**`RefreshTokenRepository` gained `findByHash()` and an optional `$scope`:**
+
+```php
++ public function findByHash(string $hash): ?RefreshTokenRecord;   // NON-locking read
+  public function persist(…, int $expiresAt, ?string $scope = null): void;
+```
+
+`findByHash` is a plain read with no `FOR UPDATE`; `RotateRefreshToken` uses it to resolve the grant
+*before* opening the transaction, so application code never runs while a row lock is held. A custom
+repository that ignores `$scope` still works — it just can't pin a grant, so every session stays in
+derived mode. If yours round-trips values through JSON or Redis, make sure `''` survives as `''`:
+`null` means "derive per mint" and `''` means "pinned to nothing", and collapsing the two lets the
+most restricted token you can issue widen to the subject's full grant on its first refresh.
+
+### The `HasAbilities` trait is now `HasTokenAbilities`
+
+**Low impact — a rename; one line per user model.**
+
+It matches the contract it satisfies, the way Sanctum and the framework pair a trait and an interface
+under one name:
+
+```php
+use Lukk\Concerns\HasTokenAbilities;
+use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;
+
+class User extends Authenticatable implements HasTokenAbilitiesContract
+{
+    use HasTokenAbilities;
+}
+```
+
+### What a refresh-token row retains, now that it can hold entitlement
+
+**Low impact — informational, but read it before you pin a grant.**
+
+lukk cascades nothing when you delete a user: there is no foreign key on `refresh_tokens.user_id`
+and no model observer. The token stops authenticating immediately (the guard can't resolve the
+subject), but the **row** survives until `expires_at` — `refresh_ttl`, 30 days past its last
+rotation by default — and only then if `lukk:prune` is actually running. Revoked-but-unexpired rows
+are kept deliberately, so a replayed token still resolves to `reuse` rather than to `unknown`.
+
+That was already true of `user_id`, `family_id` and the token hash. What changes in 0.6 is the
+*kind* of data: a pinned grant means the row can also retain an entitlement record for a person you
+have erased. Bounded and defensible as fraud detection, but it is your retention story to state.
+Cascading deletes are on the roadmap; until then the published migration is yours to edit — adding
+`->constrained()->cascadeOnDelete()` to `user_id` closes most of it.
+
+### A second lukk guard now has to declare its own config block
+
+**High impact — but only if you already have a `lukk-jwt` guard in `config/auth.php` with no
+matching `lukk.guards` entry, in which case your install is currently unsafe.**
+
+lukk now throws at boot for any `lukk-jwt` guard other than the default that has no
+`lukk.guards.<name>` block. Previously such a guard inherited the default guard's `secret`,
+`issuer` **and** `audience` — and audience is what stops one guard's token verifying on another, so
+a token minted for your default guard would authenticate as a *different user* under the second
+guard's provider. Give it its own block:
+
+```php
+'guards' => [
+    'admin' => [
+        'issuer' => 'https://admin.example.com',
+        'audience' => ['https://admin.example.com'],   // MUST differ from every other guard
+        'secret' => env('LUKK_ADMIN_SECRET'),          // ideally its own key too
+        'path' => 'admin/auth',
+    ],
+],
+```
+
+### A pinned grant no longer manages other sessions
+
+**Low impact — only if you issue pinned grants (`StartSession($id, $claims, [...])`).**
+
+Two abilities are now required **from a pinned token** on lukk's own routes:
+
+| Ability | Required by |
+|---|---|
+| `lukk.sessions` | `DELETE /auth/sessions`, `DELETE /auth/sessions/others` |
+| `lukk.account` | `POST /auth/confirm-password`, `POST /auth/confirm-passkey`, `POST /auth/password` |
+
+A token pinned to a narrow grant could previously log the account out everywhere, and step up — which
+is the gateway to enrolling a passkey, disabling two-factor and regenerating recovery codes. Both
+contradict what pinning a grant is for. Add whichever that token genuinely needs:
+
+```php
+$pat = $startSession($user->getKey(), [], ['ci.deploy', Abilities::SESSIONS]);
+```
+
+Ordinary sessions are unaffected — a derived grant carries no `pin` claim and is never gated — and
+`logout` / `refresh` are never gated at all, so a pinned token can always end and renew itself. Set
+`features.gate_auth_routes` to `false` to restore the old behaviour wholesale.
+
+### `Lukk::actingAs()` in existing tests will 403 on a newly-gated route
+
+**Low impact — test-suite only, and only once you add an ability gate.**
+
+`actingAs($user, $guard)` records no token, and the gates read the token rather than the user — so a
+gated route answers **403** (known, holds nothing) rather than letting the test through. Sanctum's
+equivalent defaults to `['*']`; lukk's does not, because a default that grants everything is the
+wrong default for an authorization feature. Pass the third argument:
+
+```php
+Lukk::actingAs($user, 'api', ['*']);            // abilities aren't what this test is about
+Lukk::actingAs($user, 'api', ['orders.read']);  // ...or narrow, to test the gate itself
+```
+
+### `scope` is now a reserved claim
+
+**Low impact — only if `tokenClaimsUsing` sets a claim literally named `scope`.**
+
+Once `abilitiesUsing` is configured, the abilities layer owns `scope` and applies it *after* your
+claims hook, so a `scope` from the hook is discarded. Without this a hook could grant itself
+`admin.*`, and — worse — an empty grant failed to erase one, so `abilitiesUsing` returning `[]` for
+a suspended user still minted the hook's value. If you were using `tokenClaimsUsing` to emit
+`scope`, move it to `abilitiesUsing`; any other claim name is unaffected.
+
+---
+
 ## Upgrading to 0.5.0 from 0.4.x
 
 Most of 0.5.0 is opt-in (the account lockout) or invisible (the step-up throttle). Four things

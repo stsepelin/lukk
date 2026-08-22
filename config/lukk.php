@@ -771,6 +771,40 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Abilities (scopes)
+        |--------------------------------------------------------------------------
+        |
+        | Coarse authorization carried in the token's `scope` claim. Configuring
+        | `Lukk::abilitiesUsing()` turns this on by itself, so most installs never
+        | touch this flag. Set it when a session's abilities come only from an
+        | explicit grant passed to `StartSession` — a personal access token, a
+        | capped impersonation session — and no `abilitiesUsing` callback exists.
+        | Without it lukk cannot tell a token pinned to NOTHING from an install
+        | that doesn't use abilities at all, and a client would render the full
+        | privileged UI for the most restricted token you can issue.
+        |
+        */
+
+        'abilities' => false,
+
+        /*
+        |--------------------------------------------------------------------------
+        | Gate lukk's own session-management routes
+        |--------------------------------------------------------------------------
+        |
+        | `DELETE /auth/sessions` and `/auth/sessions/others` revoke OTHER sessions,
+        | so a token pinned to a narrow grant should not reach them — otherwise the
+        | most restricted token you can issue can still log the account out
+        | everywhere. Derived grants are never gated at all, so a
+        | human's session is unaffected and only a pinned grant has to ask for it.
+        | Pinned-ness is carried by the `pin` claim, stamped only on those tokens.
+        |
+        */
+
+        'gate_auth_routes' => true,
+
+        /*
+        |--------------------------------------------------------------------------
         | Two-Factor Authentication
         |--------------------------------------------------------------------------
         |

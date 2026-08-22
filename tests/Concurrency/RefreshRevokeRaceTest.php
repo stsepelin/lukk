@@ -89,9 +89,9 @@ it('never leaves a live token behind when a revoke races the rotation', function
             parent::__construct(null);
         }
 
-        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt): void
+        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
         {
-            parent::persist($userId, $familyId, $previousId, $tokenHash, $expiresAt);
+            parent::persist($userId, $familyId, $previousId, $tokenHash, $expiresAt, $scope);
 
             // A concurrent logout starts here: the denylist first (as RevokeSession does), then the
             // set-based UPDATE, which blocks on the row lock this transaction holds.
@@ -110,3 +110,97 @@ it('never leaves a live token behind when a revoke races the rotation', function
     // The whole point: nothing in the family is still usable.
     expect(DB::table('refresh_tokens')->where('family_id', $familyId)->whereNull('revoked_at')->count())->toBe(0);
 });
+
+it('survives an abilities callback that poisons its own transaction', function (string $engine) {
+    // PostgreSQL aborts the WHOLE transaction on any statement error: every subsequent command
+    // fails with 25P02 ("current transaction is aborted") until a rollback. `abilitiesUsing` is
+    // application code documented as hitting a permission store, so a callback that runs a bad
+    // query and swallows the error — an entirely ordinary `try { } catch { return []; }` — would
+    // poison lukk's rotate transaction from the inside if it ran within it. lukk's own COMMIT then
+    // fails and rotation dies, for every user, until the app's bug is found.
+    //
+    // Invisible on sqlite (no such state) and on MySQL (statement-level rollback), which is why it
+    // lives here. The fix is structural: the callback is resolved BEFORE the transaction opens, so
+    // nothing but lukk's statements and pure crypto run inside it.
+    if ($engine !== 'pgsql') {
+        expect(true)->toBeTrue();   // 25P02 is PostgreSQL-specific
+
+        return;
+    }
+
+    $pair = User::factory()->create()->startSession();
+
+    Lukk\Lukk::abilitiesUsing(function () {
+        try {
+            DB::select('SELECT * FROM a_table_that_does_not_exist');
+        } catch (Throwable) {
+            // Swallowed, exactly as an app guarding against a flaky permission store would.
+        }
+
+        return ['orders.read'];
+    });
+
+    $before = DB::table('refresh_tokens')->count();
+    $rotated = app(RotateRefreshToken::class)($pair->refreshToken);
+
+    // Asserting the CALL succeeded proves nothing: PostgreSQL turns `COMMIT` on an aborted
+    // transaction into a silent `ROLLBACK` and raises nothing, so lukk would hand back a perfectly
+    // valid access token whose successor row was never written — and the client would find itself
+    // logged out on its NEXT refresh, far from the cause. Assert the successor actually exists and
+    // still rotates.
+    expect(DB::table('refresh_tokens')->count())->toBe($before + 1);
+
+    $again = app(RotateRefreshToken::class)($rotated->refreshToken);
+    expect($again->accessToken)->toBeString();
+
+    Lukk\Lukk::$abilitiesUsing = null;
+})->with([[fn () => ConcurrencyTestCase::engine()]]);
+
+it('does not hold the refresh row lock while application code runs', function (string $engine) {
+    // The lock-duration half of the same problem: `abilitiesUsing` used to run under `FOR UPDATE`,
+    // so a slow permission lookup serialized every refresh in the family behind it, and any callback
+    // taking locks in the opposite order deadlocked against lukk. Assert the property directly —
+    // the callback must not observe an open transaction.
+    $pair = User::factory()->create()->startSession();
+    $levels = [];
+
+    Lukk\Lukk::abilitiesUsing(function () use (&$levels) {
+        $levels[] = DB::transactionLevel();
+
+        return ['orders.read'];
+    });
+
+    app(RotateRefreshToken::class)($pair->refreshToken);
+    Lukk\Lukk::$abilitiesUsing = null;
+
+    expect($levels)->not->toBeEmpty()->each->toBe(0);
+})->with([[fn () => ConcurrencyTestCase::engine()]]);
+
+it('does not hold the refresh row lock while ANY application callback runs', function (string $engine) {
+    // `abilitiesUsing` was hoisted out of the transaction; `tokenClaimsUsing` was left behind,
+    // because the issuer resolved it and the MINT moved inside the lock in the same change. Both are
+    // consumer callbacks documented as reading a permission store, so both carry the same hazards: a
+    // slow lookup serializes every refresh in the family, reverse lock order deadlocks against lukk,
+    // and on PostgreSQL a swallowed SQL error leaves the transaction aborted — where COMMIT degrades
+    // to a silent ROLLBACK and the client is logged out on its NEXT refresh.
+    $pair = User::factory()->create()->startSession();
+    $levels = [];
+
+    Lukk\Lukk::abilitiesUsing(function () use (&$levels) {
+        $levels['abilities'] = DB::transactionLevel();
+
+        return ['orders.read'];
+    });
+    Lukk\Lukk::tokenClaimsUsing(function () use (&$levels) {
+        $levels['claims'] = DB::transactionLevel();
+
+        return ['org' => 1];
+    });
+
+    app(RotateRefreshToken::class)($pair->refreshToken);
+
+    Lukk\Lukk::$abilitiesUsing = null;
+    Lukk\Lukk::$tokenClaimsUsing = null;
+
+    expect($levels)->toHaveKeys(['abilities', 'claims'])->each->toBe(0);
+})->with([[fn () => ConcurrencyTestCase::engine()]]);

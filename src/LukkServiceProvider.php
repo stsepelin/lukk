@@ -58,7 +58,10 @@ use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Guards\GuardContext;
 use Lukk\Http\Controllers\PasskeyAuthenticatedSessionController;
 use Lukk\Http\Middleware\ForceJsonRequest;
+use Lukk\Http\Middleware\RequireAbility;
+use Lukk\Http\Middleware\RequireAllAbilities;
 use Lukk\Http\Middleware\RequireConfirmation;
+use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Http\Middleware\RequireVerifiedEmail;
 use Lukk\Http\Middleware\SetGuard;
 use Lukk\Http\Responses\EmailVerificationResponse as EmailVerificationResponseImpl;
@@ -102,6 +105,9 @@ class LukkServiceProvider extends ServiceProvider
 
         $router = $this->app->make('router');
         $router->aliasMiddleware('lukk.confirm', RequireConfirmation::class);
+        // `lukk.ability:a,b` = any of them; `lukk.abilities:a,b` = all of them (Sanctum's split).
+        $router->aliasMiddleware('lukk.ability', RequireAbility::class);
+        $router->aliasMiddleware('lukk.abilities', RequireAllAbilities::class);
         $router->aliasMiddleware('lukk.verified', RequireVerifiedEmail::class);
         // Opt-in alias for a consumer's own `auth:api` routes; see docs/installation.md.
         $router->aliasMiddleware('lukk.force-json', ForceJsonRequest::class);
@@ -114,6 +120,19 @@ class LukkServiceProvider extends ServiceProvider
         $kernel = $this->app->make(HttpKernel::class);
         if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
             $kernel->addToMiddlewarePriorityBefore(AuthenticatesRequests::class, ForceJsonRequest::class);
+        }
+
+        // The ability gates read the token the guard put on the request, so they are meaningless
+        // before `auth:api` has run. Middleware executes in the order listed on the route unless it
+        // appears in the priority list, and `Authenticate` does — so a route written
+        // `['lukk.ability:orders.read', 'auth:api']` would otherwise gate first and answer 401 on a
+        // perfectly good token. Sorting them after `Authenticate` makes the declaration order on
+        // the route stop mattering.
+        if (method_exists($kernel, 'addToMiddlewarePriorityAfter')) {
+            $kernel->addToMiddlewarePriorityAfter(AuthenticatesRequests::class, RequireAbility::class);
+            $kernel->addToMiddlewarePriorityAfter(RequireAbility::class, RequireAllAbilities::class);
+            // Same reason: it reads the authenticated user, and a null one makes it a silent no-op.
+            $kernel->addToMiddlewarePriorityAfter(RequireAllAbilities::class, RequirePinnedAbility::class);
         }
 
         if ($this->config()['routes'] ?? true) {
@@ -230,7 +249,7 @@ class LukkServiceProvider extends ServiceProvider
         // bindings above) its issuer + guard-scoped repository — so a session is minted, rotated,
         // and revoked entirely within one guard's family of tokens.
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
@@ -239,7 +258,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
-            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
@@ -342,7 +361,7 @@ class LukkServiceProvider extends ServiceProvider
             // for another guard fails the audience (and signature, if keys differ) check and returns
             // null before any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
             $verifier = new FirebaseTokenVerifier(Lukk::guardConfig($name), $app->make(Denylist::class));
-            $guard = new JwtGuard($verifier, $provider);
+            $guard = new JwtGuard($verifier, $provider, $name);
 
             return new RequestGuard(fn ($request) => $guard($request), $app->make('request'), $provider);
         });

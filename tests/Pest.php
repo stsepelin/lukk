@@ -8,6 +8,7 @@ use Lukk\Actions\RotateRefreshToken;
 use Lukk\Actions\StartSession;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
+use Lukk\Support\TokenContext;
 use Lukk\Tests\TestCase;
 
 uses(TestCase::class)->in('Unit', 'Feature');
@@ -63,4 +64,10 @@ function ecKeypair(): array
     openssl_pkey_export($res, $private);
 
     return ['private' => $private, 'public' => openssl_pkey_get_details($res)['key']];
+}
+
+/** A mint-time context for the issuer — subject + family, on the current guard. */
+function ctx(int|string $userId, string $familyId = 'fam'): TokenContext
+{
+    return new TokenContext(Lukk\Lukk::currentGuard(), $userId, $familyId);
 }
