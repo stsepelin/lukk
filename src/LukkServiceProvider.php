@@ -22,7 +22,9 @@ use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ChangePassword;
 use Lukk\Actions\ConfirmPassword;
+use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\EnableTwoFactor;
+use Lukk\Actions\ExportAccount;
 use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Actions\RegenerateRecoveryCodes;
 use Lukk\Actions\Register;
@@ -188,7 +190,11 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function registerPasskeys(): void
     {
-        $this->app->singleton(PasskeyRepository::class, DatabasePasskeyRepository::class);
+        // `bind`, not `singleton`, and guard-scoped exactly like the refresh-token repository: the
+        // active guard is per-request, so a memoized instance would carry the previous request's
+        // guard into the next one.
+        $this->app->bind(PasskeyRepository::class, fn () => new DatabasePasskeyRepository(
+            Lukk::isMultiGuard() ? Lukk::currentGuard() : null));
 
         // The controller needs THIS guard's user provider, which is not a resolvable type — same
         // reason the actions below are bound explicitly rather than autowired.
@@ -248,6 +254,28 @@ class LukkServiceProvider extends ServiceProvider
         // Session/rotation/revocation actions run against the CURRENT guard's config + (via the
         // bindings above) its issuer + guard-scoped repository — so a session is minted, rotated,
         // and revoked entirely within one guard's family of tokens.
+        // Bound explicitly: the nullable passkey/lockout repositories mean "that feature is off", and
+        // the container would inject the always-bound implementations and erase the distinction.
+        // The optional repositories are injected UNCONDITIONALLY here, unlike everywhere else in this
+        // provider where a null means "feature off". Erasure is about rows that EXIST, and a feature
+        // switched off after use leaves its rows behind — orphaned personal data, while the user row
+        // itself is deleted. `DeleteAccount` guards on the table existing instead.
+        $this->app->bind(DeleteAccount::class, fn ($app) => new DeleteAccount(
+            $app->make(RefreshTokenRepository::class),
+            $app->make(RevokeAllSessions::class),
+            $app->make(PasskeyRepository::class),
+            $app->make(LockoutRepository::class),
+            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::currentGuard(),
+            $this->config()['password_reset']['broker'] ?? null,
+        ));
+
+        $this->app->bind(ExportAccount::class, fn ($app) => new ExportAccount(
+            $app->make(RefreshTokenRepository::class),
+            $app->make(PasskeyRepository::class),
+            (string) ($this->config()['username'] ?? 'email'),
+        ));
+
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(

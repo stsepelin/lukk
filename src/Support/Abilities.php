@@ -52,6 +52,21 @@ class Abilities
      */
     public const ACCOUNT = 'lukk.account';
 
+    /**
+     * Erasing the account, and exporting everything lukk knows about it.
+     *
+     * Deliberately NOT covered by {@see ACCOUNT}. That ability already existed and meant "manage my
+     * credentials" — step-up, the password, passkeys, two-factor. Folding erasure into it would have
+     * handed every already-issued token carrying it the power to irreversibly destroy the account,
+     * silently, on upgrade and with no re-consent. It would also invert the privilege ordering: such
+     * a token cannot revoke a single other session (that needs `lukk.sessions`) but could delete
+     * everything.
+     *
+     * Note the prefix rule makes this safe: a grant of `lukk.account` does NOT satisfy
+     * `lukk.account.delete` — only an exact grant, or `lukk.account.*`, or `*`.
+     */
+    public const ACCOUNT_DELETE = 'lukk.account.delete';
+
     /** One ability. Long enough for a namespaced name, short enough that a runaway value is caught. */
     public const MAX_ABILITY_LENGTH = 128;
 

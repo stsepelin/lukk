@@ -19,5 +19,7 @@ class RefreshTokenRecord
         public readonly int $expiresAt,
         /** The family's own scope claim, or null to derive it per mint. */
         public readonly ?string $scope = null,
+        /** When the session started — meaningful to a data subject reading their own export. */
+        public readonly ?int $createdAt = null,
     ) {}
 }

@@ -771,6 +771,28 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Account Deletion (GDPR Art. 17)
+        |--------------------------------------------------------------------------
+        |
+        | A step-up-confirmed `DELETE /auth/account` that revokes every session,
+        | erases lukk's own artifacts (refresh tokens, passkeys, two-factor
+        | material, lockout counters) and deletes the user — then fires
+        | `AccountDeleting` / `AccountDeleted` so your app erases ITS data.
+        |
+        | On by default: erasure is a legal right, and a default of `false` means
+        | most installs quietly don't offer one. It is irreversible, so it sits
+        | behind step-up confirmation and never behind authentication alone. Turn
+        | it off where deletion is handled elsewhere — a support workflow, a
+        | retention obligation, an identity provider that owns the account.
+        |
+        | Use `Lukk::deleteUserUsing()` to anonymize instead of deleting.
+        |
+        */
+
+        'account_deletion' => true,
+
+        /*
+        |--------------------------------------------------------------------------
         | Abilities (scopes)
         |--------------------------------------------------------------------------
         |

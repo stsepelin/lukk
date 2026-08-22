@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
+use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('confirmation');
@@ -133,4 +134,60 @@ it('bounds a token thief who rotates addresses, because the bucket is the user',
     failConfirm($access, ['REMOTE_ADDR' => '198.51.100.2']);
 
     failConfirm($access, ['REMOTE_ADDR' => '198.51.100.3'])->assertStatus(429);
+});
+
+it('refuses a confirmation earned by a different session', function () {
+    // A step-up asserts "the person at this keyboard re-proved themselves just now". Bound to the
+    // SUBJECT alone it was bearer authority across every token that subject holds — so a machine
+    // token, one that could never earn a confirmation itself because the earning routes are
+    // ability-gated, could present the one the user's browser earned and act with it. Enabling
+    // two-factor, registering a passkey, regenerating recovery codes and erasing the account were
+    // all reachable that way.
+    config(['lukk.features.two_factor' => true]);
+    $user = User::factory()->create();
+    $browser = $user->startSession();
+    $machine = start()($user->getKey(), [], ['ci.deploy']);
+
+    $borrowed = confirmedHeaders($browser->accessToken);
+    app('auth')->forgetGuards();
+
+    $this->withToken($machine->accessToken)->postJson('/auth/two-factor', [], $borrowed)->assertStatus(423);
+    app('auth')->forgetGuards();
+
+    // ...while the session that earned it still works.
+    $this->withToken($browser->accessToken)->postJson('/auth/two-factor', [], $borrowed)->assertSuccessful();
+});
+
+it('keeps a confirmation valid across a refresh of the same session', function () {
+    // `fid` is stable across rotation, which is the whole reason to bind to it rather than to the
+    // access token: refreshing mid-window must not invalidate a step-up the user just completed.
+    config(['lukk.features.two_factor' => true]);
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+
+    $headers = confirmedHeaders($pair->accessToken);
+    app('auth')->forgetGuards();
+
+    $rotated = rotate()($pair->refreshToken);
+
+    $this->withToken($rotated->accessToken)->postJson('/auth/two-factor', [], $headers)->assertSuccessful();
+});
+
+it('refuses a bound confirmation presented without the token that earned it', function () {
+    // Authenticated by something that carries no bearer — a session guard, or `Lukk::actingAs`. The
+    // subject matches, so the old check passed; there is no presenting family to compare, so the
+    // binding cannot be satisfied and this must fail closed rather than wave it through.
+    config(['lukk.features.two_factor' => true]);
+    $user = User::factory()->create();
+    $browser = $user->startSession();
+
+    $borrowed = confirmedHeaders($browser->accessToken);
+    app('auth')->forgetGuards();
+
+    // `withToken()` inside `confirmedHeaders()` set a DEFAULT bearer on the test client, so without
+    // this the request still carries the earning token and the binding legitimately passes.
+    $this->flushHeaders();
+    Lukk::actingAs($user, config('lukk.guard'), ['*']);
+
+    $this->postJson('/auth/two-factor', [], $borrowed)->assertStatus(423);
 });

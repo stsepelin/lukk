@@ -14,11 +14,17 @@ use Lukk\Auth\ChallengeToken;
 trait IssuesConfirmationToken
 {
     use PreventsCaching;
+    use ResolvesPresentingFamily;
 
-    private function confirmed(ChallengeToken $challengeTokens, int|string $userId): JsonResponse
+    private function confirmed(ChallengeToken $challengeTokens, int|string $userId, ?string $familyId = null): JsonResponse
     {
         return $this->noStore(response()->json([
-            'confirmation_token' => $challengeTokens->issue('reauth', $userId, (int) config('lukk.confirm.ttl', 300)),
+            'confirmation_token' => $challengeTokens->issue(
+                'reauth',
+                $userId,
+                (int) config('lukk.confirm.ttl', 300),
+                $familyId,
+            ),
         ]));
     }
 }

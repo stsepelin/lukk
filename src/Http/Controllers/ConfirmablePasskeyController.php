@@ -33,6 +33,8 @@ class ConfirmablePasskeyController
             throw ValidationException::withMessages(['credential' => [__('That passkey does not belong to you.')]]);
         }
 
-        return $this->confirmed($this->challengeTokens, $userId);
+        // Bound to the session presenting it, so the confirmation cannot be replayed by another
+        // token the same subject holds.
+        return $this->confirmed($this->challengeTokens, $userId, $this->presentingFamily($request));
     }
 }

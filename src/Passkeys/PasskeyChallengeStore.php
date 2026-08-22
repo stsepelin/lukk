@@ -6,6 +6,7 @@ namespace Lukk\Passkeys;
 
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Str;
+use Lukk\Lukk;
 
 /**
  * Stateless WebAuthn challenge store. A JWT API has no session to hold the
@@ -49,9 +50,15 @@ class PasskeyChallengeStore
         return $ceremonyId === '' ? null : $this->cache->pull($this->ceremonyKey($ceremonyId));
     }
 
+    /**
+     * Guard-scoped: under multi-guard the providers are separate tables, so `users.id === admins.id`
+     * is the ordinary case, and an unprefixed key let one account's in-flight registration overwrite
+     * a colliding account's — the second ceremony then failed against the first's challenge. Read at
+     * call time rather than injected, because this store is a singleton and the guard is per-request.
+     */
     private function userKey(int|string $userId): string
     {
-        return "lukk:pk:reg:{$userId}";
+        return 'lukk:pk:reg:'.Lukk::currentGuard().":{$userId}";
     }
 
     private function ceremonyKey(string $ceremonyId): string

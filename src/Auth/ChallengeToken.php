@@ -33,7 +33,7 @@ class ChallengeToken
         $this->keys = new KeyRing($config);
     }
 
-    public function issue(string $kind, int|string $userId, int $ttl): string
+    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null): string
     {
         $now = now()->getTimestamp();
 
@@ -46,6 +46,15 @@ class ChallengeToken
             'nbf' => $now,
             'exp' => $now + $ttl,
         ];
+
+        // The SESSION that earned this, when there is one. A step-up says "the person at this
+        // keyboard re-proved themselves just now" — binding it to the subject alone made it bearer
+        // authority for every token that subject holds, so a machine token could present a
+        // confirmation the human's browser earned and act with it. `fid` is stable across rotation,
+        // so a refresh mid-window does not invalidate it.
+        if ($familyId !== null && $familyId !== '') {
+            $payload['fid'] = $familyId;
+        }
 
         $signing = $this->keys->signingKey();
 
@@ -61,6 +70,21 @@ class ChallengeToken
         $claims = $this->decode($kind, $token);
 
         return $claims === null ? null : (string) $claims->sub;
+    }
+
+    /**
+     * The session a challenge was bound to, or null when it carries no binding.
+     *
+     * Null is the co-issuer shape — a token minted without an `fid` cannot bind one. Callers must
+     * decide what that means; `Http\Middleware\RequireConfirmation` compares it STRICTLY against the
+     * presenting token's own family, so `null === null` passes (the co-issuer topology keeps working)
+     * while an unbound challenge is refused to a bearer that does have a family.
+     */
+    public function familyOf(string $kind, string $token): ?string
+    {
+        $claims = $this->decode($kind, $token);
+
+        return $claims === null ? null : (isset($claims->fid) ? (string) $claims->fid : null);
     }
 
     /**
@@ -91,6 +115,14 @@ class ChallengeToken
 
         try {
             $claims = JWT::decode($token, $this->keys->verificationKeys());
+
+            // Type-check before anything casts them. A non-scalar `sub` or `fid` — reachable from a
+            // co-issuer, a topology this class exists to support — turned `(string)` into an
+            // uncaught `Error` and a 500, contradicting this method's own "null on any failure"
+            // contract. RFC 8725 §3.11: validate claim types before use.
+            if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))) {
+                return null;
+            }
         } catch (Throwable) {
             return null;
         }

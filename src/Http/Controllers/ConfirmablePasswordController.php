@@ -28,6 +28,8 @@ class ConfirmablePasswordController
     {
         ($this->confirmPassword)($request->user(), (string) $request->input('password'));
 
-        return $this->confirmed($this->challengeTokens, $request->user()->getAuthIdentifier());
+        // Bound to the session presenting it, so the confirmation cannot be replayed by another
+        // token the same subject holds.
+        return $this->confirmed($this->challengeTokens, $request->user()->getAuthIdentifier(), $this->presentingFamily($request));
     }
 }

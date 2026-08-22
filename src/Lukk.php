@@ -28,6 +28,9 @@ class Lukk
     /** @var (Closure(int|string): array<string,mixed>)|null */
     public static ?Closure $tokenClaimsUsing = null;
 
+    /** @var (Closure(Authenticatable): void)|null Erases or anonymizes the user row. Null = `forceDelete()`. */
+    public static ?Closure $deleteUserUsing = null;
+
     /**
      * Resolves the abilities a token is minted with. Null = no callback (see {@see usesAbilities()},
      * which is the question to ask; a pinned-grant install has no callback and still uses abilities).
@@ -230,6 +233,32 @@ class Lukk
         $claims = self::$tokenClaimsUsing !== null ? (self::$tokenClaimsUsing)($userId) : [];
 
         return is_array($claims) ? $claims : [];
+    }
+
+    /**
+     * Replace what erasure does to the user row — `fn (Authenticatable $user) => $user->anonymize()`.
+     *
+     * Defaults to `$user->forceDelete()` — deliberately NOT `delete()`, which on a `SoftDeletes`
+     * model is a silent no-op for Art. 17: name, email, password hash and encrypted TOTP secret all
+     * remain, and the subject is left neither erased nor able to return, because the DB unique index
+     * does not respect the soft-delete scope that the `unique` validation rule does. Override this
+     * when the row must genuinely SURVIVE in some form: an anonymized order history, a retention
+     * obligation that outlives the erasure request, a tombstone that stops the same identifier
+     * re-registering.
+     *
+     * Two things the callback owns that `forceDelete()` got for free. Two-factor material —
+     * `two_factor_secret`, `two_factor_recovery_codes`, `two_factor_confirmed_at` — lives in columns
+     * ON the user row, so anonymizing without clearing them leaves a working authenticator attached
+     * to the "erased" account. And the identifier column itself is usually personal data; leaving it
+     * intact makes the anonymization cosmetic.
+     *
+     * Runs inside the erasure transaction: throw to abort the whole thing, and keep it fast.
+     *
+     * @param  Closure(Authenticatable): void  $callback
+     */
+    public static function deleteUserUsing(Closure $callback): void
+    {
+        self::$deleteUserUsing = $callback;
     }
 
     /** The abilities for a user, or null when no callback is configured. */

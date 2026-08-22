@@ -85,5 +85,34 @@ interface RefreshTokenRepository
      */
     public function revokeUserFamiliesExcept(int|string $userId, string $exceptFamilyId, ?callable $before = null): array;
 
+    /**
+     * DELETE every row for a user on THIS guard — erasure, not revocation.
+     *
+     * GUARD-SCOPED, like everything else on this contract. It once wasn't, on the reasoning that a
+     * person asked to be forgotten once rather than once per guard — but that assumes one `user_id`
+     * means one person, and providers are separate tables where `users.id === admins.id` is the
+     * ordinary case. Erasing a customer then destroyed an unrelated admin's sessions.
+     *
+     * `revokeUserFamilies` stamps `revoked_at` and deliberately KEEPS the rows so a later replay
+     * still resolves to `reuse` rather than `unknown`. That is right for a logout and wrong for an
+     * Art. 17 request: the row carries `user_id`, `family_id`, a token hash and, since 0.6, the
+     * family's entitlement — all of it personal data about someone who asked to be forgotten.
+     *
+     * @return int rows deleted
+     */
+    public function deleteForUser(int|string $userId): int;
+
+    /**
+     * Every row for a user on THIS guard, for the data-subject export.
+     *
+     * Guard-scoped, like everything else on this contract: under multi-guard the providers are
+     * separate tables and `users.id === admins.id` is the ordinary case, so an unscoped read hands
+     * one subject another's session history — family ids, counts, login timestamps — under Art. 15,
+     * which Art. 15(4) explicitly forbids.
+     *
+     * @return array<int, RefreshTokenRecord>
+     */
+    public function allForUser(int|string $userId): array;
+
     public function pruneExpired(): int;
 }

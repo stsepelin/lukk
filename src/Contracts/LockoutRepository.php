@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Contracts;
 
+use Lukk\Auth\LoginRateLimiter;
+
 /**
  * Storage for the consecutive-failure counters behind the account lockout.
  *
@@ -49,4 +51,24 @@ interface LockoutRepository
      * table would become a log of every address ever probed.
      */
     public function prune(int $staleAfterDays): int;
+
+    /**
+     * DELETE every counter for a set of subjects on one guard, across all purposes.
+     *
+     * Takes a LIST because a single account occupies three key spaces, and nothing else in the
+     * erasure path can find any of them:
+     *   - `id:<userId>`            — login failures against a resolvable account
+     *   - `<userId>`               — step-up confirmation and two-factor failures
+     *   - `idn:<normalized>`       — login failures against an identifier resolving to no account
+     *
+     * Build them with {@see LoginRateLimiter::lockoutSubject()} rather than by hand: the
+     * raw identifier is never a key, so a sweep keyed on it silently matches nothing.
+     *
+     * Guard-scoped, because two accounts sharing a corporate email share a subject — an unguarded
+     * sweep let erasing one clear a held NIST §5.2.2 lock on a different, live account.
+     *
+     * @param  array<int, string>  $subjects
+     * @return int rows deleted
+     */
+    public function forget(array $subjects, ?string $guard): int;
 }

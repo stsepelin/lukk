@@ -7,6 +7,7 @@ namespace Lukk\Tests;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
+use Lukk\Lukk;
 use Lukk\LukkServiceProvider;
 use Lukk\Tests\Fixtures\User;
 use Orchestra\Testbench\TestCase as Orchestra;
@@ -14,6 +15,29 @@ use Orchestra\Testbench\TestCase as Orchestra;
 class TestCase extends Orchestra
 {
     use RefreshDatabase;
+
+    /**
+     * Reset every `Lukk` static hook between tests.
+     *
+     * These are process-global. A test that sets one and resets it INLINE leaks the callback into
+     * every later test whenever it throws before reaching the reset line — and the failure lands
+     * somewhere unrelated, which is the worst kind to debug. Doing it here means a new hook is
+     * covered the moment it is added to this list, rather than the moment someone remembers.
+     */
+    protected function tearDown(): void
+    {
+        Lukk::$authenticateUsing = null;
+        Lukk::$tokenClaimsUsing = null;
+        Lukk::$deleteUserUsing = null;
+        Lukk::$abilitiesUsing = null;
+        Lukk::$registerUsing = null;
+        Lukk::$registerValidation = null;
+        Lukk::$rateLimitKeyUsing = null;
+        Lukk::$refreshTokenModel = null;
+        Lukk::$runsScheduledPruning = true;
+
+        parent::tearDown();
+    }
 
     protected function getPackageProviders($app): array
     {
@@ -74,6 +98,7 @@ class TestCase extends Orchestra
         Schema::create('passkeys', function (Blueprint $table) {
             $table->string('credential_id')->primary();
             $table->foreignId('user_id')->index();
+            $table->string('guard')->nullable();
             $table->string('name')->nullable();
             $table->text('public_key');
             $table->unsignedBigInteger('sign_count')->default(0);
