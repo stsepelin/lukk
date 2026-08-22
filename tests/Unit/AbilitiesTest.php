@@ -133,7 +133,7 @@ it('reports "not configured" as null, distinct from "configured and granted noth
 
     Lukk::abilitiesUsing(fn () => []);
     expect(Lukk::abilitiesFor(1, $context))->toBeInstanceOf(Abilities::class)
-        ->and(Lukk::abilitiesFor(1, $context)->toScope())->toBeNull();
+        ->and(notNull(Lukk::abilitiesFor(1, $context))->toScope())->toBeNull();
 
     Lukk::$abilitiesUsing = null;
 });
@@ -178,10 +178,10 @@ it('reads a Collection with all() but any other Arrayable with toArray()', funct
     };
 
     Lukk::abilitiesUsing(fn () => $arrayable);
-    expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid'))->all())->toBe(['orders.read']);
+    notNull(expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.read']);
 
     Lukk::abilitiesUsing(fn () => collect(['orders.write']));
-    expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid'))->all())->toBe(['orders.write']);
+    notNull(expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.write']);
 
     Lukk::$abilitiesUsing = null;
 });

@@ -485,8 +485,8 @@ it('round-trips a pinned-empty grant as "" and never as null', function () {
     $repo->persist($user->getKey(), 'fam-pinned', null, hash('sha256', 'a'), now()->addDay()->getTimestamp(), '');
     $repo->persist($user->getKey(), 'fam-derived', null, hash('sha256', 'b'), now()->addDay()->getTimestamp(), null);
 
-    expect($repo->findByHashForUpdate(hash('sha256', 'a'))->scope)->toBe('')
-        ->and($repo->findByHashForUpdate(hash('sha256', 'b'))->scope)->toBeNull();
+    expect(notNull($repo->findByHashForUpdate(hash('sha256', 'a')))->scope)->toBe('')
+        ->and(notNull($repo->findByHashForUpdate(hash('sha256', 'b')))->scope)->toBeNull();
 });
 
 it('works on a PAT-only install that never configured a callback', function () {

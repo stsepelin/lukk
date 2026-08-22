@@ -18,7 +18,7 @@ it('exports the sessions, passkeys and two-factor state lukk holds', function ()
         'two_factor_confirmed_at' => now(),
     ])->save();
 
-    $export = app(ExportAccount::class)($user->fresh());
+    $export = app(ExportAccount::class)($user->refresh());
 
     expect($export['account']['identifier'])->toBe('subject@example.test')
         ->and($export['sessions'])->toHaveCount(1)
@@ -53,7 +53,7 @@ it('never exports credential material', function () {
         'two_factor_confirmed_at' => now(),
     ])->save();
 
-    $serialized = json_encode(app(ExportAccount::class)($user->fresh()));
+    $serialized = json_encode(app(ExportAccount::class)($user->refresh()));
 
     expect($serialized)->not->toContain('JBSWY3DPEHPK3PXP')
         ->and($serialized)->not->toContain('code-one')

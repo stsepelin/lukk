@@ -61,7 +61,7 @@ it('clears lockout counters, which are keyed by the identifier and not by user i
         ->and(Lockout::pluck('subject')->all())->toContain('id:'.$user->getKey(), (string) $user->getKey());
 
     app('auth')->forgetGuards();
-    deleteAccount()($user->fresh());
+    deleteAccount()($user->refresh());
 
     expect(Lockout::count())->toBe(0);
 });
@@ -282,7 +282,7 @@ it('erases artifacts written while a feature was on, even after it is switched o
     config(['lukk.features.lockout' => false]);   // switched off AFTER the rows exist
     app('auth')->forgetGuards();
 
-    deleteAccount()($user->fresh());
+    deleteAccount()($user->refresh());
 
     expect(Lockout::count())->toBe(0);
 });

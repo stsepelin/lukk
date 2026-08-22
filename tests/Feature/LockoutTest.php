@@ -60,7 +60,7 @@ it('counts consecutive failures, so a success in between clears the run', functi
     // The run restarted, so two more failures don't reach the cap of three.
     failLogin()->assertStatus(422);
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(2);
+    expect(Lockout::query()->where('subject', 'id:'.User::firstOrFail()->getKey())->value('attempts'))->toBe(2);
 });
 
 it('locks one account without touching another', function () {
@@ -85,7 +85,7 @@ it('fires AccountLocked once, on the transition', function () {
 
     // A locked-out user gets no other signal, so an app needs exactly one notification to hang off.
     Event::assertDispatchedTimes(AccountLocked::class, 1);
-    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::first()->getKey());
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::firstOrFail()->getKey());
 });
 
 it('auto-releases once release_after has elapsed', function () {
@@ -214,7 +214,7 @@ it('prunes spent counters but never a lock that is still held', function () {
     command('lukk:prune')->assertSuccessful();
 
     // The two stale probe counters go; the held lock stays, or pruning would be a release path.
-    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::first()->getKey()]);
+    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::firstOrFail()->getKey()]);
 });
 
 it('rejects an unknown --purpose rather than releasing something else', function () {
@@ -234,7 +234,7 @@ it('restarts the run after an auto-release rather than leaving it one attempt fr
 
     // A fresh run: the next failure is attempt 1, not attempt 4 re-locking immediately.
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(1);
+    expect(Lockout::query()->where('subject', 'id:'.User::firstOrFail()->getKey())->value('attempts'))->toBe(1);
 });
 
 it('prunes nothing, without erroring, when the table was never published', function () {
