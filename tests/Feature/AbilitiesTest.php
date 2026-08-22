@@ -361,14 +361,14 @@ it('accepts a Collection from the callback, not just an array', function () {
     // and every refresh — the whole app down on the first request after wiring abilities up.
     Lukk::abilitiesUsing(fn () => collect(['orders.read', 'orders.write']));
 
-    expect(verifier()->verify(User::factory()->create()->startSession()->accessToken)->scope)
+    expect(claims(User::factory()->create()->startSession()->accessToken)->scope)
         ->toBe('orders.read orders.write');
 });
 
 it('accepts a single ability returned bare, without an array around it', function () {
     Lukk::abilitiesUsing(fn () => 'orders.read');
 
-    expect(verifier()->verify(User::factory()->create()->startSession()->accessToken)->scope)
+    expect(claims(User::factory()->create()->startSession()->accessToken)->scope)
         ->toBe('orders.read');
 });
 
@@ -974,7 +974,7 @@ it('keeps per-login claims winning over the hook, now that the Action merges the
     $pair = start()(User::factory()->create()->getKey(), ['org' => 'from-login']);
     Lukk::$tokenClaimsUsing = null;
 
-    $claims = verifier()->verify($pair->accessToken);
+    $claims = claims($pair->accessToken);
 
     expect($claims->org)->toBe('from-login')
         ->and($claims->only_hook)->toBeTrue()

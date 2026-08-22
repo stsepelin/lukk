@@ -6,6 +6,7 @@ namespace Lukk\Tests\Fixtures;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Support\Carbon;
 use Lukk\Concerns\HasRefreshTokens;
 use Lukk\Concerns\HasTokenAbilities;
 use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;
@@ -13,6 +14,13 @@ use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;
 /**
  * A second authenticatable behind the `admin` guard — a distinct table from User, so ids collide
  * (admins.id == users.id) and the isolation tests can prove tokens/families don't cross guards.
+ *
+ * @property int $id
+ * @property ?string $name
+ * @property string $email
+ * @property string $password
+ * @property ?Carbon $two_factor_confirmed_at
+ * @property ?Carbon $email_verified_at
  */
 class Admin extends Authenticatable implements HasTokenAbilitiesContract
 {

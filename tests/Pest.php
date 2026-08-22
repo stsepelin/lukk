@@ -68,7 +68,7 @@ function actor()
 {
     $user = request()->user();
 
-    assert($user !== null);
+    assert($user instanceof HasTokenAbilities);
 
     return $user;
 }
@@ -97,7 +97,11 @@ function issuer(): TokenIssuer
     return app(TokenIssuer::class);
 }
 
-/** Earn a step-up confirmation header for the given access token. */
+/**
+ * Earn a step-up confirmation header for the given access token.
+ *
+ * @return array<string, string>
+ */
 function confirmedHeaders(string $access): array
 {
     $token = test()->withToken($access)
@@ -111,18 +115,24 @@ function confirmedHeaders(string $access): array
 function rsaKeypair(?string $passphrase = null): array
 {
     $res = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+    assert($res !== false);
     openssl_pkey_export($res, $private, $passphrase);
+    $details = openssl_pkey_get_details($res);
+    assert($details !== false);
 
-    return ['private' => $private, 'public' => openssl_pkey_get_details($res)['key']];
+    return ['private' => (string) $private, 'public' => (string) $details['key']];
 }
 
 /** @return array{private:string, public:string} a fresh EC P-256 keypair (PEM). */
 function ecKeypair(): array
 {
     $res = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+    assert($res !== false);
     openssl_pkey_export($res, $private);
+    $details = openssl_pkey_get_details($res);
+    assert($details !== false);
 
-    return ['private' => $private, 'public' => openssl_pkey_get_details($res)['key']];
+    return ['private' => (string) $private, 'public' => (string) $details['key']];
 }
 
 /** A mint-time context for the issuer — subject + family, on the current guard. */

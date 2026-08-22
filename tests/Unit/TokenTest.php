@@ -15,7 +15,7 @@ afterEach(function () {
 
 it('verifies a freshly issued access token and exposes its claims', function () {
     $access = issuer()->accessToken(ctx(123, 'fam-1'));
-    $claims = verifier()->verify($access['token']);
+    $claims = claims($access['token']);
 
     expect($claims)->not->toBeNull()
         ->and($claims->sub)->toBe('123')
@@ -117,7 +117,7 @@ it('embeds custom claims (e.g. roles) via tokenClaimsUsing', function () {
     // the issuer would test a collaborator that no longer has the responsibility.
     Lukk::tokenClaimsUsing(fn ($userId) => ['roles' => ['admin', 'editor']]);
 
-    $claims = verifier()->verify(start()(7)->accessToken);
+    $claims = claims(start()(7)->accessToken);
 
     expect($claims->roles)->toBe(['admin', 'editor'])
         ->and($claims->sub)->toBe('7');
@@ -126,7 +126,7 @@ it('embeds custom claims (e.g. roles) via tokenClaimsUsing', function () {
 it('does not let custom claims override the standard ones', function () {
     Lukk::tokenClaimsUsing(fn ($userId) => ['sub' => 'spoofed', 'roles' => ['x']]);
 
-    $claims = verifier()->verify(start()(7)->accessToken);
+    $claims = claims(start()(7)->accessToken);
 
     expect($claims->sub)->toBe('7')
         ->and($claims->roles)->toBe(['x']);
@@ -137,7 +137,7 @@ it('ignores a claims hook handed straight to the issuer, which only stamps', fun
     // this would silently drop custom claims, so pin that the raw issuer is now inert.
     Lukk::tokenClaimsUsing(fn ($userId) => ['roles' => ['admin']]);
 
-    $claims = verifier()->verify(issuer()->accessToken(ctx(7, 'fam'))['token']);
+    $claims = claims(issuer()->accessToken(ctx(7, 'fam'))['token']);
 
     expect((array) $claims)->not->toHaveKey('roles');
 });
