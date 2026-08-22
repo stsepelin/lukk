@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A step-up confirmation is bound to the session that earned it.** It carries the `fid` of the refresh-token family that re-verified the credential, and `RequireConfirmation` refuses one from a different family with `423` and `reason: confirmation_session_mismatch`.
+
+  A step-up asserts "the person at this keyboard re-proved themselves just now". Bound to the subject alone it was bearer authority across **every** token that subject held — so a machine token, which can never earn a confirmation itself because the earning routes are ability-gated, could present the one the user's browser earned. Enabling two-factor, registering a passkey, regenerating recovery codes and erasing the account were all reachable that way. `fid` is stable across rotation, so refreshing mid-window keeps the confirmation valid, and BFF mode is unaffected.
+
+  Matching is **strict**, so `null === null` still admits the co-issuer topology — a token minted by another service sharing the secret legitimately carries no `fid`, and neither does a confirmation earned by it — while an *unbound* confirmation is refused to a bearer that has one. The loose branch would only have bought a `confirm.ttl`-wide window in which the old bypass still worked.
+
 - **Abilities / scopes** — coarse, stateless authorization carried in the access token. `Lukk::abilitiesUsing(fn ($userId, $context) => ['orders.read', 'orders.*'])` mints a `scope` claim; `lukk.ability:a,b` gates a route on **any** of them and `lukk.abilities:a,b` on **all** (Sanctum's split, so the semantics are the ones people already expect); `$user->tokenCan('orders.read')` via the `HasAbilities` trait.
 
   The wire format is the registered `scope` claim, space-delimited (RFC 6749 §3.3, RFC 9068 §2.2.3), so an API gateway or a non-lukk verifier can read it without knowing about lukk. `*` grants everything and `orders.*` grants the namespace — but a wildcard only ever appears in the *grant*, never in the check, so a caller can't widen their own question by asking `tokenCan('orders.*')`. Grants are validated against the RFC's `scope-token` charset and a malformed one **throws**: the claim is space-delimited, so `['orders.read admin']` would otherwise parse back as two abilities and hand out an `admin` nobody issued — reachable the moment ability names come from data.

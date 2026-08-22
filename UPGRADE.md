@@ -25,6 +25,26 @@ but the default is safe.
 Abilities are new and entirely opt-in — an install that never calls `Lukk::abilitiesUsing()` mints
 byte-identical tokens and needs no action at all. Two things are worth reading if you do opt in.
 
+### A step-up confirmation is now bound to the session that earned it
+
+**Low impact — informational, but a client that reuses a confirmation across tokens will see a new
+423.** Nothing to configure.
+
+A confirmation now carries the `fid` of the refresh-token family that re-verified the credential,
+and `RequireConfirmation` refuses one from a different family with `423` and a machine-readable
+`reason: confirmation_session_mismatch` (the plain "requires confirmation" 423 has no `reason`, so a
+client can tell "earn one" from "discard this one and earn another"). `fid` is stable across
+rotation, so refreshing mid-window keeps a confirmation valid and BFF mode is unaffected.
+
+Bound to the subject alone, a confirmation was bearer authority across *every* token that subject
+held — a machine token, which can never earn one itself because the earning routes are ability-gated,
+could present the one the user's browser earned. The upgrade cost is one 423 and a re-confirm.
+
+Matching is **strict**, which keeps the co-issuer topology working: a token minted by another service
+sharing the secret legitimately carries no `fid`, and neither does a confirmation earned by it, so
+`null === null` still passes. What is refused is an *unbound* confirmation presented by a bearer that
+has one.
+
 ### A new nullable `scope` column on `refresh_tokens`
 
 **Medium impact — only if you want a session to own a *fixed* set of abilities.** Everyone else:
