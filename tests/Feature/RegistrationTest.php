@@ -113,7 +113,7 @@ it('lets registerUsing fully control user creation', function () {
 
     $this->postJson('/auth/register', registerPayload())->assertOk();
 
-    expect(User::where('email', 'new@user.com')->first()->email_verified_at)->not->toBeNull();
+    expect(User::where('email', 'new@user.com')->firstOrFail()->email_verified_at)->not->toBeNull();
 });
 
 it('accepts an invokable class-string for registerUsing', function () {
@@ -122,7 +122,7 @@ it('accepts an invokable class-string for registerUsing', function () {
 
     $this->postJson('/auth/register', registerPayload())->assertOk();
 
-    expect(User::where('email', 'new@user.com')->first()->email_verified_at)->not->toBeNull();
+    expect(User::where('email', 'new@user.com')->firstOrFail()->email_verified_at)->not->toBeNull();
 });
 
 it('lets registerValidation declare custom required fields', function () {

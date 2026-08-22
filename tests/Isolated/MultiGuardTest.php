@@ -233,7 +233,7 @@ it('gives each guard its own refresh cookie, so one login cannot destroy the oth
     forget();
     $admin = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])->assertOk();
 
-    $name = fn ($response) => collect($response->headers->getCookies())->first()->getName();
+    $name = fn ($response) => collect($response->headers->getCookies())->firstOrFail()->getName();
 
     expect($name($users))->toBe('__Host-refresh')
         ->and($name($admin))->toBe('__Host-refresh-admin')

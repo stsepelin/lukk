@@ -37,6 +37,26 @@ function verifier(): TokenVerifier
     return app(TokenVerifier::class);
 }
 /**
+ * Assert a lookup found something, and hand back the non-null value.
+ *
+ * The repository contracts return `?Record` because "not found" is a real answer. A test that
+ * believes the row exists should say so — otherwise a regression reports "property on null" from
+ * three frames away instead of naming the row that vanished.
+ *
+ * @template T
+ *
+ * @param  T|null  $value
+ * @return T
+ */
+function notNull(mixed $value): mixed
+{
+    expect($value)->not->toBeNull();
+    assert($value !== null);
+
+    return $value;
+}
+
+/**
  * The claims of a token the test asserts is VALID.
  *
  * `verify()` is nullable — a rejected token is null — so reading a claim straight off it both hides
