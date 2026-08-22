@@ -51,7 +51,7 @@ it('enrolls 2FA but does not activate it until confirmed', function () {
         ->assertOk()
         ->assertJsonStructure(['otpauth_uri', 'recovery_codes']);
 
-    expect($user->fresh()->hasEnabledTwoFactor())->toBeFalse();
+    expect($user->refresh()->hasEnabledTwoFactor())->toBeFalse();
 });
 
 it('activates 2FA after confirming a valid code', function () {
@@ -61,10 +61,10 @@ it('activates 2FA after confirming a valid code', function () {
 
     $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor')->assertOk();
 
-    $code = currentOtp($user->fresh()->twoFactorSecret());
+    $code = currentOtp($user->refresh()->twoFactorSecret());
     $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/confirm', ['code' => $code])->assertNoContent();
 
-    expect($user->fresh()->hasEnabledTwoFactor())->toBeTrue();
+    expect($user->refresh()->hasEnabledTwoFactor())->toBeTrue();
 });
 
 it('rejects confirmation with a wrong code (stays unconfirmed)', function () {
@@ -76,7 +76,7 @@ it('rejects confirmation with a wrong code (stays unconfirmed)', function () {
     $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/confirm', ['code' => '000000'])
         ->assertStatus(422);
 
-    expect($user->fresh()->hasEnabledTwoFactor())->toBeFalse();
+    expect($user->refresh()->hasEnabledTwoFactor())->toBeFalse();
 });
 
 it('regenerates recovery codes, invalidating the old set', function () {
@@ -90,8 +90,8 @@ it('regenerates recovery codes, invalidating the old set', function () {
         ->json('recovery_codes');
 
     expect($new)->toHaveCount(8);
-    expect($user->fresh()->useRecoveryCode('RECOVERY-CODE-1'))->toBeFalse();
-    expect($user->fresh()->useRecoveryCode($new[0]))->toBeTrue();
+    expect($user->refresh()->useRecoveryCode('RECOVERY-CODE-1'))->toBeFalse();
+    expect($user->refresh()->useRecoveryCode($new[0]))->toBeTrue();
 });
 
 it('disables 2FA', function () {
@@ -101,7 +101,7 @@ it('disables 2FA', function () {
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->deleteJson('/auth/two-factor')->assertNoContent();
 
-    expect($user->fresh()->hasEnabledTwoFactor())->toBeFalse();
+    expect($user->refresh()->hasEnabledTwoFactor())->toBeFalse();
 });
 
 it('returns a 2FA challenge at login instead of tokens when 2FA is confirmed', function () {
@@ -135,7 +135,7 @@ it('hides the two-factor secret and recovery codes from model serialization', fu
     $user = User::factory()->create();
     confirmedTwoFactor($user);
 
-    $array = $user->fresh()->toArray();
+    $array = $user->refresh()->toArray();
 
     expect($array)->not->toHaveKey('two_factor_secret')
         ->and($array)->not->toHaveKey('two_factor_recovery_codes');
@@ -151,7 +151,7 @@ it('completes the login with a recovery code and consumes it', function () {
         ->assertOk()
         ->assertJsonStructure(['access_token']);
 
-    expect($user->fresh()->useRecoveryCode('RECOVERY-CODE-1'))->toBeFalse();
+    expect($user->refresh()->useRecoveryCode('RECOVERY-CODE-1'))->toBeFalse();
 });
 
 it('rejects a wrong code and leaves the challenge usable for a retry', function () {
@@ -256,7 +256,7 @@ it('the remaining count drops as recovery codes are consumed', function () {
     $this->withToken($access)->getJson('/auth/two-factor/recovery-codes')->assertJson(['remaining' => 1]);
 
     $user->useRecoveryCode('RECOVERY-CODE-1'); // consume it (single-use)
-    $this->app['auth']->forgetGuards();        // force a fresh user resolve from DB
+    app('auth')->forgetGuards();        // force a fresh user resolve from DB
 
     $this->withToken($access)->getJson('/auth/two-factor/recovery-codes')->assertJson(['remaining' => 0]);
 });
@@ -408,7 +408,7 @@ it('refuses to re-enrol over confirmed two-factor instead of silently disabling 
     $this->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')->assertStatus(409);
 
     // Still enabled, still the same secret, still challenging at login.
-    expect($user->fresh()->hasEnabledTwoFactor())->toBeTrue();
+    expect($user->refresh()->hasEnabledTwoFactor())->toBeTrue();
 
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])

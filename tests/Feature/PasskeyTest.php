@@ -215,13 +215,13 @@ it('meters confirm-passkey on the shared confirm budget', function () {
     $access = $user->startSession()->accessToken;
 
     foreach (range(1, 2) as $i) {
-        $this->app['auth']->forgetGuards();
+        app('auth')->forgetGuards();
         $this->withToken($access)->postJson('/auth/confirm-passkey', [
             'ceremony_id' => 'nope', 'credential' => ['id' => 'cred-1'],
         ])->assertStatus(422);
     }
 
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withToken($access)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => 'nope', 'credential' => ['id' => 'cred-1'],
     ])->assertStatus(429);
@@ -325,7 +325,7 @@ it('prunes passkeys whose user no longer exists', function () {
 
     User::query()->whereKey($doomed->getKey())->delete();   // deleted OUTSIDE lukk's route
 
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 
     expect(Passkey::whereKey('cred-orphan')->exists())->toBeFalse()
         ->and(Passkey::whereKey('cred-living')->exists())->toBeTrue();

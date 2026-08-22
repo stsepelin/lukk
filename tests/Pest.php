@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Testing\PendingCommand;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
@@ -70,6 +71,25 @@ function actor()
     assert($user !== null);
 
     return $user;
+}
+
+/**
+ * Run a console command and get something assertable.
+ *
+ * `$this->artisan()` is typed `PendingCommand|int` — it degrades to an exit code when the console
+ * kernel is already running one. Every call here chains `assertSuccessful()`/`expectsOutput…`,
+ * which exist only on `PendingCommand`, so assert the shape once instead of at each site.
+ *
+ * @param  array<string, mixed>  $parameters
+ */
+function command(string $cmd, array $parameters = []): PendingCommand
+{
+    $pending = test()->artisan($cmd, $parameters);
+
+    expect($pending)->toBeInstanceOf(PendingCommand::class);
+    assert($pending instanceof PendingCommand);
+
+    return $pending;
 }
 
 function issuer(): TokenIssuer

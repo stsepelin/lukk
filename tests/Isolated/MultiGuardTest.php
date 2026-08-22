@@ -134,17 +134,17 @@ it('throttles the extra guard\'s confirm-password on its own limiter', function 
         ->json('access_token');
 
     foreach (range(1, 5) as $i) {
-        $this->app['auth']->forgetGuards();
+        app('auth')->forgetGuards();
         $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
             ->assertStatus(422);
     }
 
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
         ->assertStatus(429);
 
     // A separate bucket from the default guard's, which is untouched.
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->postJson('/auth/confirm-password', ['password' => 'wrong-pw'])->assertStatus(401);
 });
 

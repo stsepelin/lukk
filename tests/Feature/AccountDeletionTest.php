@@ -316,7 +316,7 @@ it('prunes without a passkeys table, which most installs do not have', function 
     // them, taking the refresh-token and lockout sweeps down with it.
     Schema::drop('passkeys');
 
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 });
 
 it('re-reads the schema rather than caching it for the life of the process', function () {

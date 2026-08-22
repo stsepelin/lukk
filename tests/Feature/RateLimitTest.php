@@ -54,14 +54,14 @@ it('caps failures per account across changing source IPs (distributed brute forc
     // Three failures against the account, each from a fresh IP so neither the
     // (email + IP) nor the per-IP limiter ever trips.
     foreach (['10.0.0.1', '10.0.0.2', '10.0.0.3'] as $ip) {
-        $this->app['auth']->forgetGuards();
+        app('auth')->forgetGuards();
         $this->withServerVariables(['REMOTE_ADDR' => $ip])
             ->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'bad'])
             ->assertStatus(422);
     }
 
     // A fourth attempt from yet another new IP is now blocked by the account cap.
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.4'])
         ->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'bad'])
         ->assertStatus(429);
@@ -75,9 +75,9 @@ it('does not let trailing whitespace split the per-account login bucket', functi
     // MySQL treats "trim@y.com" and "trim@y.com  " as the same row; the limiter key
     // must too (it trims), so padded variants share one bucket instead of minting fresh ones.
     $this->postJson('/auth/login', ['email' => 'trim@y.com', 'password' => 'bad'])->assertStatus(422);
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => 'trim@y.com  ', 'password' => 'bad'])->assertStatus(422);
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => '  trim@y.com', 'password' => 'bad'])->assertStatus(429);
 });
 
@@ -189,14 +189,14 @@ it('caps verification resends per user, so rotating IPs cannot mail-bomb one add
     $token = $user->startSession()->accessToken;
 
     foreach (['10.0.0.1', '10.0.0.2'] as $ip) {
-        $this->app['auth']->forgetGuards();
+        app('auth')->forgetGuards();
         $this->withServerVariables(['REMOTE_ADDR' => $ip])
             ->withToken($token)
             ->postJson('/auth/email/verification-notification')
             ->assertStatus(202);
     }
 
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.3'])
         ->withToken($token)
         ->postJson('/auth/email/verification-notification')
@@ -216,7 +216,7 @@ it('does not let one user\'s verification resends throttle another user', functi
     // A different user from a different address shares neither bucket. Distinct IPs are the point:
     // with the same IP the per-IP limit would answer first and this would prove nothing about the
     // per-user one being correctly scoped.
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.2'])
         ->withToken($second->startSession()->accessToken)
         ->postJson('/auth/email/verification-notification')

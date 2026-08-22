@@ -28,7 +28,7 @@ it('verifies an email from a valid signed link and fires Verified', function () 
     // No frontend_url configured → 204 (rather than a redirect).
     $this->get(verifyUrl($user))->assertNoContent();
 
-    expect($user->fresh()->hasVerifiedEmail())->toBeTrue();
+    expect($user->refresh()->hasVerifiedEmail())->toBeTrue();
     Event::assertDispatched(Verified::class);
 });
 
@@ -39,7 +39,7 @@ it('redirects a browser click to the configured frontend URL with ?verified=1', 
     $this->get(verifyUrl($user), ['Accept' => 'text/html'])
         ->assertRedirect('https://app.test/verify?verified=1');
 
-    expect($user->fresh()->hasVerifiedEmail())->toBeTrue();
+    expect($user->refresh()->hasVerifiedEmail())->toBeTrue();
 });
 
 it('returns 204 for a JSON client even when a frontend URL is set', function () {
@@ -48,7 +48,7 @@ it('returns 204 for a JSON client even when a frontend URL is set', function () 
 
     $this->getJson(verifyUrl($user))->assertNoContent();
 
-    expect($user->fresh()->hasVerifiedEmail())->toBeTrue();
+    expect($user->refresh()->hasVerifiedEmail())->toBeTrue();
 });
 
 it('rejects a tampered verification link (403)', function () {
@@ -56,7 +56,7 @@ it('rejects a tampered verification link (403)', function () {
 
     $this->getJson(verifyUrl($user).'&tampered=1')->assertStatus(403);
 
-    expect($user->fresh()->hasVerifiedEmail())->toBeFalse();
+    expect($user->refresh()->hasVerifiedEmail())->toBeFalse();
 });
 
 it('rejects a link whose hash does not match the email (403)', function () {
@@ -68,7 +68,7 @@ it('rejects a link whose hash does not match the email (403)', function () {
     ]);
 
     $this->getJson($url)->assertStatus(403);
-    expect($user->fresh()->hasVerifiedEmail())->toBeFalse();
+    expect($user->refresh()->hasVerifiedEmail())->toBeFalse();
 });
 
 it('rejects a link for an unknown user id (403)', function () {
@@ -131,7 +131,7 @@ it('gates a route behind a verified email (409 unverified, 200 verified)', funct
         ->assertStatus(409);
 
     // Second request as a different user — reset the memoized guard (per the CLAUDE.md gotcha).
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
 
     $verified = User::factory()->create(['email_verified_at' => now()]);
     $this->withToken($verified->startSession()->accessToken)
