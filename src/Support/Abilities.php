@@ -28,6 +28,36 @@ use InvalidArgumentException;
  */
 class Abilities
 {
+    /**
+     * lukk's own ability, for lukk's own session-management routes.
+     *
+     * Required by `DELETE /auth/sessions*` from a **pinned** token only — one whose grant was passed
+     * explicitly to `StartSession`, marked by the `pin` claim. A derived grant is a live human login
+     * and is never gated, so it does not need this ability and is not given it. A personal access
+     * token pinned to `['ci.deploy']` could otherwise log the account out everywhere; if yours
+     * genuinely needs to, pin it alongside: `['ci.deploy', Abilities::SESSIONS]`.
+     */
+    public const SESSIONS = 'lukk.sessions';
+
+    /**
+     * lukk's own ability for account-security operations: the step-up confirmation routes, and
+     * changing the password.
+     *
+     * Step-up is the gateway to everything that can take an account over permanently — enrolling a
+     * passkey, disabling two-factor, regenerating recovery codes — and changing the password both
+     * revokes every other session and rotates the credential. All of it requires the password, so a
+     * pinned token could never do it silently; but "a machine token must not log the account out
+     * everywhere" and "a machine token may enrol a permanent authenticator" cannot both be the
+     * rule, and this is which one lukk picked.
+     */
+    public const ACCOUNT = 'lukk.account';
+
+    /** One ability. Long enough for a namespaced name, short enough that a runaway value is caught. */
+    public const MAX_ABILITY_LENGTH = 128;
+
+    /** The assembled `scope` claim, kept well inside proxy header limits. */
+    public const MAX_SCOPE_LENGTH = 2048;
+
     /** @param array<int, string> $granted */
     public function __construct(private readonly array $granted) {}
 
@@ -51,6 +81,11 @@ class Abilities
      * silently narrower token would surface later as a confusing 403 somewhere else; a loud failure
      * at the first login in development is cheaper than either. The package already throws at boot
      * for guards sharing an audience, on the same reasoning.
+     *
+     * Note the message names the offending ability, so it reaches the application log via the
+     * default exception handler — the one place in lukk where an ability string does. That is the
+     * cost of a diagnosable failure, and it is bounded to the single malformed name (never the
+     * granted list); if your names are derived from customer data, it is worth knowing.
      */
     public static function fromArray(array $abilities): self
     {
@@ -75,14 +110,59 @@ class Abilities
                     'lukk ability %s is not a valid scope token (RFC 6749 §3.3): it may not contain a space, '
                     .'a double quote, a backslash, a control character or a non-ASCII byte. The scope claim is '
                     .'space-delimited, so a space would split one ability into several.',
-                    json_encode($ability),
+                    self::describe($ability),
+                ));
+            }
+
+            // RFC 6749 permits `,` in a scope token, but `lukk.ability:a,b` uses it as the list
+            // separator — so an ability named `orders,read` can be MINTED and never REQUIRED: the
+            // gate splits it and asks for `orders` OR `read`, silently widening itself. The mint
+            // grammar must not be wider than the gate grammar.
+            if (str_contains($ability, ',')) {
+                throw new InvalidArgumentException(sprintf(
+                    'lukk ability %s may not contain a comma: the ability middleware uses it to '
+                    .'separate a list (`lukk.ability:a,b`), so such a name could never be required '
+                    .'by a route and would widen any gate that tried.',
+                    self::describe($ability),
+                ));
+            }
+
+            if (strlen($ability) > self::MAX_ABILITY_LENGTH) {
+                throw new InvalidArgumentException(sprintf(
+                    'lukk ability %s is %d bytes, over the %d-byte limit.',
+                    self::describe($ability), strlen($ability), self::MAX_ABILITY_LENGTH,
                 ));
             }
 
             $granted[] = $ability;
         }
 
-        return new self(array_values(array_unique($granted)));
+        $granted = array_values(array_unique($granted));
+
+        // The claim ends up in an `Authorization` header on every request, and the design invites
+        // ability names derived from data (a tenant role, a team name, a DB column). Unbounded, that
+        // data decides the header size: past ~8 KB nginx/ALB/proxy defaults reject it and EVERY
+        // request fails 431/400 — a lockout that only shows up in production. Fail at issue time
+        // instead, where the grant is still the developer's to fix.
+        if (($length = strlen(implode(' ', $granted))) > self::MAX_SCOPE_LENGTH) {
+            throw new InvalidArgumentException(sprintf(
+                'lukk granted %d abilities totalling %d bytes, over the %d-byte scope limit. The claim '
+                .'rides in an Authorization header, so an oversized grant makes every request fail at '
+                .'the proxy. Abilities are meant to be coarse — collapse a family with a wildcard '
+                .'(`orders.*`) rather than enumerating it.',
+                count($granted), $length, self::MAX_SCOPE_LENGTH,
+            ));
+        }
+
+        return new self($granted);
+    }
+
+    /** Bound what an error message echoes — the offending value reaches the application log. */
+    private static function describe(mixed $ability): string
+    {
+        $encoded = (string) json_encode($ability);
+
+        return strlen($encoded) > 120 ? substr($encoded, 0, 120).'…" (truncated)' : $encoded;
     }
 
     /** The space-delimited claim value, or null when nothing is granted (so no claim is minted). */

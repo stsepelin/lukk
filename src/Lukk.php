@@ -8,6 +8,7 @@ use Closure;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Http\Request;
+use Illuminate\Support\Enumerable;
 use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
 use Lukk\Support\Abilities;
@@ -27,7 +28,15 @@ class Lukk
     /** @var (Closure(int|string): array<string,mixed>)|null */
     public static ?Closure $tokenClaimsUsing = null;
 
-    /** @var Closure|null Resolves the abilities a token is minted with. Null = the feature is off. */
+    /**
+     * Resolves the abilities a token is minted with. Null = no callback (see {@see usesAbilities()},
+     * which is the question to ask; a pinned-grant install has no callback and still uses abilities).
+     *
+     * A bare string is accepted as a single ability — NOT a space-delimited list. `'a b'` is
+     * rejected by the scope-token charset, because a space would split one ability into two.
+     *
+     * @var (Closure(int|string, TokenContext): (array<int, string|\Stringable>|Arrayable<int, string>|Enumerable<int, string>|string))|null
+     */
     public static ?Closure $abilitiesUsing = null;
 
     /** @var (Closure(array<string,mixed>): Authenticatable)|class-string|null */
@@ -165,6 +174,19 @@ class Lukk
      * before. Once it is, abilities are **deny by default**: `tokenCan()` and the ability
      * middleware refuse anything not granted. Return `['*']` for an unrestricted token.
      *
+     * **Name abilities after resources, never after facts about the person.** An ability name is a
+     * public identifier: it travels in the `scope` claim of every access token (so every proxy, API
+     * gateway and APM on the path sees it), it is published on the user resource, and it appears as
+     * a literal string in your JavaScript bundle — which anyone can download. `hiv_clinic.records.
+     * read` is a special-category disclosure at each of those hops; `clinic_a.records.read` is not.
+     * The charset validation below polices the SYNTAX of a name and can say nothing about its
+     * meaning; that part is yours.
+     *
+     * Runs **outside** lukk's refresh transaction, resolved before it opens — so a slow permission
+     * lookup doesn't extend a row lock, a callback taking locks in the opposite order can't deadlock
+     * against lukk, and an error it swallows can't poison lukk's transaction. It may still throw:
+     * that fails the refresh cleanly, before the presented token has been consumed.
+     *
      * Re-evaluated on every mint, not frozen at login — so revoking an ability takes effect within
      * `access_ttl` rather than lasting the life of the refresh token. A session that must instead
      * carry a FIXED grant (a personal access token, an impersonation session capped below the
@@ -176,11 +198,54 @@ class Lukk
         self::$abilitiesUsing = $callback;
     }
 
-    /** The abilities for a user, or null when the feature was never configured. */
+    /**
+     * Whether this install uses abilities at all.
+     *
+     * Deliberately NOT "is `$abilitiesUsing` set". An install whose grants come only from an
+     * explicit `StartSession` pin has no callback and uses abilities very much indeed — and asking
+     * the narrower question made a token pinned to ZERO abilities indistinguishable from a server
+     * that doesn't use the feature, so the client rendered the full privileged UI for the most
+     * restricted token the API can issue.
+     */
+    public static function usesAbilities(?string $guard = null): bool
+    {
+        // Read through the ACTIVE GUARD's resolved config, not the global block. `guardConfig()`
+        // deep-merges `lukk.guards.{name}` over the top level, so a deployment that switched the
+        // feature on for its admin guard alone had that setting silently dropped — and the flag
+        // fails OPEN, so the claims hook became the authorization layer on that guard.
+        return self::$abilitiesUsing !== null || (bool) (self::guardConfig($guard)['features']['abilities'] ?? false);
+    }
+
+    /**
+     * The custom claims for a user, or `[]` when no hook is configured.
+     *
+     * Resolved by the calling ACTION, never by the issuer — the same rule abilities follow, and for
+     * the same two reasons: policy does not belong inside a swap seam, and this is application code
+     * that must not run while lukk holds a row lock.
+     *
+     * @return array<string, mixed>
+     */
+    public static function customClaimsFor(int|string $userId): array
+    {
+        $claims = self::$tokenClaimsUsing !== null ? (self::$tokenClaimsUsing)($userId) : [];
+
+        return is_array($claims) ? $claims : [];
+    }
+
+    /** The abilities for a user, or null when no callback is configured. */
     public static function abilitiesFor(int|string $userId, TokenContext $context): ?Abilities
     {
         if (self::$abilitiesUsing === null) {
-            return null;
+            // The layer can be ON without a callback — the pinned-grant-only install the
+            // `features.abilities` flag exists for. There, "this token derives nothing" is an EMPTY
+            // grant, not "abilities aren't in use": returning null left the issuer's reservation
+            // switched off, so a `scope` from `tokenClaimsUsing` was signed and honoured by the
+            // gates. The claims hook would have become the authorization layer.
+            // The CONTEXT's guard, not the ambient one. The Actions capture their guard at resolve
+            // time precisely so an Action resolved outside `Lukk::onGuard` and invoked inside it
+            // can't mint against the wrong identity; reading `currentGuard()` here reintroduced
+            // exactly that split — the callback followed one guard and the flag another.
+            return self::usesAbilities($context->guard) ? Abilities::fromArray([]) : null;
         }
 
         $granted = (self::$abilitiesUsing)($userId, $context);
@@ -188,8 +253,17 @@ class Lukk
         // A permissions relation returning a Collection is the likeliest real implementation, and a
         // bare `(array)` cast on one yields a nested array — which used to reach `strval()` and
         // 500 every login AND every refresh. Normalize the shapes people actually return.
-        if ($granted instanceof Arrayable) {
+        //
+        // `all()` is an ENUMERABLE method; `Arrayable` declares only `toArray()`. Calling `all()`
+        // on the contract was wrong in both directions: an Eloquent model is `Arrayable` with no
+        // instance `all()`, so PHP resolved the STATIC `Model::all()` — an unbounded table scan,
+        // run inside the rotate transaction's row lock, whose result then landed in a logged
+        // exception message; and any other `Arrayable` without an `all()` was a hard fatal on every
+        // login and refresh, the exact outage this branch exists to prevent.
+        if ($granted instanceof Enumerable) {
             $granted = $granted->all();
+        } elseif ($granted instanceof Arrayable) {
+            $granted = $granted->toArray();
         }
 
         return Abilities::fromArray(is_array($granted) ? $granted : [$granted]);
@@ -294,6 +368,25 @@ class Lukk
         return ! empty(config('lukk.guards'));
     }
 
+    /**
+     * Every guard in `config/auth.php` running lukk's driver.
+     *
+     * The set that MATTERS for isolation, and deliberately not `guardNames()`: a guard becomes real
+     * by being declared in `auth.guards` with `driver => lukk-jwt`, whether or not anyone remembered
+     * to give it a `lukk.guards` block. Keying the safety check on the lukk block alone meant the
+     * dangerous case — a second guard with no block, which therefore inherits the default guard's
+     * secret AND audience — was exactly the case the check skipped.
+     *
+     * @return array<int, string>
+     */
+    public static function driverGuardNames(): array
+    {
+        return array_values(array_keys(array_filter(
+            (array) config('auth.guards', []),
+            fn ($config) => is_array($config) && ($config['driver'] ?? null) === 'lukk-jwt',
+        )));
+    }
+
     /** The lukk guard active for the current request (default: `config('lukk.guard')`). */
     public static function currentGuard(): string
     {
@@ -321,11 +414,31 @@ class Lukk
      */
     public static function assertGuardsIsolated(): void
     {
+        $default = (string) (config('lukk.guard') ?? 'api');
+
+        // A second `lukk-jwt` guard with no `lukk.guards` block gets the default guard's config
+        // deep-merged wholesale — same secret, same issuer, same AUDIENCE. Audience is the control
+        // that stops one guard's token verifying on another, so cloning it means a customer's token
+        // authenticates as whatever the other guard's provider returns for that id: a different user,
+        // in a different table, with no boot error and nothing in the log. Refuse to boot.
+        foreach (self::driverGuardNames() as $name) {
+            if ($name === $default || isset(((array) config('lukk.guards', []))[$name])) {
+                continue;
+            }
+
+            throw new RuntimeException(
+                "lukk guard [{$name}] uses the lukk-jwt driver but has no `lukk.guards.{$name}` "
+                ."config block, so it would inherit the [{$default}] guard's secret AND audience — "
+                ."and a token minted for [{$default}] would authenticate as a [{$name}] user with "
+                .'the same id. Give it its own block with a distinct `audience` (and ideally its own '
+                .'`secret`), or drop the guard from config/auth.php.'
+            );
+        }
+
         if (! self::isMultiGuard()) {
             return;
         }
 
-        $default = (string) (config('lukk.guard') ?? 'api');
         $authGuards = (array) config('auth.guards', []);
         $audienceOwners = [];
         $pathMounts = [];
@@ -393,7 +506,14 @@ class Lukk
                 userClass: $user::class,
                 familyId: 'lukk-acting-as',
                 abilities: Abilities::fromArray($abilities),
-                claims: (object) ['sub' => (string) $user->getAuthIdentifier(), 'scope' => Abilities::fromArray($abilities)->toScope()],
+                // `pin` too: passing an explicit list here IS the pinned semantic, and without it a
+                // consumer could not write a passing test for "my narrowly-scoped token must not be
+                // able to revoke sessions" using lukk's own helper — the gate would wave it through.
+                claims: (object) [
+                    'sub' => (string) $user->getAuthIdentifier(),
+                    'scope' => Abilities::fromArray($abilities)->toScope(),
+                    'pin' => true,
+                ],
             ));
         }
     }

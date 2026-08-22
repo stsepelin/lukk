@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Support\Arrayable;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\TokenContext;
@@ -135,4 +136,61 @@ it('reports "not configured" as null, distinct from "configured and granted noth
         ->and(Lukk::abilitiesFor(1, $context)->toScope())->toBeNull();
 
     Lukk::$abilitiesUsing = null;
+});
+
+it('bounds a single ability and the assembled claim', function () {
+    // The claim rides in an Authorization header on every request, and the design invites names
+    // derived from data. Unbounded, that data decides the header size — past ~8 KB the proxy
+    // rejects it and EVERY request fails 431/400, a lockout that only appears in production.
+    expect(fn () => Abilities::fromArray([str_repeat('a', 129)]))
+        ->toThrow(InvalidArgumentException::class, 'over the 128-byte limit');
+
+    expect(Abilities::fromArray([str_repeat('a', 128)])->all())->toHaveCount(1);
+
+    $many = array_map(fn ($i) => 'ns'.$i.'.'.str_repeat('x', 100), range(1, 40));
+    expect(fn () => Abilities::fromArray($many))
+        ->toThrow(InvalidArgumentException::class, 'over the 2048-byte scope limit');
+});
+
+it('does not echo an unbounded value into the exception message', function () {
+    // The message reaches the application log via the default handler. A callback returning the
+    // wrong thing — a model, a row, a whole result set — must not put it there.
+    try {
+        Abilities::fromArray([str_repeat('secret ', 400)]);
+        expect(false)->toBeTrue();
+    } catch (InvalidArgumentException $e) {
+        expect(strlen($e->getMessage()))->toBeLessThan(400)
+            ->and($e->getMessage())->toContain('(truncated)');
+    }
+});
+
+it('reads a Collection with all() but any other Arrayable with toArray()', function () {
+    // `all()` is an ENUMERABLE method; `Arrayable` declares only `toArray()`. Calling `all()` on the
+    // contract resolved to the STATIC `Model::all()` for an Eloquent model — an unbounded table
+    // scan, run under the rotate transaction's row lock — and was a hard fatal for any other
+    // Arrayable, on every login AND refresh.
+    $arrayable = new class implements Arrayable
+    {
+        public function toArray(): array
+        {
+            return ['orders.read'];
+        }
+    };
+
+    Lukk::abilitiesUsing(fn () => $arrayable);
+    expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid'))->all())->toBe(['orders.read']);
+
+    Lukk::abilitiesUsing(fn () => collect(['orders.write']));
+    expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid'))->all())->toBe(['orders.write']);
+
+    Lukk::$abilitiesUsing = null;
+});
+
+it('rejects a comma, which the ability middleware owns as its list separator', function () {
+    // RFC 6749 permits `,` in a scope token, but `lukk.ability:a,b` splits on it — so an ability
+    // named `orders,read` could be MINTED and never REQUIRED: a route asking for it actually asks
+    // for `orders` OR `read`, and a token holding only `orders` walks through a gate meant to be
+    // narrower. The mint grammar must not be wider than the gate grammar.
+    expect(fn () => Abilities::fromArray(['orders,read']))
+        ->toThrow(InvalidArgumentException::class, 'may not contain a comma');
 });

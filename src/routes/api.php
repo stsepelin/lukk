@@ -25,7 +25,40 @@ use Lukk\Http\Controllers\TwoFactorAuthenticationController;
 use Lukk\Http\Controllers\TwoFactorChallengedSessionController;
 use Lukk\Http\Controllers\VerifyEmailController;
 use Lukk\Http\Middleware\ForceJsonRequest;
+use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Lukk;
+use Lukk\Support\Abilities;
+
+/**
+ * The session routes every guard gets, defined ONCE.
+ *
+ * They used to be written out in both the extra-guard loop and the default-guard block, and the two
+ * copies drifted: `RequirePinnedAbility` was added to the default block only, so a token pinned to
+ * a narrow grant could still log an ADMIN account out everywhere — the gate absent from exactly the
+ * mount a multi-guard install cares about. One definition makes that class of omission impossible.
+ */
+$sessionRoutes = function (string $guard, string $throttle = ''): void {
+    Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
+
+    // Gated on `lukk.sessions`: these revoke OTHER sessions, so a token pinned to a narrow grant —
+    // a personal access token, a capped impersonation session — must not reach them. `logout` and
+    // `refresh` are deliberately NOT gated: they act on the calling session alone, and a pinned
+    // token has to be able to end and renew itself.
+    $pinned = RequirePinnedAbility::class.':';
+    Route::delete('sessions', [SessionController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
+    Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
+
+    // Throttled like login: it re-verifies the SAME password, so leaving it unmetered made the sudo
+    // gate an unlimited password oracle for anyone already holding an access token.
+    //
+    // Gated for a pinned token because step-up is the gateway to everything that takes an account
+    // over permanently — enrolling a passkey, disabling two-factor, regenerating recovery codes. All
+    // of it needs the password, so a pinned token could never do it silently; but "a machine token
+    // must not log the account out everywhere" and "a machine token may enrol a permanent
+    // authenticator" cannot both be the rule, and this is which one lukk picked.
+    Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])
+        ->middleware([$guard, $pinned.Abilities::ACCOUNT, 'throttle:lukk-'.$throttle.'confirm']);
+};
 
 // Additional guards (multi-audience). Mounted FIRST so a subdomain-scoped guard takes precedence
 // over the host-agnostic default guard sharing the same path. Each gets the CORE session routes
@@ -36,16 +69,13 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
     Route::domain($cfg['domain'] ?? null)
         ->prefix((string) ($cfg['path'] ?? 'auth'))
         ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.$guardName])
-        ->group(function () use ($guardName) {
+        ->group(function () use ($guardName, $sessionRoutes) {
             $guard = 'auth:'.$guardName;
 
             Route::get('jwks', JwksController::class);
             Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-login');
             Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-refresh');
-            Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
-            Route::delete('sessions', [SessionController::class, 'destroy'])->middleware($guard);
-            Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware($guard);
-            Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware([$guard, 'throttle:lukk-'.$guardName.'-confirm']);
+            $sessionRoutes($guard, $guardName.'-');
         });
 }
 
@@ -54,7 +84,7 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
 Route::domain(config('lukk.domain'))
     ->prefix((string) config('lukk.path', 'auth'))
     ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.config('lukk.guard', 'api')])
-    ->group(function () {
+    ->group(function () use ($sessionRoutes) {
         $guard = 'auth:'.config('lukk.guard', 'api');
         $confirmed = [$guard, 'lukk.confirm'];
 
@@ -68,17 +98,17 @@ Route::domain(config('lukk.domain'))
 
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
-        Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
-        Route::delete('sessions', [SessionController::class, 'destroy'])->middleware($guard);
-        Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware($guard);
-        // Throttled like login: it re-verifies the SAME password, so leaving it unmetered made the
-        // sudo gate an unlimited password oracle for anyone already holding an access token.
-        Route::post('confirm-password', [ConfirmablePasswordController::class, 'store'])->middleware([$guard, 'throttle:lukk-confirm']);
+        $sessionRoutes($guard);
 
         if (config('lukk.features.change_password')) {
             // Shares the confirm budget deliberately: it re-verifies the same secret, and two
             // independent allowances for guessing one password is just a larger allowance.
-            Route::post('password', [PasswordController::class, 'update'])->middleware([$guard, 'throttle:lukk-confirm']);
+            //
+            // Gated for a pinned token on the same reasoning as step-up: it rotates the account
+            // credential AND revokes every other session, so it reaches past what pinning a grant
+            // is meant to allow.
+            Route::post('password', [PasswordController::class, 'update'])
+                ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT, 'throttle:lukk-confirm']);
         }
 
         if (config('lukk.features.two_factor')) {
@@ -86,7 +116,10 @@ Route::domain(config('lukk.domain'))
             Route::post('two-factor', [TwoFactorAuthenticationController::class, 'store'])->middleware($confirmed);
             Route::delete('two-factor', [TwoFactorAuthenticationController::class, 'destroy'])->middleware($confirmed);
             Route::post('two-factor/confirm', [ConfirmedTwoFactorAuthenticationController::class, 'store'])->middleware($confirmed);
-            Route::get('two-factor/recovery-codes', [RecoveryCodeController::class, 'index'])->middleware($guard);
+            // Gated for a pinned token like the rest of `lukk.account`: it reports how many recovery
+            // codes remain, which is reconnaissance for the same attack the write side protects.
+            Route::get('two-factor/recovery-codes', [RecoveryCodeController::class, 'index'])
+                ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT]);
             Route::post('two-factor/recovery-codes', [RecoveryCodeController::class, 'store'])->middleware($confirmed);
         }
 
@@ -96,8 +129,14 @@ Route::domain(config('lukk.domain'))
             // Shares the confirm budget. A passkey assertion is a signature, not a guessable secret,
             // so this is DoS/CPU metering rather than brute-force defence — which is also why it is
             // not gated by the confirm lockout below.
-            Route::post('confirm-passkey', [ConfirmablePasskeyController::class, 'store'])->middleware([$guard, 'throttle:lukk-confirm']);
-            Route::get('passkeys', [PasskeyController::class, 'index'])->middleware($guard);
+            // Gated for a pinned token exactly like `confirm-password`: it is the OTHER way to reach
+            // step-up, so leaving it open would make the password gate decorative.
+            Route::post('confirm-passkey', [ConfirmablePasskeyController::class, 'store'])
+                ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT, 'throttle:lukk-confirm']);
+            // Same: it enumerates the account's second factors — credential ids, the human-chosen
+            // device names, last-use timestamps. Target selection for a social-engineering step.
+            Route::get('passkeys', [PasskeyController::class, 'index'])
+                ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT]);
             Route::post('passkeys/registration-options', PasskeyRegistrationOptionsController::class)->middleware($confirmed);
             Route::post('passkeys', [PasskeyController::class, 'store'])->middleware($confirmed);
             Route::delete('passkeys/{credentialId}', [PasskeyController::class, 'destroy'])->middleware($confirmed);

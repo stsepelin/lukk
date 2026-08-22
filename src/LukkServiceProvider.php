@@ -61,6 +61,7 @@ use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Http\Middleware\RequireAbility;
 use Lukk\Http\Middleware\RequireAllAbilities;
 use Lukk\Http\Middleware\RequireConfirmation;
+use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Http\Middleware\RequireVerifiedEmail;
 use Lukk\Http\Middleware\SetGuard;
 use Lukk\Http\Responses\EmailVerificationResponse as EmailVerificationResponseImpl;
@@ -130,6 +131,8 @@ class LukkServiceProvider extends ServiceProvider
         if (method_exists($kernel, 'addToMiddlewarePriorityAfter')) {
             $kernel->addToMiddlewarePriorityAfter(AuthenticatesRequests::class, RequireAbility::class);
             $kernel->addToMiddlewarePriorityAfter(RequireAbility::class, RequireAllAbilities::class);
+            // Same reason: it reads the authenticated user, and a null one makes it a silent no-op.
+            $kernel->addToMiddlewarePriorityAfter(RequireAllAbilities::class, RequirePinnedAbility::class);
         }
 
         if ($this->config()['routes'] ?? true) {
@@ -246,7 +249,7 @@ class LukkServiceProvider extends ServiceProvider
         // bindings above) its issuer + guard-scoped repository — so a session is minted, rotated,
         // and revoked entirely within one guard's family of tokens.
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
@@ -255,7 +258,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
-            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),

@@ -17,8 +17,13 @@ use Lukk\Support\VerifiedToken;
  *
  * Outside an authenticated request — a queued job, a console command — nothing is granted. Deny by
  * default: an authorization check has no business passing where no token was presented.
+ *
+ * Named identically to {@see \Lukk\Contracts\HasTokenAbilities}, which it satisfies — Sanctum and
+ * the framework both pair a trait and an interface under one name, so a class using both aliases the
+ * contract (`use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;`). One name for one
+ * concept beats two names a reader has to learn separately.
  */
-trait HasAbilities
+trait HasTokenAbilities
 {
     public function tokenAbilities(): Abilities
     {

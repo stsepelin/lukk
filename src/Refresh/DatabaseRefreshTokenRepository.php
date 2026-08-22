@@ -29,6 +29,39 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         return DB::transaction($callback);
     }
 
+    public function findByHash(string $hash): ?RefreshTokenRecord
+    {
+        // `useWritePdo`, because this one runs OUTSIDE a transaction: `Connection::getReadPdo()`
+        // returns the write PDO only while `transactions > 0`, so on a read/write split this read —
+        // and only this read — lands on a replica, while the locked read inside the transaction
+        // hits the primary. `sticky` doesn't help; a refresh has written nothing on the connection
+        // yet. The row being looked up was inserted milliseconds ago by the previous rotation, which
+        // is exactly the window replication lag covers, and a miss here would mint the successor
+        // with no grant at all.
+        return $this->hydrate($this->scoped()->useWritePdo()->where('token_hash', $hash)->first());
+    }
+
+    public function familyIsPinned(string $familyId): bool
+    {
+        // Reads the ROW and checks the attribute, rather than naming `scope` in a WHERE clause.
+        //
+        // Two traps avoided. Naming it fails differently per driver: on sqlite a double-quoted
+        // identifier matching no column degrades to a STRING LITERAL, so `"scope" is not null` is
+        // true for EVERY row — a pre-0.6 schema would have treated every token as a machine token
+        // and 403'd logout-all for everybody. Guarding that with `Schema::hasColumn` then cost two
+        // extra round trips, one of them `information_schema`, on every ordinary human request:
+        // `pin` is present only on machine tokens, so this path is the common case, not the rare one.
+        //
+        // `select *` names no column, so a schema without `scope` simply yields no attribute.
+        // Every row in a family carries the same value — written at insert, carried forward by
+        // rotation, never updated — so one row answers for the family.
+        // `orderBy` for determinism: every row in a family carries the same value today, but an
+        // unordered `first()` would make the answer depend on storage order the moment one didn't.
+        $row = $this->scoped()->useWritePdo()->where('family_id', $familyId)->orderBy('id')->first();
+
+        return $row !== null && ($row->scope ?? null) !== null;
+    }
+
     public function findByHashForUpdate(string $hash): ?RefreshTokenRecord
     {
         // Non-locking existence check first: `FOR UPDATE` on an absent unique value gap-locks under MySQL REPEATABLE READ.
@@ -41,6 +74,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->lockForUpdate()
             ->first();
 
+        return $this->hydrate($row);
+    }
+
+    private function hydrate(mixed $row): ?RefreshTokenRecord
+    {
         return $row === null ? null : new RefreshTokenRecord(
             id: $row->id,
             userId: $row->user_id,
@@ -73,7 +111,14 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             $attributes['guard'] = $this->guard;
         }
 
-        $this->query()->create($attributes);
+        // `forceFill`, not `create`: mass assignment respects the MODEL's `$fillable`/`$guarded`, and
+        // `Lukk::useRefreshTokenModel()` is a documented seam. A subclass that declares `$fillable`
+        // silently dropped `scope` — which turned a token pinned to `['ci.deploy']` into the
+        // subject's full derived grant on its first refresh, and handed back session management with
+        // it. Both halves of the defence collapsed together, because `familyIsPinned()` reads the
+        // same column that was never written. These attributes are lukk's own; the consumer's
+        // assignment policy has no business filtering them.
+        $this->query()->newModelInstance()->forceFill($attributes)->save();
     }
 
     public function markRotated(string $id): void

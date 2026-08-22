@@ -14,7 +14,7 @@ afterEach(function () {
 });
 
 it('verifies a freshly issued access token and exposes its claims', function () {
-    $access = issuer()->accessToken(123, 'fam-1');
+    $access = issuer()->accessToken(ctx(123, 'fam-1'));
     $claims = verifier()->verify($access['token']);
 
     expect($claims)->not->toBeNull()
@@ -36,7 +36,7 @@ it('rejects an unsigned alg=none token', function () {
 
 it('rejects a token minted for a different audience', function () {
     config(['lukk.audience' => 'https://evil.example.com']);
-    $access = app(TokenIssuer::class)->accessToken(1, 'fam');
+    $access = app(TokenIssuer::class)->accessToken(ctx(1, 'fam'));
     config(['lukk.audience' => 'https://api.example.com']);
 
     expect(verifier()->verify($access['token']))->toBeNull();
@@ -47,7 +47,7 @@ it('mints a multi-audience array and accepts it at each listed service', functio
     $config = config('lukk');
     $config['audience'] = ['https://api.example.com', 'https://billing.example.com'];
 
-    $token = (new FirebaseTokenIssuer($config))->accessToken(1, 'fam')['token'];
+    $token = (new FirebaseTokenIssuer($config))->accessToken(ctx(1, 'fam'))['token'];
 
     // The aud claim is the full array (a single audience would stay a string).
     expect((new FirebaseTokenVerifier($config, app(Denylist::class)))->verify($token)?->aud)
@@ -75,14 +75,14 @@ it('rejects a challenge token presented as an access token (wrong typ)', functio
 
 it('rejects a token minted by a different issuer', function () {
     config(['lukk.issuer' => 'https://evil.example.com']);
-    $access = app(TokenIssuer::class)->accessToken(1, 'fam');
+    $access = app(TokenIssuer::class)->accessToken(ctx(1, 'fam'));
     config(['lukk.issuer' => 'https://api.example.com']);
 
     expect(verifier()->verify($access['token']))->toBeNull();
 });
 
 it('rejects a token whose jti is denylisted', function () {
-    $access = issuer()->accessToken(5, 'fam-x');
+    $access = issuer()->accessToken(ctx(5, 'fam-x'));
     expect(verifier()->verify($access['token']))->not->toBeNull();
 
     app(Denylist::class)->revokeJti($access['jti'], 900);
@@ -93,28 +93,31 @@ it('rejects a token whose jti is denylisted', function () {
 it('rejects an access token whose exp has passed', function () {
     // The issuer stamps exp/nbf from Carbon's clock; the verifier reads the real
     // one. Minting an hour in the past yields an already-expired token at verify.
-    $access = $this->travel(-3600)->seconds(fn () => issuer()->accessToken(1, 'fam'));
+    $access = $this->travel(-3600)->seconds(fn () => issuer()->accessToken(ctx(1, 'fam')));
 
     expect(verifier()->verify($access['token']))->toBeNull();
 });
 
 it('tolerates a token expired within the leeway window', function () {
     // exp lands 3s in the past — inside the default 5s leeway — so it still verifies.
-    $access = $this->travel(-((int) config('lukk.access_ttl') + 3))->seconds(fn () => issuer()->accessToken(1, 'fam'));
+    $access = $this->travel(-((int) config('lukk.access_ttl') + 3))->seconds(fn () => issuer()->accessToken(ctx(1, 'fam')));
 
     expect(verifier()->verify($access['token'])?->sub)->toBe('1');
 });
 
 it('rejects a token that is not yet valid (nbf in the future)', function () {
-    $access = $this->travel(3600)->seconds(fn () => issuer()->accessToken(1, 'fam'));
+    $access = $this->travel(3600)->seconds(fn () => issuer()->accessToken(ctx(1, 'fam')));
 
     expect(verifier()->verify($access['token']))->toBeNull();
 });
 
 it('embeds custom claims (e.g. roles) via tokenClaimsUsing', function () {
+    // Through the ACTION, not the raw issuer: the hook is resolved by `StartSession` now, so that a
+    // consumer callback never runs inside the refresh transaction's row lock. Asserting it against
+    // the issuer would test a collaborator that no longer has the responsibility.
     Lukk::tokenClaimsUsing(fn ($userId) => ['roles' => ['admin', 'editor']]);
 
-    $claims = verifier()->verify(issuer()->accessToken(7, 'fam')['token']);
+    $claims = verifier()->verify(start()(7)->accessToken);
 
     expect($claims->roles)->toBe(['admin', 'editor'])
         ->and($claims->sub)->toBe('7');
@@ -123,14 +126,24 @@ it('embeds custom claims (e.g. roles) via tokenClaimsUsing', function () {
 it('does not let custom claims override the standard ones', function () {
     Lukk::tokenClaimsUsing(fn ($userId) => ['sub' => 'spoofed', 'roles' => ['x']]);
 
-    $claims = verifier()->verify(issuer()->accessToken(7, 'fam')['token']);
+    $claims = verifier()->verify(start()(7)->accessToken);
 
     expect($claims->sub)->toBe('7')
         ->and($claims->roles)->toBe(['x']);
 });
 
+it('ignores a claims hook handed straight to the issuer, which only stamps', function () {
+    // The other half of the split: the issuer derives nothing. A custom `TokenIssuer` that forgets
+    // this would silently drop custom claims, so pin that the raw issuer is now inert.
+    Lukk::tokenClaimsUsing(fn ($userId) => ['roles' => ['admin']]);
+
+    $claims = verifier()->verify(issuer()->accessToken(ctx(7, 'fam'))['token']);
+
+    expect((array) $claims)->not->toHaveKey('roles');
+});
+
 it('sets typ=at+jwt and alg=HS256 in the header', function () {
-    [$header] = explode('.', issuer()->accessToken(1, 'fam')['token']);
+    [$header] = explode('.', issuer()->accessToken(ctx(1, 'fam'))['token']);
     $decoded = json_decode(base64_decode(strtr($header, '-_', '+/')), true);
 
     expect($decoded['typ'])->toBe('at+jwt')->and($decoded['alg'])->toBe('HS256');
