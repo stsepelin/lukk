@@ -6,6 +6,7 @@ namespace Lukk\Actions;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\CanResetPassword;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Auth\LoginRateLimiter;
@@ -37,6 +38,14 @@ use Lukk\Lukk;
  *  4. **`AccountDeleted` after the commit**, so a listener that talks to a downstream processor
  *     cannot roll the erasure back — and cannot be rolled back itself, having already told someone
  *     else to delete their copy.
+ *
+ * **The atomicity in step 3 is per-connection.** SQL has no cross-connection transaction without
+ * two-phase commit, so if the provider model, `passkeys` or the broker's table live on a different
+ * connection than lukk's own, "one transaction" is really one per connection. `disposeOf()` gives
+ * the user's connection its own, which covers every failure raised inside the erasure; a failure
+ * during the commit sequence itself can still diverge. The surviving state is the one this class
+ * prefers throughout — unreachable rather than half-erased and still usable — but the leftover rows
+ * are real, and `lukk:prune` is what sweeps them.
  */
 class DeleteAccount
 {
@@ -110,7 +119,7 @@ class DeleteAccount
             // Two-factor material lives in columns ON the user row, so deleting the row takes it.
             // An app that anonymizes instead of deleting must clear them itself — the callback is
             // the only thing that knows the row survives, so it is the only thing that can.
-            (Lukk::$deleteUserUsing ?? self::defaultDisposal(...))($user);
+            $this->disposeOf($user);
         });
 
         event(new AccountDeleted($userId, $identifier, $this->guard));
@@ -142,6 +151,43 @@ class DeleteAccount
         $broker = $this->passwordBroker ?? (string) config('auth.defaults.passwords');
 
         return (string) (config("auth.passwords.{$broker}.table") ?? 'password_reset_tokens');
+    }
+
+    /**
+     * Run the disposal inside a transaction on the USER's own connection.
+     *
+     * The surrounding transaction belongs to lukk's connection. When the provider model lives on a
+     * different one — identities in a shared directory database, application tables local — the
+     * disposal ran with no transaction at all: it committed the moment it executed, so a rollback
+     * afterwards restored the refresh tokens, passkeys, lockouts and reset row around a user that
+     * was already permanently gone. The callback is application code and is documented as
+     * ANONYMIZING (several writes, not one), so failing halfway is its most likely failure, not its
+     * least.
+     *
+     * On a single connection this nests, which Laravel implements as a SAVEPOINT — semantics
+     * unchanged. It is written without a same-connection branch on purpose: a branch here would be
+     * exercised only by the rare topology and would rot untested.
+     *
+     * **This does not make erasure atomic across connections, and nothing can** — that needs
+     * two-phase commit. What it closes is every failure raised INSIDE the erasure: both transactions
+     * roll back. What remains is a failure during the commit sequence itself, where the inner
+     * connection has committed and the outer then fails. The surviving state is the one this class
+     * already prefers everywhere else — the account is unreachable rather than half-erased and still
+     * usable — but the leftover rows are real, and `lukk:prune` is what sweeps them.
+     */
+    private function disposeOf(Authenticatable $user): void
+    {
+        $disposal = Lukk::$deleteUserUsing ?? self::defaultDisposal(...);
+
+        // A consumer's provider need not be Eloquent, and a non-Eloquent user has no connection to
+        // open a transaction on. Nothing to nest — run it as before.
+        if (! $user instanceof Model) {
+            $disposal($user);
+
+            return;
+        }
+
+        $user->getConnection()->transaction(fn () => $disposal($user));
     }
 
     /**
