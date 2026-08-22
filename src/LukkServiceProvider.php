@@ -86,6 +86,9 @@ use Lukk\TwoFactor\Google2FaTotpProvider;
 use PragmaRX\Google2FA\Google2FA;
 use Webauthn\AuthenticatorAttestationResponseValidator;
 
+/**
+ * @phpstan-import-type array<string, mixed> from Lukk
+ */
 class LukkServiceProvider extends ServiceProvider
 {
     public function register(): void

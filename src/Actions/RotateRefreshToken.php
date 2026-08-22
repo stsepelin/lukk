@@ -34,7 +34,7 @@ use RuntimeException;
 class RotateRefreshToken
 {
     /**
-     * @param  array{grace_seconds:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly RefreshTokenRepository $repository,

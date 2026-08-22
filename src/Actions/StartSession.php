@@ -19,7 +19,7 @@ use RuntimeException;
 class StartSession
 {
     /**
-     * @param  array{refresh_ttl:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly RefreshTokenRepository $repository,

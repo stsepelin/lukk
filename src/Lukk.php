@@ -359,6 +359,16 @@ class Lukk
      * The resolved config for a guard: the top-level `lukk` block for the default guard, or a
      * `guards.{name}` override deep-merged over it. `null` resolves the current guard.
      *
+     * READ EVERY KEY DEFENSIVELY. The returned array is deliberately typed `array<string, mixed>`
+     * rather than a precise shape, because no shape can be honest here: `mergeConfigDeep()` backfills
+     * the package defaults, but it early-returns when `configurationIsCached()` — the production norm,
+     * and pinned by ConfigMergeTest. An app that ran `config:cache` on one version and upgrades to one
+     * that adds a key gets NO backfill; the cached array is the final word.
+     *
+     * A previous revision declared the keys required and ~14 `?? default` fallbacks were deleted on
+     * the strength of it. That turned a degraded-but-working install into a hard 500, one of them
+     * inside `boot()` — the whole application, not just the auth routes.
+     *
      * @return array<string, mixed>
      */
     public static function guardConfig(?string $name = null): array

@@ -22,7 +22,7 @@ class ChallengeToken
     private readonly KeyRing $keys;
 
     /**
-     * @param  array{secret:string,algorithm:string,issuer:string,audience:string,leeway:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly array $config,
@@ -146,7 +146,7 @@ class ChallengeToken
 
     private function headerType(string $token): ?string
     {
-        $header = json_decode(base64_decode(strtr(explode('.', $token)[0] ?? '', '-_', '+/')) ?: '{}');
+        $header = json_decode(base64_decode(strtr(explode('.', $token)[0], '-_', '+/')) ?: '{}');
 
         return $header->typ ?? null;
     }

@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace Lukk\Console;
 
 use Illuminate\Console\Command;
+use Lukk\Console\Concerns\ReadsStringInput;
 
 class GenerateSecretCommand extends Command
 {
+    use ReadsStringInput;
+
     protected $signature = 'lukk:secret
         {--guard= : Generate the secret for a specific guard (writes LUKK_<GUARD>_SECRET)}
         {--show : Display the generated secret instead of writing it to the .env file}
@@ -32,7 +35,7 @@ class GenerateSecretCommand extends Command
             return self::FAILURE;
         }
 
-        $this->laravel['config'][$configKey] = $key;
+        $this->laravel->make('config')->set($configKey, $key);
 
         $this->components->info('Lukk signing secret set successfully.');
 
@@ -47,7 +50,7 @@ class GenerateSecretCommand extends Command
      */
     protected function target(): array
     {
-        $guard = (string) ($this->option('guard') ?? '');
+        $guard = $this->stringOption('guard');
 
         if ($guard === '') {
             return ['LUKK_SECRET', 'lukk.secret'];
@@ -60,7 +63,7 @@ class GenerateSecretCommand extends Command
 
     protected function setSecretInEnvironmentFile(string $key, string $envVar, string $configKey): bool
     {
-        $current = (string) ($this->laravel['config'][$configKey] ?? '');
+        $current = (string) ($this->laravel->make('config')->get($configKey) ?? '');
 
         if ($current !== '' && ! $this->option('force')
             && ! $this->confirm('A Lukk secret already exists. Overwrite it?')) {
@@ -76,6 +79,17 @@ class GenerateSecretCommand extends Command
         }
 
         $contents = file_get_contents($path);
+
+        // Unreachable in a booted Laravel app — `HandleExceptions` promotes the E_WARNING on the
+        // line above into an ErrorException before this runs — but `file_get_contents` is still
+        // `string|false` to a type checker, and every call below needs a string.
+        // @codeCoverageIgnoreStart
+        if ($contents === false) {
+            $this->components->error("Could not read [{$path}].");
+
+            return false;
+        }
+        // @codeCoverageIgnoreEnd
 
         if (preg_match("/^{$envVar}=/m", $contents) === 1) {
             $contents = preg_replace("/^{$envVar}=.*$/m", "{$envVar}={$key}", $contents);

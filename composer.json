@@ -31,7 +31,8 @@
         "pestphp/pest": "^4.0",
         "pragmarx/google2fa": "^9.0",
         "web-auth/webauthn-lib": "^5.0",
-        "pronin/webauthn-emulator": "^1.2.2"
+        "pronin/webauthn-emulator": "^1.2.2",
+        "larastan/larastan": "^3.10"
     },
     "suggest": {
         "pragmarx/google2fa": "Required for the two-factor (TOTP) feature — enable features.two_factor.",

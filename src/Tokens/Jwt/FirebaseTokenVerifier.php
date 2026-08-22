@@ -24,7 +24,7 @@ class FirebaseTokenVerifier implements TokenVerifier
     private readonly KeyRing $keys;
 
     /**
-     * @param  array{algorithm:string,secret:string,issuer:string,audience:string|array<int,string>,leeway:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly array $config,

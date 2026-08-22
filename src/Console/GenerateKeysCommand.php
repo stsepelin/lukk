@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Console;
 
 use Illuminate\Console\Command;
+use Lukk\Console\Concerns\ReadsStringInput;
 
 /**
  * Generate an asymmetric signing keypair for RS256/ES256 — the sibling to
@@ -14,6 +15,8 @@ use Illuminate\Console\Command;
  */
 class GenerateKeysCommand extends Command
 {
+    use ReadsStringInput;
+
     protected $signature = 'lukk:keygen
         {--algorithm=RS256 : RS256 (RSA-2048) or ES256 (EC P-256)}
         {--kid= : Key id to label the key (default: a random id)}';
@@ -22,7 +25,7 @@ class GenerateKeysCommand extends Command
 
     public function handle(): int
     {
-        $algorithm = strtoupper((string) $this->option('algorithm'));
+        $algorithm = strtoupper($this->stringOption('algorithm'));
 
         $spec = match ($algorithm) {
             'RS256' => ['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA],
@@ -44,8 +47,20 @@ class GenerateKeysCommand extends Command
             return self::FAILURE; // @codeCoverageIgnore
         }
 
-        $public = openssl_pkey_get_details($resource)['key'];
-        $kid = (string) ($this->option('kid') ?: 'k'.bin2hex(random_bytes(4)));
+        $details = openssl_pkey_get_details($resource);
+
+        // `false` on a key openssl cannot introspect. Indexing it would fatal on the line that is
+        // supposed to be HANDING the operator their new key.
+        // @codeCoverageIgnoreStart
+        if ($details === false || ! isset($details['key'])) {
+            $this->components->error('Could not read the generated key.');
+
+            return self::FAILURE;
+        }
+        // @codeCoverageIgnoreEnd
+
+        $public = (string) $details['key'];
+        $kid = $this->stringOption('kid') !== '' ? $this->stringOption('kid') : 'k'.bin2hex(random_bytes(4));
 
         $this->components->info("Generated an {$algorithm} keypair (kid: {$kid}).");
         $this->newLine();

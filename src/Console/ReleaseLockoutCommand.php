@@ -7,6 +7,7 @@ namespace Lukk\Console;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Lukk\Auth\LoginRateLimiter;
+use Lukk\Console\Concerns\ReadsStringInput;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
 
@@ -16,6 +17,8 @@ use Lukk\Lukk;
  */
 class ReleaseLockoutCommand extends Command
 {
+    use ReadsStringInput;
+
     protected $signature = 'lukk:release
         {subject : The identifier that was locked (or the user id, for a two-factor or confirm lock)}
         {--purpose=login : Which authenticator to release — login, two_factor or confirm}
@@ -30,7 +33,7 @@ class ReleaseLockoutCommand extends Command
 
     public function handle(LockoutRepository $lockouts): int
     {
-        $purpose = (string) $this->option('purpose');
+        $purpose = $this->stringOption('purpose');
 
         if (! in_array($purpose, ['login', 'two_factor', 'confirm'], true)) {
             $this->components->error('--purpose must be "login", "two_factor" or "confirm".');
@@ -40,25 +43,25 @@ class ReleaseLockoutCommand extends Command
 
         // Locks are stamped with the guard that recorded them, so releasing has to name the same
         // one — defaulting to null would silently no-op on a single-guard app.
-        $guard = ((string) ($this->option('guard') ?? '')) !== '' ? (string) $this->option('guard') : Lukk::currentGuard();
+        $guard = $this->stringOption('guard') !== '' ? $this->stringOption('guard') : Lukk::currentGuard();
 
         // The operator pastes whatever the support ticket says — an address for `login`, a user id
         // for the others — so the command has to derive the same subject the failure path recorded.
         // `two_factor` and `confirm` key on the USER ID verbatim: lower-casing those would break a
         // ULID (uppercase Crockford base32) wherever comparison is binary (PostgreSQL, SQLite).
         $subject = $purpose === 'login'
-            ? $this->loginSubject((string) $this->argument('subject'), $guard)
-            : trim((string) $this->argument('subject'));
+            ? $this->loginSubject($this->stringArgument('subject'), $guard)
+            : $this->stringArgument('subject');
 
         // `release()` fires AccountReleased itself, so every path (success, reset, console, expiry)
         // reports through one place rather than only this one.
         if ($lockouts->release($purpose, $subject, $guard) === 0) {
-            $this->components->warn(sprintf('No %s lock found for [%s] on guard [%s].', $purpose, trim((string) $this->argument('subject')), $guard));
+            $this->components->warn(sprintf('No %s lock found for [%s] on guard [%s].', $purpose, $this->stringArgument('subject'), $guard));
 
             return self::FAILURE;
         }
 
-        $this->components->info(sprintf('Released the %s lock on [%s].', $purpose, trim((string) $this->argument('subject'))));
+        $this->components->info(sprintf('Released the %s lock on [%s].', $purpose, $this->stringArgument('subject')));
 
         return self::SUCCESS;
     }

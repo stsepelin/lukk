@@ -150,6 +150,15 @@ class KeyRing
 
         $details = openssl_pkey_get_details($public);
 
+        // `false` on a key openssl cannot introspect. Not strictly load-bearing — `$type` below is
+        // read with `?? null` and `false['type']` is null without a warning, so the old code already
+        // reached the `null` return — but stating it up front beats relying on that coincidence.
+        // @codeCoverageIgnoreStart
+        if ($details === false) {
+            return null;
+        }
+        // @codeCoverageIgnoreEnd
+
         // Branch on the KEY's type, not on the configured algorithm. Trusting the algorithm meant a
         // mismatched keypair (an RSA PEM under ES256) indexed `$details['ec']` on an RSA key and
         // published a structurally invalid JWK — `{"kty":"EC","crv":"","x":"","y":""}` — instead of
@@ -163,22 +172,43 @@ class KeyRing
             // field length, left-padded — else a ~1/256 short coordinate breaks strict
             // JWKS consumers.
             $curves = ['prime256v1' => ['P-256', 32], 'secp384r1' => ['P-384', 48], 'secp521r1' => ['P-521', 66]];
-            [$crv, $size] = $curves[$details['ec']['curve_name']] ?? [(string) $details['ec']['curve_name'], null];
+            /** @var array{curve_name?: string, x?: string, y?: string} $ec */
+            $ec = $details['ec'] ?? [];
+
+            // Defaulting these to `''` would publish `{"kty":"EC","crv":"P-256","x":"AAAA…"}` — the
+            // all-zero point, which is not on the curve — i.e. exactly the "structurally invalid JWK
+            // instead of failing" the comment above rejects. `null` is the contract.
+            // @codeCoverageIgnoreStart
+            if (! isset($ec['curve_name'], $ec['x'], $ec['y'])) {
+                return null;
+            }
+            // @codeCoverageIgnoreEnd
+
+            [$crv, $size] = $curves[$ec['curve_name']] ?? [(string) $ec['curve_name'], null];
             $pad = fn (string $coord): string => $size === null ? $coord : str_pad($coord, $size, "\0", STR_PAD_LEFT);
 
             return [
                 'kty' => 'EC',
                 'crv' => $crv,
-                'x' => $this->base64Url($pad($details['ec']['x'])),
-                'y' => $this->base64Url($pad($details['ec']['y'])),
+                'x' => $this->base64Url($pad($ec['x'])),
+                'y' => $this->base64Url($pad($ec['y'])),
             ];
         }
 
         if ($type === OPENSSL_KEYTYPE_RSA && str_starts_with($this->config['algorithm'], 'RS')) {
+            /** @var array{n?: string, e?: string} $rsa */
+            $rsa = $details['rsa'] ?? [];
+
+            // @codeCoverageIgnoreStart
+            if (! isset($rsa['n'], $rsa['e'])) {
+                return null;
+            }
+            // @codeCoverageIgnoreEnd
+
             return [
                 'kty' => 'RSA',
-                'n' => $this->base64Url($details['rsa']['n']),
-                'e' => $this->base64Url($details['rsa']['e']),
+                'n' => $this->base64Url($rsa['n']),
+                'e' => $this->base64Url($rsa['e']),
             ];
         }
 

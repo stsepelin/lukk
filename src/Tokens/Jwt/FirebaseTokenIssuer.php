@@ -20,7 +20,7 @@ class FirebaseTokenIssuer implements TokenIssuer
     private readonly KeyRing $keys;
 
     /**
-     * @param  array{algorithm:string,secret:string,issuer:string,audience:string|array<int,string>,access_ttl:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(private readonly array $config)
     {

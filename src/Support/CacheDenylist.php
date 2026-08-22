@@ -18,7 +18,7 @@ class CacheDenylist implements DenylistContract
     private readonly Repository $store;
 
     /**
-     * @param  array{denylist_store:?string,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(array $config)
     {
