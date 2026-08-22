@@ -178,10 +178,10 @@ it('reads a Collection with all() but any other Arrayable with toArray()', funct
     };
 
     Lukk::abilitiesUsing(fn () => $arrayable);
-    notNull(expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.read']);
+    expect(notNull(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.read']);
 
     Lukk::abilitiesUsing(fn () => collect(['orders.write']));
-    notNull(expect(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.write']);
+    expect(notNull(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.write']);
 
     Lukk::$abilitiesUsing = null;
 });

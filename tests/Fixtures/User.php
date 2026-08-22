@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Tests\Fixtures;
 
 use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -27,7 +28,9 @@ use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;
  */
 class User extends Authenticatable implements HasTokenAbilitiesContract, MustVerifyEmail
 {
+    /** @use HasFactory<Factory<static>> */
     use HasFactory;
+
     use HasRefreshTokens;
     use HasTokenAbilities;
     use HasTwoFactorAuthentication;
@@ -36,6 +39,18 @@ class User extends Authenticatable implements HasTokenAbilitiesContract, MustVer
     protected $table = 'users';
 
     protected $guarded = [];
+
+    /**
+     * Without these the `@property ?Carbon` declarations above are a LIE — Eloquent hands back a
+     * raw string and the analyser would happily accept `->addDays()` on it. A real application's
+     * User model casts these; the fixture should behave the same.
+     *
+     * @var array<string, string>
+     */
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'two_factor_confirmed_at' => 'datetime',
+    ];
 
     protected $hidden = ['password'];
 

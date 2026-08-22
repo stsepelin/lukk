@@ -30,7 +30,14 @@ class ChallengeTwoFactor
         }
 
         /** @var Authenticatable&TwoFactorAuthenticatable $user */
-        $secret = (string) $user->twoFactorSecret();   // `enabled()` above proved it is set
+        // Refuse rather than cast. `(string) null` is `''`, which the bundled provider rejects but a
+        // custom `TwoFactorProvider` need not — turning "the secret could not be decrypted" (an
+        // APP_KEY rotation with a swallowed DecryptException) into a successful challenge.
+        $secret = $user->twoFactorSecret();
+
+        if ($secret === null) {
+            $this->fail();
+        }
 
         if ($code !== null && $code !== '' && $this->totp->verify($secret, $code)) {
             return $user;

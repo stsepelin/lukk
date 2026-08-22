@@ -588,8 +588,11 @@ class LukkServiceProvider extends ServiceProvider
 
         $resolved = $this->app->make('auth')->createUserProvider($provider);
 
-        // Null only when the named provider is not configured at all. lukk refuses to boot a guard
-        // in that state (`assertGuardsIsolated`), so by here it always resolves.
+        // Null only when the named provider is not configured at all — a typo in `auth.providers`.
+        // Nothing validates that at boot (`assertGuardsIsolated` checks driver/audience/path/domain,
+        // NOT provider names), so this is a genuine assertion rather than a restatement of an
+        // earlier guard. With assertions compiled out it degrades to a TypeError on the return,
+        // which is the same loud failure one frame later.
         assert($resolved !== null);
 
         return $resolved;

@@ -5,8 +5,11 @@ declare(strict_types=1);
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\ValidationException;
+use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Models\Lockout;
+use Lukk\Tests\Fixtures\UndecryptableTwoFactorUser;
 use Lukk\Tests\Fixtures\User;
 use PragmaRX\Google2FA\Google2FA;
 
@@ -413,4 +416,15 @@ it('refuses to re-enrol over confirmed two-factor instead of silently disabling 
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
         ->assertOk()->assertJson(['two_factor' => true]);
+});
+
+it('refuses a challenge when the second-factor secret cannot be read', function () {
+    // `(string) null` is `''`. The bundled provider rejects an empty key, but a custom
+    // `TwoFactorProvider` need not — so casting turned "the secret could not be decrypted" into a
+    // SUCCESSFUL challenge. Refuse instead: an unreadable secret is not a passing second factor.
+    config(['auth.providers.users.model' => UndecryptableTwoFactorUser::class]);
+    $user = UndecryptableTwoFactorUser::factory()->create();
+
+    expect(fn () => app(ChallengeTwoFactor::class)($user->getKey(), '000000', null))
+        ->toThrow(ValidationException::class);
 });

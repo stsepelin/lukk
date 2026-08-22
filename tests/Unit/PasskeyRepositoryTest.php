@@ -46,7 +46,7 @@ it('updates the sign count', function () {
     passkeys()->store(7, new NewPasskey('a', 'k', 5));
     passkeys()->updateSignCount('a', 9);
 
-    notNull(expect(passkeys()->findByCredentialId('a'))->signCount)->toBe(9);
+    expect(notNull(passkeys()->findByCredentialId('a'))->signCount)->toBe(9);
 });
 
 it('enforces global credential-id uniqueness', function () {

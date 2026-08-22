@@ -39,7 +39,7 @@ it('mints no scope claim until abilities are configured', function () {
     // An install that never opts in keeps byte-identical tokens.
     $pair = User::factory()->create()->startSession();
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 });
 
 it('mints the granted abilities as a space-delimited scope claim', function () {
@@ -189,7 +189,7 @@ it('lets an empty grant ERASE a scope a claims hook set', function () {
 
     $pair = User::factory()->create()->startSession();
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 
     Lukk::$tokenClaimsUsing = null;
 });
@@ -463,14 +463,14 @@ it('keeps a grant pinned to NOTHING pinned, instead of widening it on refresh', 
     Lukk::abilitiesUsing(fn () => ['*']);
     $pair = start()(User::factory()->create()->getKey(), [], []);
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 
     $rotated = rotate()($pair->refreshToken);
-    expect((array) verifier()->verify($rotated->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($rotated->accessToken))->not->toHaveKey('scope');
 
     // ...and it stays pinned across a second rotation, not just the first.
     $again = rotate()($rotated->refreshToken);
-    expect((array) verifier()->verify($again->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($again->accessToken))->not->toHaveKey('scope');
 });
 
 it('round-trips a pinned-empty grant as "" and never as null', function () {
@@ -717,7 +717,7 @@ it('does not let a claims hook own scope when the layer is on but has no callbac
     $pair = User::factory()->create()->startSession();
     Lukk::$tokenClaimsUsing = null;
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
     $this->withToken($pair->accessToken)->getJson('/_test/any')->assertStatus(403);
 });
 
@@ -821,7 +821,7 @@ it('never gates an ordinary session, with or without abilities configured', func
     app('auth')->forgetGuards();
 
     $plain = User::factory()->create()->startSession();
-    expect((array) verifier()->verify($plain->accessToken))->not->toHaveKey('pin');
+    expect((array) claims($plain->accessToken))->not->toHaveKey('pin');
     $this->withToken($plain->accessToken)->deleteJson('/auth/sessions')->assertSuccessful();
 });
 
@@ -844,7 +844,7 @@ it('marks only a pinned grant with the pin claim', function () {
     $derived = User::factory()->create()->startSession();
     $pinned = start()(User::factory()->create()->getKey(), [], ['orders.read']);
 
-    expect((array) verifier()->verify($derived->accessToken))->not->toHaveKey('pin')
+    expect((array) claims($derived->accessToken))->not->toHaveKey('pin')
         ->and(claims($pinned->accessToken)->pin)->toBeTrue();
 });
 
@@ -868,7 +868,7 @@ it('does not let a claims hook mark an ordinary session as a machine token', fun
     $pair = User::factory()->create()->startSession();
     Lukk::$tokenClaimsUsing = null;
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('pin');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('pin');
     $this->withToken($pair->accessToken)->deleteJson('/auth/sessions')->assertSuccessful();
 });
 
@@ -1039,7 +1039,7 @@ it('falls back to the database when a custom issuer forgets to stamp the pin cla
         abilities: Abilities::fromArray(['ci.deploy']),
     );
 
-    expect((array) verifier()->verify($forgetful['token']))->not->toHaveKey('pin');
+    expect((array) claims($forgetful['token']))->not->toHaveKey('pin');
 
     $this->withToken($forgetful['token'])->deleteJson('/auth/sessions')->assertStatus(403);
 });
