@@ -7,9 +7,9 @@ namespace Lukk\Tests\Fixtures;
 /**
  * Reports two-factor as ENABLED while its secret cannot be read.
  *
- * The realistic shape is an `APP_KEY` rotation: the encrypted column is still populated, so an
- * app-level `hasEnabledTwoFactor()` says yes, but decryption fails and the accessor returns null.
- * A cast of that null to `''` would hand an empty secret to the TOTP provider.
+ * This is the CONSUMER-OVERRIDE shape: an accessor that returns null rather than throwing. The
+ * bundled trait cannot produce it — `Crypt::decryptString()` throws `DecryptException` on a stale
+ * APP_KEY — so the throwing case is covered separately, against a real mis-encrypted column.
  */
 class UndecryptableTwoFactorUser extends User
 {

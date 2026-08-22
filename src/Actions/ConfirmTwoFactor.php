@@ -22,7 +22,9 @@ class ConfirmTwoFactor
     {
         $secret = $user->twoFactorSecret();
 
-        if ($secret === null || ! $this->totp->verify($secret, $code)) {
+        // `''` as well as null — see `ChallengeTwoFactor`: an empty key reaches a permissive
+        // custom provider and confirms enrolment from an arbitrary code.
+        if ($secret === null || $secret === '' || ! $this->totp->verify($secret, $code)) {
             throw ValidationException::withMessages(['code' => [__('The provided two-factor code was invalid.')]]);
         }
 

@@ -30,19 +30,25 @@ class ChallengeTwoFactor
         }
 
         /** @var Authenticatable&TwoFactorAuthenticatable $user */
-        $secret = $user->twoFactorSecret();
-
-        // `$secret !== null` gates the TOTP branch ONLY, and must not be hoisted above it. Passing
-        // `(string) null` to the provider is the hazard — `''` is rejected by the bundled provider
-        // but a custom `TwoFactorProvider` need not, so an unreadable secret (an APP_KEY rotation
-        // with a swallowed DecryptException) would verify as a successful challenge.
+        // Resolved LAZILY, inside the TOTP branch. Reading it eagerly threw on the very case this
+        // guard exists for: the bundled trait decrypts, and `Crypt::decryptString()` THROWS
+        // `DecryptException` on a stale APP_KEY rather than returning null — so an eager read never
+        // reached the recovery branch at all. It also escaped `VerifyTwoFactorChallenge`, which
+        // catches only `ValidationException`, leaving the reserved lockout slot un-released: a 500
+        // per attempt and a permanent lock.
         //
-        // Refusing EARLY is the opposite mistake, and worse: recovery codes exist for exactly the
-        // case where the authenticator is unusable, which includes the server being unable to read
-        // the secret. Their verification does not touch the secret, so a null one must still fall
-        // through to them rather than lock the account out of its own escape hatch.
-        if ($code !== null && $code !== '' && $secret !== null && $this->totp->verify($secret, $code)) {
-            return $user;
+        // A recovery-only attempt must never touch the secret. That is the whole point of recovery
+        // codes — the authenticator is unusable, and "the server cannot read your secret" is one of
+        // the ways that happens.
+        if ($code !== null && $code !== '') {
+            $secret = $this->secretOf($user);
+
+            // `''` as well as null: an empty key is what the old `(string) null` cast produced, the
+            // bundled provider rejects it but a custom `TwoFactorProvider` need not, and a consumer
+            // catching `DecryptException` and returning `''` is the obvious reflex.
+            if ($secret !== null && $secret !== '' && $this->totp->verify($secret, $code)) {
+                return $user;
+            }
         }
 
         if ($recoveryCode !== null && $recoveryCode !== '' && $user->useRecoveryCode($recoveryCode)) {
@@ -50,6 +56,28 @@ class ChallengeTwoFactor
         }
 
         $this->fail();
+    }
+
+    /**
+     * The TOTP secret, or null when it cannot be read.
+     *
+     * `twoFactorSecret()` is consumer-overridable and the bundled implementation decrypts, so it can
+     * throw as easily as it can return null. Both mean the same thing here — no usable second factor
+     * — and neither may take down the recovery path.
+     *
+     * Typed `Authenticatable` at RUNTIME, narrowed only in PHPDoc: `TwoFactorAuthenticatable` is a
+     * documentation contract, and a consumer whose model uses the trait without implementing the
+     * interface must keep working. Hinting it here broke exactly that.
+     *
+     * @param  Authenticatable&TwoFactorAuthenticatable  $user
+     */
+    private function secretOf(Authenticatable $user): ?string
+    {
+        try {
+            return $user->twoFactorSecret();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function enabled(Authenticatable $user): bool

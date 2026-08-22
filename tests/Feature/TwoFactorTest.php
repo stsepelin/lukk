@@ -3,12 +3,15 @@
 declare(strict_types=1);
 
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
+use Lukk\Actions\ConfirmTwoFactor;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Models\Lockout;
+use Lukk\Tests\Fixtures\PermissiveTotpProvider;
 use Lukk\Tests\Fixtures\UndecryptableTwoFactorUser;
 use Lukk\Tests\Fixtures\User;
 use PragmaRX\Google2FA\Google2FA;
@@ -440,4 +443,72 @@ it('still accepts a recovery code when the second-factor secret cannot be read',
     $resolved = app(ChallengeTwoFactor::class)($user->getKey(), null, $codes[0]);
 
     expect($resolved->getAuthIdentifier())->toBe($user->getKey());
+});
+
+it('falls through to a recovery code when the real secret cannot be DECRYPTED', function () {
+    // The bundled trait decrypts, and `Crypt::decryptString()` THROWS on a stale APP_KEY — it never
+    // returns null. An earlier fix read the secret eagerly and guarded on null, so this case threw
+    // before the recovery branch: a 500 per attempt, and because `VerifyTwoFactorChallenge` catches
+    // only ValidationException the reserved lockout slot was never released, locking the account
+    // permanently out of the very escape hatch recovery codes exist to be.
+    //
+    // No override, no custom accessor — a genuinely mis-encrypted column, which is what an APP_KEY
+    // rotation leaves behind.
+    $user = User::factory()->create();
+    $codes = $user->generateRecoveryCodes(8);
+    $user->forceFill([
+        'two_factor_secret' => 'not-a-valid-ciphertext',
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    expect(fn () => $user->twoFactorSecret())->toThrow(DecryptException::class);
+
+    $resolved = app(ChallengeTwoFactor::class)($user->getKey(), null, $codes[0]);
+
+    expect($resolved->getAuthIdentifier())->toBe($user->getKey());
+});
+
+it('refuses a TOTP code when the real secret cannot be decrypted', function () {
+    // The other half: unreadable must never authenticate via TOTP either.
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => 'not-a-valid-ciphertext',
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    expect(fn () => app(ChallengeTwoFactor::class)($user->getKey(), '000000', null))
+        ->toThrow(ValidationException::class);
+});
+
+it('refuses an EMPTY secret, not just a null one', function () {
+    // `''` is exactly what the deleted `(string) null` cast produced, so guarding only on null moves
+    // the hole rather than closing it. Reachable two ways: a provider whose `generateSecret()`
+    // returns '', and the common reflex of catching DecryptException and returning ''. The bundled
+    // provider rejects '' — which is the ONLY reason this was never exploitable in-tree — but
+    // `TwoFactorProvider` is a swap seam, so the guarantee cannot live there.
+    app()->instance(TwoFactorProvider::class, new PermissiveTotpProvider);
+
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString(''),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    expect($user->twoFactorSecret())->toBe('')
+        ->and(fn () => app(ChallengeTwoFactor::class)($user->getKey(), 'literally-anything', null))
+        ->toThrow(ValidationException::class);
+});
+
+it('refuses to CONFIRM enrolment on an empty secret', function () {
+    // Same hole on the enrolment path: an empty secret plus a permissive provider would stamp
+    // `two_factor_confirmed_at` from an arbitrary code, marking the account as protected by a second
+    // factor that verifies anything.
+    app()->instance(TwoFactorProvider::class, new PermissiveTotpProvider);
+
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => Crypt::encryptString('')])->save();
+
+    expect(fn () => app(ConfirmTwoFactor::class)($user, 'literally-anything'))
+        ->toThrow(ValidationException::class)
+        ->and($user->refresh()->two_factor_confirmed_at)->toBeNull();
 });
