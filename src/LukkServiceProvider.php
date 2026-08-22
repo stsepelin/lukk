@@ -13,6 +13,7 @@ use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\Facades\Auth;
@@ -86,9 +87,6 @@ use Lukk\TwoFactor\Google2FaTotpProvider;
 use PragmaRX\Google2FA\Google2FA;
 use Webauthn\AuthenticatorAttestationResponseValidator;
 
-/**
- * @phpstan-import-type array<string, mixed> from Lukk
- */
 class LukkServiceProvider extends ServiceProvider
 {
     public function register(): void
@@ -495,7 +493,7 @@ class LukkServiceProvider extends ServiceProvider
     }
 
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
-    private function lockouts($app): ?LockoutRepository
+    private function lockouts(Application $app): ?LockoutRepository
     {
         return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
     }
@@ -585,7 +583,7 @@ class LukkServiceProvider extends ServiceProvider
      * guard reuses its `config/auth.php` provider (single source of truth) — so lukk never
      * duplicates the provider, and login resolves the right table per guard.
      */
-    private function userProviderFor(string $guard): ?UserProvider
+    private function userProviderFor(string $guard): UserProvider
     {
         $config = $this->app->make('config');
 
@@ -593,7 +591,13 @@ class LukkServiceProvider extends ServiceProvider
             ? ($this->config()['user_provider'] ?? null)
             : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? null);
 
-        return $this->app->make('auth')->createUserProvider($provider);
+        $resolved = $this->app->make('auth')->createUserProvider($provider);
+
+        // Null only when the named provider is not configured at all. lukk refuses to boot a guard
+        // in that state (`assertGuardsIsolated`), so by here it always resolves.
+        assert($resolved !== null);
+
+        return $resolved;
     }
 
     /**
@@ -606,6 +610,9 @@ class LukkServiceProvider extends ServiceProvider
     {
         $provider = $this->config()['user_provider'] ?? 'users';
 
-        return (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
+        /** @var class-string $model */
+        $model = (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
+
+        return $model;
     }
 }

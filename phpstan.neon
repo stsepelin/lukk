@@ -17,4 +17,4 @@ parameters:
         -
             identifier: function.alreadyNarrowedType
             path: src/LukkServiceProvider.php
-            message: '#addToMiddlewarePriority#'
+            message: '#method_exists\(\) with .* will always evaluate to true#'
