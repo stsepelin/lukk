@@ -16,7 +16,7 @@ class RequireAllAbilities
 
     public function handle(Request $request, Closure $next, string ...$abilities): Response
     {
-        $this->authorize($request, $abilities, requireAll: true);
+        $this->authorize($request, array_values($abilities), requireAll: true);
 
         return $next($request);
     }

@@ -7,6 +7,7 @@ namespace Lukk\Http\Controllers;
 use Illuminate\Http\Request;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\LogoutResponse;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 
 /**
  * The user's session collection: `destroy` revokes every session (all devices),
@@ -14,13 +15,15 @@ use Lukk\Contracts\LogoutResponse;
  */
 class SessionController
 {
+    use ResolvesAuthenticatedUser;
+
     public function __construct(
         private readonly RevokeAllSessions $revokeAll,
     ) {}
 
     public function destroy(Request $request): LogoutResponse
     {
-        ($this->revokeAll)($request->user()->getAuthIdentifier());
+        ($this->revokeAll)($this->authenticated($request)->getAuthIdentifier());
 
         return app(LogoutResponse::class);
     }

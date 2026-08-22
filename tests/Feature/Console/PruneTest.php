@@ -20,7 +20,7 @@ it('prunes expired tokens but keeps active and revoked-but-unexpired ones', func
 
     $this->travel(5)->seconds();
 
-    $this->artisan('lukk:prune')
+    command('lukk:prune')
         ->expectsOutputToContain('Pruned 1 refresh token(s).')
         ->assertSuccessful();
 

@@ -13,7 +13,7 @@ use Lukk\Contracts\RefreshTokenRepository;
 class RevokeAllSessions
 {
     /**
-     * @param  array{access_ttl:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly RefreshTokenRepository $repository,

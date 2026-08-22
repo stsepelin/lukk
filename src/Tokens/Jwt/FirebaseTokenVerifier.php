@@ -24,7 +24,7 @@ class FirebaseTokenVerifier implements TokenVerifier
     private readonly KeyRing $keys;
 
     /**
-     * @param  array{algorithm:string,secret:string,issuer:string,audience:string|array<int,string>,leeway:int,...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly array $config,
@@ -33,6 +33,7 @@ class FirebaseTokenVerifier implements TokenVerifier
         $this->keys = new KeyRing($config);
     }
 
+    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed})|null */
     public function verify(string $jwt): ?object
     {
         JWT::$leeway = $this->config['leeway'];
@@ -78,6 +79,7 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
+        /** @var (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}) $claims */
         return $claims;
     }
 }

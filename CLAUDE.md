@@ -27,6 +27,8 @@ php artisan lukk:prune                            # delete expired/revoked refre
 ## Security invariants — do not break
 
 - **One runtime dependency** (`firebase/php-jwt`). Never hand-roll JWS, TOTP, or WebAuthn. The 2FA/passkey libs are the only sanctioned extra deps — `suggest` + `require-dev`, gated behind `features.two_factor`/`features.passkeys`, never autoloaded unless enabled.
+- **No `lukk` config key is guaranteed at runtime — always read with a `?? default`.** The provider deep-merges (`mergeConfigDeep`) so a stale published config is backfilled, but that method **early-returns when `configurationIsCached()`**, which is the production norm and is pinned by `tests/Unit/ConfigMergeTest.php`. An app that ran `config:cache` on one version and upgrades to one that adds a key gets **no backfill at all**. `Lukk::guardConfig()` is therefore typed `array<string, mixed>` on purpose, never a precise `array{...}` shape. Deleting the `??` defaults on the strength of such a shape turned a degraded-but-working install into a hard 500 — one of them inside `boot()`, so the whole application rather than just the auth routes.
+
 - **Alg pinning:** always decode with an explicit algorithm; reject `alg=none` and alg-mismatch. Validate `iss`/`aud`/`exp`/`nbf` every request.
 - Refresh tokens are **opaque**, stored only as `sha256`, never logged, never serialized into any client bundle/hydration payload.
 - Rotation + reuse detection are the point — **post-grace replay must revoke the whole family**. A false-positive family revoke under normal concurrency is a release blocker; TDD the rotate policy.

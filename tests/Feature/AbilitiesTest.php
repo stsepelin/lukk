@@ -39,14 +39,14 @@ it('mints no scope claim until abilities are configured', function () {
     // An install that never opts in keeps byte-identical tokens.
     $pair = User::factory()->create()->startSession();
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 });
 
 it('mints the granted abilities as a space-delimited scope claim', function () {
     Lukk::abilitiesUsing(fn () => ['orders.read', 'orders.write']);
     $pair = User::factory()->create()->startSession();
 
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('orders.read orders.write');
+    expect(claims($pair->accessToken)->scope)->toBe('orders.read orders.write');
 });
 
 it('lets a token through when it holds ANY of the required abilities', function () {
@@ -95,8 +95,8 @@ it('exposes the TOKEN\'s abilities on the user, not the user\'s', function () {
     $access = $user->startSession()->accessToken;
 
     Route::middleware('auth:api')->get('/_test/can', fn () => response()->json([
-        'read' => request()->user()->tokenCan('orders.read'),
-        'write' => request()->user()->tokenCan('orders.write'),
+        'read' => actor()->tokenCan('orders.read'),
+        'write' => actor()->tokenCan('orders.write'),
     ]));
 
     $this->withToken($access)->getJson('/_test/can')
@@ -110,12 +110,12 @@ it('re-derives abilities on refresh, so a revoked one expires with the access to
     // they are not stored on the family row.
     Lukk::abilitiesUsing(fn () => ['orders.read', 'orders.write']);
     $pair = User::factory()->create()->startSession();
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('orders.read orders.write');
+    expect(claims($pair->accessToken)->scope)->toBe('orders.read orders.write');
 
     Lukk::abilitiesUsing(fn () => ['orders.read']);
     $rotated = rotate()($pair->refreshToken);
 
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('orders.read');
+    expect(claims($rotated->accessToken)->scope)->toBe('orders.read');
 });
 
 it('refuses an unauthenticated caller before the ability check', function () {
@@ -132,8 +132,8 @@ it('reports tokenCannot, and grants nothing outside an authenticated request', f
         ->and($user->tokenAbilities()->all())->toBe([]);
 
     Route::middleware('auth:api')->get('/_test/cannot', fn () => response()->json([
-        'cannotWrite' => request()->user()->tokenCannot('orders.write'),
-        'cannotRead' => request()->user()->tokenCannot('orders.read'),
+        'cannotWrite' => actor()->tokenCannot('orders.write'),
+        'cannotRead' => actor()->tokenCannot('orders.read'),
     ]));
 
     $this->withToken($user->startSession()->accessToken)->getJson('/_test/cannot')
@@ -147,17 +147,17 @@ it('pins a session\'s own abilities, surviving refresh and ignoring the user\'s 
     $user = User::factory()->create();
     $pair = start()($user->getKey(), [], ['ci.deploy']); // ...this token can do one thing
 
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('ci.deploy');
+    expect(claims($pair->accessToken)->scope)->toBe('ci.deploy');
 
     // And it stays pinned across rotation, even as the user's grant changes underneath. Rotated
     // TWICE deliberately: the grant has to be written onto each successor row, not just read off
     // the parent — carrying it only into the minted token would lose it on the NEXT refresh.
     Lukk::abilitiesUsing(fn () => ['admin.*']);
     $rotated = rotate()($pair->refreshToken);
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('ci.deploy');
+    expect(claims($rotated->accessToken)->scope)->toBe('ci.deploy');
 
     $again = rotate()($rotated->refreshToken);
-    expect(verifier()->verify($again->accessToken)->scope)->toBe('ci.deploy');
+    expect(claims($again->accessToken)->scope)->toBe('ci.deploy');
 });
 
 it('still derives per mint when the session pins nothing', function () {
@@ -169,7 +169,7 @@ it('still derives per mint when the session pins nothing', function () {
     Lukk::abilitiesUsing(fn () => ['orders.read']);
     $rotated = rotate()($pair->refreshToken);
 
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('orders.read');
+    expect(claims($rotated->accessToken)->scope)->toBe('orders.read');
 });
 
 it('refuses a malformed grant loudly instead of minting a wider token', function () {
@@ -189,7 +189,7 @@ it('lets an empty grant ERASE a scope a claims hook set', function () {
 
     $pair = User::factory()->create()->startSession();
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 
     Lukk::$tokenClaimsUsing = null;
 });
@@ -200,7 +200,7 @@ it('does not let a claims hook forge a scope the abilities layer did not grant',
 
     $pair = User::factory()->create()->startSession();
 
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('orders.read');
+    expect(claims($pair->accessToken)->scope)->toBe('orders.read');
 
     Lukk::$tokenClaimsUsing = null;
 });
@@ -334,7 +334,7 @@ it('hands the abilities callback the guard and the family it is minting for', fu
 
     expect($seen)->toBeInstanceOf(TokenContext::class)
         ->and($seen->guard)->toBe(config('lukk.guard'))
-        ->and($seen->familyId)->toBe(verifier()->verify($pair->accessToken)->fid);
+        ->and($seen->familyId)->toBe(claims($pair->accessToken)->fid);
 });
 
 it('lets actingAs stand in for a token, so ability-gated routes are testable', function () {
@@ -361,14 +361,14 @@ it('accepts a Collection from the callback, not just an array', function () {
     // and every refresh — the whole app down on the first request after wiring abilities up.
     Lukk::abilitiesUsing(fn () => collect(['orders.read', 'orders.write']));
 
-    expect(verifier()->verify(User::factory()->create()->startSession()->accessToken)->scope)
+    expect(claims(User::factory()->create()->startSession()->accessToken)->scope)
         ->toBe('orders.read orders.write');
 });
 
 it('accepts a single ability returned bare, without an array around it', function () {
     Lukk::abilitiesUsing(fn () => 'orders.read');
 
-    expect(verifier()->verify(User::factory()->create()->startSession()->accessToken)->scope)
+    expect(claims(User::factory()->create()->startSession()->accessToken)->scope)
         ->toBe('orders.read');
 });
 
@@ -463,14 +463,14 @@ it('keeps a grant pinned to NOTHING pinned, instead of widening it on refresh', 
     Lukk::abilitiesUsing(fn () => ['*']);
     $pair = start()(User::factory()->create()->getKey(), [], []);
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
 
     $rotated = rotate()($pair->refreshToken);
-    expect((array) verifier()->verify($rotated->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($rotated->accessToken))->not->toHaveKey('scope');
 
     // ...and it stays pinned across a second rotation, not just the first.
     $again = rotate()($rotated->refreshToken);
-    expect((array) verifier()->verify($again->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($again->accessToken))->not->toHaveKey('scope');
 });
 
 it('round-trips a pinned-empty grant as "" and never as null', function () {
@@ -485,8 +485,8 @@ it('round-trips a pinned-empty grant as "" and never as null', function () {
     $repo->persist($user->getKey(), 'fam-pinned', null, hash('sha256', 'a'), now()->addDay()->getTimestamp(), '');
     $repo->persist($user->getKey(), 'fam-derived', null, hash('sha256', 'b'), now()->addDay()->getTimestamp(), null);
 
-    expect($repo->findByHashForUpdate(hash('sha256', 'a'))->scope)->toBe('')
-        ->and($repo->findByHashForUpdate(hash('sha256', 'b'))->scope)->toBeNull();
+    expect(notNull($repo->findByHashForUpdate(hash('sha256', 'a')))->scope)->toBe('')
+        ->and(notNull($repo->findByHashForUpdate(hash('sha256', 'b')))->scope)->toBeNull();
 });
 
 it('works on a PAT-only install that never configured a callback', function () {
@@ -498,7 +498,7 @@ it('works on a PAT-only install that never configured a callback', function () {
 
     $pair = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
 
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('ci.deploy');
+    expect(claims($pair->accessToken)->scope)->toBe('ci.deploy');
 
     $this->withToken($pair->accessToken)->getJson('/_test/any')->assertStatus(403);
     app('auth')->forgetGuards();
@@ -556,7 +556,7 @@ it('records the family the token belongs to on the verified token', function () 
     ]));
 
     $this->withToken($pair->accessToken)->getJson('/_test/fid')
-        ->assertJsonPath('fid', verifier()->verify($pair->accessToken)->fid);
+        ->assertJsonPath('fid', claims($pair->accessToken)->fid);
 });
 
 it('still logs in and rotates against a pre-0.6 schema with no scope column', function () {
@@ -567,10 +567,10 @@ it('still logs in and rotates against a pre-0.6 schema with no scope column', fu
     Lukk::abilitiesUsing(fn () => ['orders.read']);
 
     $pair = User::factory()->create()->startSession();
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('orders.read');
+    expect(claims($pair->accessToken)->scope)->toBe('orders.read');
 
     $rotated = rotate()($pair->refreshToken);
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('orders.read');
+    expect(claims($rotated->accessToken)->scope)->toBe('orders.read');
 });
 
 it('honours an explicit pinned grant even with the feature flag off', function () {
@@ -582,7 +582,7 @@ it('honours an explicit pinned grant even with the feature flag off', function (
 
     $pair = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
 
-    expect(verifier()->verify($pair->accessToken)->scope)->toBe('ci.deploy');
+    expect(claims($pair->accessToken)->scope)->toBe('ci.deploy');
 
     $this->withToken($pair->accessToken)->getJson('/_test/any')->assertStatus(403);
 });
@@ -601,7 +601,7 @@ it('announces a refusal, so a token probing gates is visible', function () {
         // this payload, and the caller's entitlement is not lukk's to spread further.
         return $e->required === ['orders.read', 'orders.write']
             && $e->requiresAll === true
-            && $e->familyId === verifier()->verify($pair->accessToken)->fid
+            && $e->familyId === claims($pair->accessToken)->fid
             && ! property_exists($e, 'granted');
     });
 });
@@ -717,7 +717,7 @@ it('does not let a claims hook own scope when the layer is on but has no callbac
     $pair = User::factory()->create()->startSession();
     Lukk::$tokenClaimsUsing = null;
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('scope');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('scope');
     $this->withToken($pair->accessToken)->getJson('/_test/any')->assertStatus(403);
 });
 
@@ -780,8 +780,8 @@ it('refuses a request whose token belongs to someone other than the authenticate
 
     Route::middleware(['auth:web', 'lukk.ability:orders.read'])
         ->get('/_test/subject-gate', fn () => response()->json([
-            'acting_as' => request()->user()->getKey(),
-            'token_can' => request()->user()->tokenCan('orders.read'),
+            'acting_as' => actor()->getKey(),
+            'token_can' => actor()->tokenCan('orders.read'),
         ]));
 
     // Must deny — and must agree with `tokenCan()`, which has always said false for Alice.
@@ -821,7 +821,7 @@ it('never gates an ordinary session, with or without abilities configured', func
     app('auth')->forgetGuards();
 
     $plain = User::factory()->create()->startSession();
-    expect((array) verifier()->verify($plain->accessToken))->not->toHaveKey('pin');
+    expect((array) claims($plain->accessToken))->not->toHaveKey('pin');
     $this->withToken($plain->accessToken)->deleteJson('/auth/sessions')->assertSuccessful();
 });
 
@@ -832,8 +832,8 @@ it('still lets a pinned token end and renew its OWN session', function () {
     $pat = start()($user->getKey(), [], ['ci.deploy']);
 
     $rotated = rotate()($pat->refreshToken);
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('ci.deploy')
-        ->and(verifier()->verify($rotated->accessToken)->pin)->toBeTrue();
+    expect(claims($rotated->accessToken)->scope)->toBe('ci.deploy')
+        ->and(claims($rotated->accessToken)->pin)->toBeTrue();
 
     app('auth')->forgetGuards();
     $this->withToken($rotated->accessToken)->postJson('/auth/logout')->assertSuccessful();
@@ -844,8 +844,8 @@ it('marks only a pinned grant with the pin claim', function () {
     $derived = User::factory()->create()->startSession();
     $pinned = start()(User::factory()->create()->getKey(), [], ['orders.read']);
 
-    expect((array) verifier()->verify($derived->accessToken))->not->toHaveKey('pin')
-        ->and(verifier()->verify($pinned->accessToken)->pin)->toBeTrue();
+    expect((array) claims($derived->accessToken))->not->toHaveKey('pin')
+        ->and(claims($pinned->accessToken)->pin)->toBeTrue();
 });
 
 it('restores the old behaviour when the route gate is switched off', function () {
@@ -868,7 +868,7 @@ it('does not let a claims hook mark an ordinary session as a machine token', fun
     $pair = User::factory()->create()->startSession();
     Lukk::$tokenClaimsUsing = null;
 
-    expect((array) verifier()->verify($pair->accessToken))->not->toHaveKey('pin');
+    expect((array) claims($pair->accessToken))->not->toHaveKey('pin');
     $this->withToken($pair->accessToken)->deleteJson('/auth/sessions')->assertSuccessful();
 });
 
@@ -879,7 +879,7 @@ it('does not let a claims hook strip the pin off a machine token', function () {
     $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
     Lukk::$tokenClaimsUsing = null;
 
-    expect(verifier()->verify($pat->accessToken)->pin)->toBeTrue();
+    expect(claims($pat->accessToken)->pin)->toBeTrue();
     $this->withToken($pat->accessToken)->deleteJson('/auth/sessions')->assertStatus(403);
 });
 
@@ -934,8 +934,8 @@ it('resolves the claims hook outside the refresh transaction, like the abilities
 
     expect($levels)->each->toBe($baseline)
         // ...and the hook's claims still reach the token, on both mint paths.
-        ->and(verifier()->verify($pair->accessToken)->org)->toBe(1)
-        ->and(verifier()->verify($rotated->accessToken)->org)->toBe(1);
+        ->and(claims($pair->accessToken)->org)->toBe(1)
+        ->and(claims($rotated->accessToken)->org)->toBe(1);
 });
 
 it('does not ask the claims hook about a token it is going to reject', function () {
@@ -974,7 +974,7 @@ it('keeps per-login claims winning over the hook, now that the Action merges the
     $pair = start()(User::factory()->create()->getKey(), ['org' => 'from-login']);
     Lukk::$tokenClaimsUsing = null;
 
-    $claims = verifier()->verify($pair->accessToken);
+    $claims = claims($pair->accessToken);
 
     expect($claims->org)->toBe('from-login')
         ->and($claims->only_hook)->toBeTrue()
@@ -1035,11 +1035,11 @@ it('falls back to the database when a custom issuer forgets to stamp the pin cla
 
     // Re-mint the same session's access token with the pin deliberately dropped.
     $forgetful = app(TokenIssuer::class)->accessToken(
-        new TokenContext(config('lukk.guard'), $user->getKey(), verifier()->verify($pat->accessToken)->fid),
+        new TokenContext(config('lukk.guard'), $user->getKey(), claims($pat->accessToken)->fid),
         abilities: Abilities::fromArray(['ci.deploy']),
     );
 
-    expect((array) verifier()->verify($forgetful['token']))->not->toHaveKey('pin');
+    expect((array) claims($forgetful['token']))->not->toHaveKey('pin');
 
     $this->withToken($forgetful['token'])->deleteJson('/auth/sessions')->assertStatus(403);
 });
@@ -1054,7 +1054,7 @@ it('does not break logout-all on a pre-0.6 schema with no scope column', functio
     $user = User::factory()->create();
     $pair = $user->startSession();
 
-    expect(app(RefreshTokenRepository::class)->familyIsPinned(verifier()->verify($pair->accessToken)->fid))
+    expect(app(RefreshTokenRepository::class)->familyIsPinned(claims($pair->accessToken)->fid))
         ->toBeFalse();
 
     $this->withToken($pair->accessToken)->deleteJson('/auth/sessions')->assertSuccessful();
@@ -1154,8 +1154,8 @@ it('persists a pinned grant through a model that filters mass assignment', funct
     $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
     $rotated = rotate()($pat->refreshToken);
 
-    expect(verifier()->verify($rotated->accessToken)->scope)->toBe('ci.deploy')
-        ->and(verifier()->verify($rotated->accessToken)->pin)->toBeTrue();
+    expect(claims($rotated->accessToken)->scope)->toBe('ci.deploy')
+        ->and(claims($rotated->accessToken)->pin)->toBeTrue();
 
     Lukk::$refreshTokenModel = null;
 });

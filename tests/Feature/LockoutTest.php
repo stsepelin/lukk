@@ -60,7 +60,7 @@ it('counts consecutive failures, so a success in between clears the run', functi
     // The run restarted, so two more failures don't reach the cap of three.
     failLogin()->assertStatus(422);
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(2);
+    expect(Lockout::query()->where('subject', 'id:'.User::firstOrFail()->getKey())->value('attempts'))->toBe(2);
 });
 
 it('locks one account without touching another', function () {
@@ -85,7 +85,7 @@ it('fires AccountLocked once, on the transition', function () {
 
     // A locked-out user gets no other signal, so an app needs exactly one notification to hang off.
     Event::assertDispatchedTimes(AccountLocked::class, 1);
-    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::first()->getKey());
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::firstOrFail()->getKey());
 });
 
 it('auto-releases once release_after has elapsed', function () {
@@ -111,7 +111,7 @@ it('releases a lock from the console', function () {
     }
     failLogin()->assertStatus(423);
 
-    $this->artisan('lukk:release', ['subject' => 'victim@y.com'])->assertSuccessful();
+    command('lukk:release', ['subject' => 'victim@y.com'])->assertSuccessful();
 
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
@@ -192,10 +192,10 @@ it('reports honestly when lukk:release finds nothing, and matches a differently-
     }
 
     // Nothing to release must not report success — during an incident the operator would move on.
-    $this->artisan('lukk:release', ['subject' => 'never-locked@y.com'])->assertFailed();
+    command('lukk:release', ['subject' => 'never-locked@y.com'])->assertFailed();
 
     // The realistic flow: paste the address as the user wrote it.
-    $this->artisan('lukk:release', ['subject' => '  Victim@Y.com '])->assertSuccessful();
+    command('lukk:release', ['subject' => '  Victim@Y.com '])->assertSuccessful();
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
 });
@@ -211,14 +211,14 @@ it('prunes spent counters but never a lock that is still held', function () {
     expect(Lockout::query()->count())->toBe(3);
 
     $this->travel(31)->days();
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 
     // The two stale probe counters go; the held lock stays, or pruning would be a release path.
-    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::first()->getKey()]);
+    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::firstOrFail()->getKey()]);
 });
 
 it('rejects an unknown --purpose rather than releasing something else', function () {
-    $this->artisan('lukk:release', ['subject' => 'x@y.com', '--purpose' => 'nonsense'])->assertFailed();
+    command('lukk:release', ['subject' => 'x@y.com', '--purpose' => 'nonsense'])->assertFailed();
 });
 
 it('restarts the run after an auto-release rather than leaving it one attempt from locking', function () {
@@ -234,13 +234,13 @@ it('restarts the run after an auto-release rather than leaving it one attempt fr
 
     // A fresh run: the next failure is attempt 1, not attempt 4 re-locking immediately.
     failLogin()->assertStatus(422);
-    expect(Lockout::query()->where('subject', 'id:'.User::first()->getKey())->value('attempts'))->toBe(1);
+    expect(Lockout::query()->where('subject', 'id:'.User::firstOrFail()->getKey())->value('attempts'))->toBe(1);
 });
 
 it('prunes nothing, without erroring, when the table was never published', function () {
     Schema::drop('lukk_lockouts');
 
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 });
 
 it('recovers when it loses the insert race for a brand-new subject', function () {
@@ -368,7 +368,7 @@ it('releases a confirm lock from the console', function () {
     failStepUp($access);
     failStepUp($access)->assertStatus(423);
 
-    $this->artisan('lukk:release', ['subject' => (string) $user->getKey(), '--purpose' => 'confirm'])
+    command('lukk:release', ['subject' => (string) $user->getKey(), '--purpose' => 'confirm'])
         ->assertSuccessful();
 
     app('auth')->forgetGuards();
@@ -399,7 +399,7 @@ it('releases a user-id lock whose case matters, like a ULID', function () {
     $ulid = (string) Str::ulid();
     app(LockoutRepository::class)->recordFailure('two_factor', $ulid, 'api');
 
-    $this->artisan('lukk:release', ['subject' => $ulid, '--purpose' => 'two_factor'])->assertSuccessful();
+    command('lukk:release', ['subject' => $ulid, '--purpose' => 'two_factor'])->assertSuccessful();
 
     expect(Lockout::where('subject', $ulid)->exists())->toBeFalse();
 });

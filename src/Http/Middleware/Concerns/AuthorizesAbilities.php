@@ -68,7 +68,7 @@ trait AuthorizesAbilities
         // Authenticated, but through something that left no lukk token — a session guard, or
         // `Lukk::actingAs` without abilities. Deny by default rather than 401: the caller IS known,
         // they simply hold nothing, and logging in again would not change that.
-        $granted = $token?->abilities ?? Abilities::fromArray([]);
+        $granted = $token->abilities ?? Abilities::fromArray([]);
 
         if ($requireAll ? $granted->canAll($required) : $granted->canAny($required)) {
             return;

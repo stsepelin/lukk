@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Lukk\Actions\RevokeOtherSessions;
 use Lukk\Contracts\LogoutResponse;
 use Lukk\Contracts\TokenVerifier;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 
 /**
  * The user's *other* sessions: `destroy` revokes every session except the one
@@ -15,6 +16,8 @@ use Lukk\Contracts\TokenVerifier;
  */
 class OtherSessionsController
 {
+    use ResolvesAuthenticatedUser;
+
     public function __construct(
         private readonly RevokeOtherSessions $revokeOthers,
     ) {}
@@ -24,7 +27,7 @@ class OtherSessionsController
         $claims = $verifier->verify((string) $request->bearerToken());
 
         if ($claims !== null && isset($claims->fid)) {
-            ($this->revokeOthers)($request->user()->getAuthIdentifier(), (string) $claims->fid);
+            ($this->revokeOthers)($this->authenticated($request)->getAuthIdentifier(), (string) $claims->fid);
         }
 
         return app(LogoutResponse::class);

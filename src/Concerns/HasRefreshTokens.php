@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\StartSession;
 use Lukk\Lukk;
+use Lukk\Models\RefreshToken;
 use Lukk\Support\TokenPair;
 
 /**
@@ -16,9 +17,13 @@ use Lukk\Support\TokenPair;
  */
 trait HasRefreshTokens
 {
+    /** @return HasMany<covariant \Lukk\Models\RefreshToken, $this> */
     public function refreshTokens(): HasMany
     {
-        $relation = $this->hasMany(Lukk::refreshTokenModel(), 'user_id');
+        /** @var class-string<RefreshToken> $model */
+        $model = Lukk::refreshTokenModel();
+
+        $relation = $this->hasMany($model, 'user_id');
 
         // Under multi-guard, a model's sessions are only those for its own guard.
         return Lukk::isMultiGuard() ? $relation->where('guard', $this->lukkGuard()) : $relation;

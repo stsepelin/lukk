@@ -30,7 +30,7 @@ it('changes the password once the current one is proven', function () {
         'password_confirmation' => 'new-password-1',
     ])->assertOk()->assertJson(['status' => 'password-changed']);
 
-    expect(Hash::check('new-password-1', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('new-password-1', $user->refresh()->password))->toBeTrue();
 
     // And the new password is one the LOGIN route will actually accept — the bound length exists
     // so a change can't lock someone out of the account they just secured.
@@ -49,7 +49,7 @@ it('refuses a wrong current password, and changes nothing', function () {
         'password_confirmation' => 'new-password-1',
     ])->assertStatus(422)->assertJsonValidationErrors(['current_password']);
 
-    expect(Hash::check('password', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue();
 });
 
 it('requires authentication', function () {
@@ -115,7 +115,7 @@ it('rejects a new password that fails confirmation, or repeats the current one',
         'password_confirmation' => 'password',
     ])->assertStatus(422)->assertJsonValidationErrors(['password']);
 
-    expect(Hash::check('password', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue();
 });
 
 it('shares the step-up throttle, so it is not a second budget for the same secret', function () {
@@ -228,7 +228,7 @@ it('rejects a missing current password without spending a lockout attempt', func
         'password' => 'password', 'password_confirmation' => 'password',
     ])->assertStatus(422)->assertJsonValidationErrors(['current_password']);
 
-    expect(Hash::check('password', $user->fresh()->password))->toBeTrue()
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue()
         // A shape error is not a wrong password — it must not consume the cap.
         ->and(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });
@@ -251,7 +251,7 @@ it('refuses a change that lost the reservation race', function () {
         'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
     ])->assertStatus(423);
 
-    expect(Hash::check('password', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue();
 });
 
 it('clears the LOGIN lock too, so the change actually restores access', function () {

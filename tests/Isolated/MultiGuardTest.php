@@ -134,17 +134,17 @@ it('throttles the extra guard\'s confirm-password on its own limiter', function 
         ->json('access_token');
 
     foreach (range(1, 5) as $i) {
-        $this->app['auth']->forgetGuards();
+        app('auth')->forgetGuards();
         $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
             ->assertStatus(422);
     }
 
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->withToken($access)->postJson('/admin/auth/confirm-password', ['password' => 'wrong-pw'])
         ->assertStatus(429);
 
     // A separate bucket from the default guard's, which is untouched.
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
     $this->postJson('/auth/confirm-password', ['password' => 'wrong-pw'])->assertStatus(401);
 });
 
@@ -233,7 +233,7 @@ it('gives each guard its own refresh cookie, so one login cannot destroy the oth
     forget();
     $admin = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])->assertOk();
 
-    $name = fn ($response) => collect($response->headers->getCookies())->first()->getName();
+    $name = fn ($response) => collect($response->headers->getCookies())->firstOrFail()->getName();
 
     expect($name($users))->toBe('__Host-refresh')
         ->and($name($admin))->toBe('__Host-refresh-admin')
@@ -245,7 +245,7 @@ it('resolves the acting guard for an action taken on a consumer route', function
     // so a "revoke everything" on an `auth:admin` route left the admin's sessions alive and
     // destroyed an unrelated user's — the two ids collide across providers.
     Route::middleware('auth:admin')->delete('/_test/wipe', function () {
-        app(RevokeAllSessions::class)(request()->user()->getAuthIdentifier());
+        app(RevokeAllSessions::class)(actor()->getAuthIdentifier());
 
         return response()->json(['ok' => true]);
     });

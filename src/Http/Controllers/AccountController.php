@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\ExportAccount;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 
 /**
  * The authenticated user's own account: export it (Art. 15 / 20) or erase it (Art. 17).
@@ -28,6 +29,7 @@ use Lukk\Http\Concerns\PreventsCaching;
 class AccountController
 {
     use PreventsCaching;
+    use ResolvesAuthenticatedUser;
 
     /**
      * The personal data lukk holds — the AUTH slice only.
@@ -41,12 +43,12 @@ class AccountController
      */
     public function export(Request $request, ExportAccount $export): JsonResponse
     {
-        return $this->noStore(new JsonResponse($export($request->user())));
+        return $this->noStore(new JsonResponse($export($this->authenticated($request))));
     }
 
     public function destroy(Request $request, DeleteAccount $delete): JsonResponse
     {
-        $delete($request->user());
+        $delete($this->authenticated($request));
 
         return $this->noStore(new JsonResponse(null, 204));
     }

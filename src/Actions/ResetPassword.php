@@ -22,7 +22,7 @@ use Lukk\Contracts\LockoutRepository;
 class ResetPassword
 {
     /**
-     * @param  array{password_reset:array{revoke_sessions?:bool,broker?:string},...}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(
         private readonly RevokeAllSessions $revokeAllSessions,

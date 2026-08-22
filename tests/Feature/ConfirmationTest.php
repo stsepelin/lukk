@@ -64,7 +64,7 @@ it('rejects a confirmation token earned by another user', function () {
 
     // Alice earns a confirmation, Bob tries to spend it.
     $aliceConfirmation = confirmedHeaders($alice);
-    $this->app['auth']->forgetGuards(); // model the per-request guard boundary
+    app('auth')->forgetGuards(); // model the per-request guard boundary
 
     $this->withToken($bob)
         ->withHeaders($aliceConfirmation)

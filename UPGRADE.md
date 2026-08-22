@@ -46,6 +46,30 @@ row, so a survivor keeps a working authenticator unless the callback clears them
 The export is the auth slice only. Serving it as a complete Art. 15 response would under-disclose;
 append your own domain data.
 
+### Two public signatures narrowed from `object` to `Authenticatable`
+
+**Low impact — only if you call these with something that is not an authenticatable.**
+
+```php
+- Lukk\Support\VerifiedToken::forUser(Request $request, object $user)
++ Lukk\Support\VerifiedToken::forUser(Request $request, Authenticatable $user)
+```
+
+`Http\Resources\UserResource::abilities()` narrows the same way. These are RUNTIME types, so a
+call with (say) a `stdClass` now raises a `TypeError` where it previously worked. `UserResource`
+already required an authenticatable in practice — `toArray()` calls `getAuthIdentifier()`
+unconditionally — so the narrowing states what was always true rather than removing a capability.
+
+### The two-factor user provider is guard-scoped
+
+**Low impact — no action; behaviour only differs on a guard that does not exist yet.**
+
+`ChallengeTwoFactor` now resolves its user provider for the **active** guard rather than the default
+one. Two-factor routes mount only on the default guard today, so nothing changes; but had an extra
+guard gained them, a second factor would have been verified against the *default* provider's row
+with the colliding id. `lukk:keygen --kid=0` also now emits the literal `0` instead of treating it
+as absent (PHP falsiness), and console options are trimmed.
+
 ### A step-up confirmation is now bound to the session that earned it
 
 **Low impact — informational, but a client that reuses a confirmation across tokens will see a new

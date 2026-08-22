@@ -76,6 +76,18 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
             Route::get('jwks', JwksController::class);
             Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-login');
             Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-refresh');
+
+            // The redemption half of the two-factor challenge, mounted wherever `login` is.
+            // `login` can answer `{"two_factor": true, "challenge_token": …}` on ANY guard whose
+            // resolved config enables the feature — so without this the account was told to complete
+            // a challenge it had no endpoint to complete: enrolled, challenged, and bricked. The
+            // MANAGEMENT routes (enrol, confirm, disable, recovery codes) stay on the default guard;
+            // they need step-up, which is a separate mount, and their absence locks nobody out.
+            if (Lukk::guardConfig($guardName)['features']['two_factor'] ?? false) {
+                Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])
+                    ->middleware('throttle:lukk-'.$guardName.'-2fa');
+            }
+
             $sessionRoutes($guard, $guardName.'-');
         });
 }

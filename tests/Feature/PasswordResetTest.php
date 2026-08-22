@@ -68,7 +68,7 @@ it('resets the password with a valid token and fires PasswordReset', function ()
         ->assertHeader('Cache-Control', 'no-store, private')
         ->assertJson(['status' => 'password-reset']);
 
-    expect(Hash::check('new-password-123', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('new-password-123', $user->refresh()->password))->toBeTrue();
     Event::assertDispatched(PasswordReset::class);
 });
 
@@ -106,7 +106,7 @@ it('rejects a reset with an invalid token (422, password unchanged)', function (
         'password_confirmation' => 'new-password-123',
     ])->assertStatus(422);
 
-    expect(Hash::check('password', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue();
 });
 
 it('enforces password confirmation on reset', function () {
@@ -177,7 +177,7 @@ it('mints and verifies reset tokens through the configured broker', function () 
         'password' => 'new-password-123',
         'password_confirmation' => 'new-password-123',
     ])->assertOk();
-    expect(Hash::check('new-password-123', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('new-password-123', $user->refresh()->password))->toBeTrue();
 });
 
 it('logs in with the new password after a reset', function () {

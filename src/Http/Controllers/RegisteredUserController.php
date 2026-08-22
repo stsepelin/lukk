@@ -37,7 +37,7 @@ class RegisteredUserController
         // when `registration.login` is off (register-only) or block_unverified_login withholds it.
         if (config('lukk.registration.login', true) && ! $this->emailUnverified($user)) {
             if ($this->twoFactorRequired($user)) {
-                return $this->twoFactorChallenge($user);
+                return $this->twoFactorChallenge($user, $this->challengeTokens);
             }
 
             return app(RegisterResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']])]);

@@ -2,10 +2,13 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Testing\PendingCommand;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Actions\StartSession;
+use Lukk\Contracts\HasTokenAbilities;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Support\TokenContext;
@@ -33,12 +36,92 @@ function verifier(): TokenVerifier
 {
     return app(TokenVerifier::class);
 }
+/**
+ * Assert a lookup found something, and hand back the non-null value.
+ *
+ * The repository contracts return `?Record` because "not found" is a real answer. A test that
+ * believes the row exists should say so — otherwise a regression reports "property on null" from
+ * three frames away instead of naming the row that vanished.
+ *
+ * @template T
+ *
+ * @param  T|null  $value
+ * @return T
+ */
+function notNull(mixed $value): mixed
+{
+    expect($value)->not->toBeNull();
+    assert($value !== null);
+
+    return $value;
+}
+
+/**
+ * The claims of a token the test asserts is VALID.
+ *
+ * `verify()` is nullable — a rejected token is null — so reading a claim straight off it both hides
+ * the failure mode from the analyser and, when a test regresses, reports "property on null" instead
+ * of the thing that actually broke. Use `verifier()->verify()` directly when the point of the test
+ * IS that verification fails.
+ *
+ * @return stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}
+ */
+function claims(string $token): object
+{
+    $claims = verifier()->verify($token);
+
+    expect($claims)->not->toBeNull();
+    assert($claims !== null);
+
+    return $claims;
+}
+
+/**
+ * The authenticated user inside a test route closure, narrowed.
+ *
+ * `request()->user()` is nullable, but these closures only ever mount behind `auth:{guard}` — the
+ * same reason `ResolvesAuthenticatedUser` exists on the controller side.
+ *
+ * @return Authenticatable&HasTokenAbilities
+ */
+function actor()
+{
+    $user = request()->user();
+
+    assert($user instanceof HasTokenAbilities);
+
+    return $user;
+}
+
+/**
+ * Run a console command and get something assertable.
+ *
+ * `$this->artisan()` is typed `PendingCommand|int` — it degrades to an exit code when the console
+ * kernel is already running one. Every call here chains `assertSuccessful()`/`expectsOutput…`,
+ * which exist only on `PendingCommand`, so assert the shape once instead of at each site.
+ *
+ * @param  array<string, mixed>  $parameters
+ */
+function command(string $cmd, array $parameters = []): PendingCommand
+{
+    $pending = test()->artisan($cmd, $parameters);
+
+    expect($pending)->toBeInstanceOf(PendingCommand::class);
+    assert($pending instanceof PendingCommand);
+
+    return $pending;
+}
+
 function issuer(): TokenIssuer
 {
     return app(TokenIssuer::class);
 }
 
-/** Earn a step-up confirmation header for the given access token. */
+/**
+ * Earn a step-up confirmation header for the given access token.
+ *
+ * @return array<string, string>
+ */
 function confirmedHeaders(string $access): array
 {
     $token = test()->withToken($access)
@@ -52,18 +135,24 @@ function confirmedHeaders(string $access): array
 function rsaKeypair(?string $passphrase = null): array
 {
     $res = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+    assert($res !== false);
     openssl_pkey_export($res, $private, $passphrase);
+    $details = openssl_pkey_get_details($res);
+    assert($details !== false);
 
-    return ['private' => $private, 'public' => openssl_pkey_get_details($res)['key']];
+    return ['private' => (string) $private, 'public' => (string) $details['key']];
 }
 
 /** @return array{private:string, public:string} a fresh EC P-256 keypair (PEM). */
 function ecKeypair(): array
 {
     $res = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+    assert($res !== false);
     openssl_pkey_export($res, $private);
+    $details = openssl_pkey_get_details($res);
+    assert($details !== false);
 
-    return ['private' => $private, 'public' => openssl_pkey_get_details($res)['key']];
+    return ['private' => (string) $private, 'public' => (string) $details['key']];
 }
 
 /** A mint-time context for the issuer — subject + family, on the current guard. */

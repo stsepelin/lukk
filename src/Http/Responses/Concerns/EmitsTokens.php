@@ -27,7 +27,7 @@ trait EmitsTokens
     {
         // Per-guard, like the cookie name below: a guard-level `cookie_mode` override was read
         // from the top-level config and silently ignored.
-        if (! (Lukk::guardConfig()['cookie_mode'] ?? false)) {
+        if (! ((Lukk::guardConfig()['cookie_mode'] ?? false))) {
             return $this->noStore(response()->json($pair->toArray()));
         }
 

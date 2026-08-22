@@ -20,7 +20,10 @@ class NewPasswordController
 
     public function __invoke(ResetPasswordRequest $request, ResetPassword $reset): JsonResponse
     {
-        $reset($request->validated());
+        /** @var array{email: string, token: string, password: string} $credentials */
+        $credentials = $request->validated();
+
+        $reset($credentials);
 
         return $this->noStore(response()->json(['status' => 'password-reset'], 200));
     }

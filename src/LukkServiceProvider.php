@@ -13,6 +13,7 @@ use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\Facades\Auth;
@@ -325,7 +326,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             $app->make(TwoFactorProvider::class), (int) $this->config()['two_factor']['recovery_codes']));
         $this->app->bind(ChallengeTwoFactor::class, fn ($app) => new ChallengeTwoFactor(
-            $this->userProvider(), $app->make(TwoFactorProvider::class)));
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(TwoFactorProvider::class)));
         $this->app->bind(VerifyTwoFactorChallenge::class, fn ($app) => new VerifyTwoFactorChallenge(
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             (int) $this->config()['rate_limits']['two_factor']['max_attempts'],
@@ -467,6 +468,14 @@ class LukkServiceProvider extends ServiceProvider
                 maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
                 decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
+            // The two-factor challenge is mounted per guard wherever that guard enables the feature,
+            // so it needs its own bucket. Registered unconditionally: a limiter attached to a route
+            // that never mounts is inert, whereas a route mounted against a MISSING limiter is a
+            // 500 on the endpoint standing between a user and their account.
+            $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
+                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
+                decaySeconds: (int) ($limits['two_factor']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
+
             // The extra guards carry confirm-password too, and they need the SAME per-user bucket as
             // the default guard — these are the higher-privilege audiences multi-guard exists for,
             // so per-IP alone would hand a thief with a stolen admin token 5 password guesses per
@@ -492,7 +501,7 @@ class LukkServiceProvider extends ServiceProvider
     }
 
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
-    private function lockouts($app): ?LockoutRepository
+    private function lockouts(Application $app): ?LockoutRepository
     {
         return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
     }
@@ -572,17 +581,12 @@ class LukkServiceProvider extends ServiceProvider
         return $store;
     }
 
-    private function userProvider(): ?UserProvider
-    {
-        return $this->app->make('auth')->createUserProvider($this->config()['user_provider'] ?? null);
-    }
-
     /**
      * The user provider for a given guard. The default guard uses `lukk.user_provider`; an extra
      * guard reuses its `config/auth.php` provider (single source of truth) — so lukk never
      * duplicates the provider, and login resolves the right table per guard.
      */
-    private function userProviderFor(string $guard): ?UserProvider
+    private function userProviderFor(string $guard): UserProvider
     {
         $config = $this->app->make('config');
 
@@ -590,7 +594,16 @@ class LukkServiceProvider extends ServiceProvider
             ? ($this->config()['user_provider'] ?? null)
             : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? null);
 
-        return $this->app->make('auth')->createUserProvider($provider);
+        $resolved = $this->app->make('auth')->createUserProvider($provider);
+
+        // Null only when the named provider is not configured at all — a typo in `auth.providers`.
+        // Nothing validates that at boot (`assertGuardsIsolated` checks driver/audience/path/domain,
+        // NOT provider names), so this is a genuine assertion rather than a restatement of an
+        // earlier guard. With assertions compiled out it degrades to a TypeError on the return,
+        // which is the same loud failure one frame later.
+        assert($resolved !== null);
+
+        return $resolved;
     }
 
     /**
@@ -603,6 +616,9 @@ class LukkServiceProvider extends ServiceProvider
     {
         $provider = $this->config()['user_provider'] ?? 'users';
 
-        return (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
+        /** @var class-string $model */
+        $model = (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
+
+        return $model;
     }
 }

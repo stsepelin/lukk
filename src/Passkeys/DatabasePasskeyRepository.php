@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Passkeys;
 
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\PasskeyRepository;
@@ -152,6 +153,7 @@ class DatabasePasskeyRepository implements PasskeyRepository
                 continue;
             }
 
+            /** @var Model $user */
             $user = new $model;
 
             // A subquery cannot cross connections. If the provider's table lives on another one, the
@@ -231,6 +233,7 @@ class DatabasePasskeyRepository implements PasskeyRepository
      * `whereNull('guard')` instead would fix that and break the far more common upgrade path, where
      * the column does not exist yet at all. It is a documented cleanup step in UPGRADE.md.
      */
+    /** @return Builder<covariant Passkey> */
     private function scoped(): Builder
     {
         $query = Passkey::query();

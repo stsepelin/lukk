@@ -79,7 +79,7 @@ it('revokes other sessions but keeps the calling one via DELETE /sessions/others
     $user->startSession();              // another device
     $current = $user->startSession();   // the caller
 
-    $currentFid = verifier()->verify($current->accessToken)->fid;
+    $currentFid = claims($current->accessToken)->fid;
 
     $this->withToken($current->accessToken)->deleteJson('/auth/sessions/others')->assertNoContent();
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Lockout;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -212,6 +213,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         return $this->query($purpose, $subject, $guard)->first();
     }
 
+    /** @return Builder<covariant \Lukk\Models\Lockout> */
     private function query(string $purpose, string $subject, ?string $guard)
     {
         // '' rather than null — see the migration: a null in a unique index doesn't dedupe.

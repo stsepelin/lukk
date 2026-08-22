@@ -1,0 +1,32 @@
+# The CI gate: `src/` must be CLEAN at level 8.
+#
+# Standalone rather than `includes: phpstan.neon`, because `includes` MERGES `paths` instead of
+# replacing them — inheriting it pulled `tests/` back into the analysis.
+#
+# The Pest stub is deliberately absent here — it only matters when `tests/` is analysed.
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    level: 8
+    paths:
+        - src
+        # The two fixtures, and ONLY them. lukk's consumer-facing `Concerns\Has*` traits have no
+        # using class inside the package, and PHPStan does not analyse an unused trait — it says so
+        # ("used zero times and is not analysed"). Suppressing that message, as an earlier revision
+        # did, silently dropped 193 lines of src out of the gate, including the single-use recovery
+        # code consumption. Giving the traits a real using class analyses them for real.
+        - tests/Fixtures/User.php
+        - tests/Fixtures/Admin.php
+    ignoreErrors:
+        # Both sites probe for a method the CONTRACT does not declare — `Illuminate\Contracts\Http\Kernel`
+        # has no `addToMiddlewarePriorityBefore`, and a container need not be `Foundation\Application`
+        # with `runningUnitTests`. A consumer supplying either genuinely lacks them, so the runtime
+        # guards are real. PHPStan narrows to the concrete classes the analysed context happens to
+        # bind and then calls the checks redundant: an analysis artefact, not dead code.
+        -
+            identifier: function.alreadyNarrowedType
+            message: '#method_exists\(\) with .* will always evaluate to true#'
+            paths:
+                - src/LukkServiceProvider.php
+                - src/Support/VerifiedToken.php

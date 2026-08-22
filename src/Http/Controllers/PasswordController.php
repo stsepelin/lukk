@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Lukk\Actions\ChangePassword;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 use Lukk\Http\Controllers\Concerns\ResolvesCurrentFamily;
 use Lukk\Http\Requests\ChangePasswordRequest;
 
@@ -21,6 +22,7 @@ use Lukk\Http\Requests\ChangePasswordRequest;
 class PasswordController
 {
     use PreventsCaching;
+    use ResolvesAuthenticatedUser;
     use ResolvesCurrentFamily;
 
     public function update(ChangePasswordRequest $request, ChangePassword $change, TokenVerifier $verifier): JsonResponse
@@ -28,7 +30,7 @@ class PasswordController
         $validated = $request->validated();
 
         $change(
-            $request->user(),
+            $this->authenticated($request),
             (string) $validated['current_password'],
             (string) $validated['password'],
             // The session to KEEP — see the trait for why it comes from the verified token.

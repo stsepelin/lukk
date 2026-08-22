@@ -147,6 +147,28 @@ jobs:
       - name: Enforce 100% coverage
         run: vendor/bin/pest --coverage --min=100
 
+  static-analysis:
+    runs-on: ubuntu-latest
+    name: PHPStan (level 8, src)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      # `src/` only, and it is CLEAN at level 8 — a real ratchet, not a baseline. `tests/` is still
+      # being worked through, so gating on it would just block every PR on harness noise.
+      - name: Analyse
+        run: vendor/bin/phpstan analyse -c phpstan-src.neon --no-progress --memory-limit=1G
+
   # A single, stable check to gate branch protection on: it passes only when lint, the
   # full PHP/Laravel matrix, and coverage all succeed. Requiring this one context (instead
   # of each matrix combo) means the required-checks list never breaks when the matrix
@@ -154,7 +176,7 @@ jobs:
   all-checks:
     name: All checks passed
     if: always()
-    needs: [lint, tests, concurrency-engines, coverage]
+    needs: [lint, tests, concurrency-engines, coverage, static-analysis]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job did not succeed

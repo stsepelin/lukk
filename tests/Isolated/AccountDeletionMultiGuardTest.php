@@ -77,7 +77,7 @@ it('never prunes a passkey belonging to another guard\'s provider', function () 
     app(PasskeyRepository::class)->store(999999, new NewPasskey('ghost-cred', 'cose', 0), 'Ghost');
     Lukk::useGuard(null);
 
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 
     expect(Passkey::find('admin-cred'))->not->toBeNull()
         ->and(Passkey::find('ghost-cred'))->toBeNull();
@@ -93,7 +93,7 @@ it('skips a guard whose provider is non-Eloquent rather than deleting its rows',
     Lukk::useGuard(null);
 
     config(['auth.providers.admins' => ['driver' => 'session']]);
-    $this->artisan('lukk:prune')->assertSuccessful();
+    command('lukk:prune')->assertSuccessful();
 
     expect(Passkey::count())->toBe(2);
 });

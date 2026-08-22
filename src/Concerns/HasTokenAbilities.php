@@ -27,7 +27,7 @@ trait HasTokenAbilities
 {
     public function tokenAbilities(): Abilities
     {
-        return VerifiedToken::forUser(request(), $this)?->abilities ?? Abilities::fromArray([]);
+        return VerifiedToken::forUser(request(), $this)->abilities ?? Abilities::fromArray([]);
     }
 
     public function tokenCan(string $ability): bool

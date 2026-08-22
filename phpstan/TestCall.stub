@@ -1,0 +1,16 @@
+<?php
+
+namespace Pest\PendingCalls;
+
+/**
+ * Inside a Pest closure `$this` is bound to the project's TestCase, but the static type is this
+ * class, whose own `@mixin` names PHPUnit's TestCase — so every Laravel/Testbench helper
+ * (`postJson`, `withToken`, `artisan`, `travel`) and every `tests/Pest.php` helper reads as undefined.
+ *
+ * @mixin \Lukk\Tests\TestCase
+ * @mixin \Pest\Support\HigherOrderCallables
+ * @mixin \Pest\Concerns\Testable
+ */
+final class TestCall
+{
+}

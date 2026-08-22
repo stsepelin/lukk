@@ -230,6 +230,7 @@ class Lukk
      */
     public static function customClaimsFor(int|string $userId): array
     {
+        /** @var mixed $claims */
         $claims = self::$tokenClaimsUsing !== null ? (self::$tokenClaimsUsing)($userId) : [];
 
         return is_array($claims) ? $claims : [];
@@ -359,6 +360,16 @@ class Lukk
      * The resolved config for a guard: the top-level `lukk` block for the default guard, or a
      * `guards.{name}` override deep-merged over it. `null` resolves the current guard.
      *
+     * READ EVERY KEY DEFENSIVELY. The returned array is deliberately typed `array<string, mixed>`
+     * rather than a precise shape, because no shape can be honest here: `mergeConfigDeep()` backfills
+     * the package defaults, but it early-returns when `configurationIsCached()` — the production norm,
+     * and pinned by ConfigMergeTest. An app that ran `config:cache` on one version and upgrades to one
+     * that adds a key gets NO backfill; the cached array is the final word.
+     *
+     * A previous revision declared the keys required and ~14 `?? default` fallbacks were deleted on
+     * the strength of it. That turned a degraded-but-working install into a hard 500, one of them
+     * inside `boot()` — the whole application, not just the auth routes.
+     *
      * @return array<string, mixed>
      */
     public static function guardConfig(?string $name = null): array
@@ -410,10 +421,10 @@ class Lukk
      */
     public static function driverGuardNames(): array
     {
-        return array_values(array_keys(array_filter(
+        return array_keys(array_filter(
             (array) config('auth.guards', []),
             fn ($config) => is_array($config) && ($config['driver'] ?? null) === 'lukk-jwt',
-        )));
+        ));
     }
 
     /** The lukk guard active for the current request (default: `config('lukk.guard')`). */
@@ -519,6 +530,7 @@ class Lukk
     /**
      * Authenticate a user for the duration of the current test (Sanctum-style).
      */
+    /** @param  array<int, string>|null  $abilities */
     public static function actingAs(Authenticatable $user, string $guard = 'api', ?array $abilities = null): void
     {
         app('auth')->guard($guard)->setUser($user);

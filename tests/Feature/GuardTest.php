@@ -61,7 +61,7 @@ it('rejects the next request once the family is denylisted', function () {
     // Each production request gets a fresh guard; reset the test app's memoized
     // guard/user so the second call re-runs verification instead of reusing the
     // user resolved above.
-    $this->app['auth']->forgetGuards();
+    app('auth')->forgetGuards();
 
     $this->withToken($pair->accessToken)->getJson('/_protected')->assertUnauthorized();
 });

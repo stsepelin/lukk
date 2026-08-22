@@ -52,7 +52,7 @@ it('does not let one guard\'s grant answer for a colliding id on another', funct
 
     Route::middleware('auth:api')->get('/_test/cross', function () use ($admin) {
         return response()->json([
-            'user' => request()->user()->tokenCan('orders.read'),
+            'user' => actor()->tokenCan('orders.read'),
             'admin' => $admin->tokenCan('orders.read'),
         ]);
     });
@@ -72,7 +72,7 @@ it('reports each request\'s own token, never the previous request\'s', function 
     expect($wide->getKey())->toBe(1);
 
     Route::middleware('auth:api')->get('/_test/who', fn () => response()->json([
-        'can' => request()->user()->tokenCan('orders.read'),
+        'can' => actor()->tokenCan('orders.read'),
     ]));
 
     $this->withToken($wide->startSession()->accessToken)->getJson('/_test/who')->assertJson(['can' => true]);

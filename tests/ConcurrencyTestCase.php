@@ -93,7 +93,7 @@ class ConcurrencyTestCase extends Orchestra
 
         // A real engine persists between runs, and the base fixtures are created directly rather
         // than through migrations, so start from an empty schema every time.
-        $this->artisan('db:wipe', ['--force' => true]);
+        command('db:wipe', ['--force' => true]);
 
         Schema::create('users', function (Blueprint $table) {
             $table->id();

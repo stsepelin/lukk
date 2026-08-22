@@ -25,7 +25,7 @@ it('stores and finds a credential, encrypting the public key at rest', function 
         ->and($record->transports)->toBe(['internal'])
         ->and($record->name)->toBe('My iPhone');
 
-    expect(Passkey::find('cred-1')->public_key)->not->toBe('COSE-PUBLIC-KEY');
+    expect(Passkey::findOrFail('cred-1')->public_key)->not->toBe('COSE-PUBLIC-KEY');
 });
 
 it('returns null for an unknown credential', function () {
@@ -46,7 +46,7 @@ it('updates the sign count', function () {
     passkeys()->store(7, new NewPasskey('a', 'k', 5));
     passkeys()->updateSignCount('a', 9);
 
-    expect(passkeys()->findByCredentialId('a')->signCount)->toBe(9);
+    expect(notNull(passkeys()->findByCredentialId('a'))->signCount)->toBe(9);
 });
 
 it('enforces global credential-id uniqueness', function () {
