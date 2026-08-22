@@ -7,6 +7,7 @@ namespace Lukk\Auth;
 use Firebase\JWT\JWT;
 use Illuminate\Support\Str;
 use Lukk\Contracts\Denylist;
+use Lukk\Lukk;
 use Lukk\Tokens\Jwt\KeyRing;
 use Throwable;
 
@@ -45,6 +46,13 @@ class ChallengeToken
             'iat' => $now,
             'nbf' => $now,
             'exp' => $now + $ttl,
+            // The GUARD that minted it. Isolation otherwise rested entirely on the consumer giving
+            // each guard a distinct issuer/audience/secret — and under the minimal multi-guard shape
+            // (only `provider` and `path` differ) a challenge asserting "admins.1 cleared the first
+            // factor" was redeemable as "users.1 cleared the first factor". Not a second-factor
+            // bypass, since the attacker still needs that account's second factor, but a FIRST-factor
+            // one: a session on a guard whose password was never presented.
+            'gid' => Lukk::currentGuard(),
         ];
 
         // The SESSION that earned this, when there is one. A step-up says "the person at this
@@ -109,7 +117,7 @@ class ChallengeToken
         return (string) $claims->sub;
     }
 
-    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, iss?: mixed, aud?: mixed})|null */
+    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
     private function decode(string $kind, string $token): ?object
     {
         JWT::$leeway = $this->config['leeway'];
@@ -124,6 +132,14 @@ class ChallengeToken
             if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))) {
                 return null;
             }
+
+            // `exp` is not required by firebase/php-jwt, so a co-issuer could mint a challenge that
+            // never expires — against "challenge single-use + short TTL". `consume()` also reads it
+            // AFTER the second factor has verified, where an uncaught throw 500s the request and
+            // leaves the challenge unburned.
+            if (! is_int($claims->exp ?? null) || ! is_string($claims->jti ?? null)) {
+                return null;
+            }
         } catch (Throwable) {
             return null;
         }
@@ -136,13 +152,20 @@ class ChallengeToken
             return null;
         }
 
+        // STRICT, with `null === null` admitting a co-issuer that predates the claim — the same shape
+        // as the `fid` binding. A challenge stamped by another guard is refused even when the two
+        // share a crypto identity.
+        if (($claims->gid ?? null) !== null && $claims->gid !== Lukk::currentGuard()) {
+            return null;
+        }
+
         $jti = (string) ($claims->jti ?? '');
 
         if ($jti === '' || $this->denylist->has('jti', $jti)) {
             return null;
         }
 
-        /** @var \stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, iss?: mixed, aud?: mixed} $claims */
+        /** @var \stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, gid?: mixed, iss?: mixed, aud?: mixed} $claims */
         return $claims;
     }
 

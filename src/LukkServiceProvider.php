@@ -468,6 +468,14 @@ class LukkServiceProvider extends ServiceProvider
                 maxAttempts: (int) ($limits['refresh']['max_attempts'] ?? 30),
                 decaySeconds: (int) ($limits['refresh']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
+            // The two-factor challenge is mounted per guard wherever that guard enables the feature,
+            // so it needs its own bucket. Registered unconditionally: a limiter attached to a route
+            // that never mounts is inert, whereas a route mounted against a MISSING limiter is a
+            // 500 on the endpoint standing between a user and their account.
+            $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
+                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
+                decaySeconds: (int) ($limits['two_factor']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
+
             // The extra guards carry confirm-password too, and they need the SAME per-user bucket as
             // the default guard — these are the higher-privilege audiences multi-guard exists for,
             // so per-IP alone would hand a thief with a stolen admin token 5 password guesses per

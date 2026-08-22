@@ -10,6 +10,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Support\Carbon;
 use Lukk\Concerns\HasRefreshTokens;
 use Lukk\Concerns\HasTokenAbilities;
+use Lukk\Concerns\HasTwoFactorAuthentication;
 use Lukk\Contracts\HasTokenAbilities as HasTokenAbilitiesContract;
 
 /**
@@ -30,6 +31,7 @@ class Admin extends Authenticatable implements HasTokenAbilitiesContract
 
     use HasRefreshTokens;
     use HasTokenAbilities;
+    use HasTwoFactorAuthentication;
 
     protected $table = 'admins';
 

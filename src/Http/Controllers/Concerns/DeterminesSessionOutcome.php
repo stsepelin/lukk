@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\TwoFactorChallengeResponse;
+use Lukk\Lukk;
 
 /**
  * Post-authentication branching shared by the login + registration controllers: whether the
@@ -24,7 +25,10 @@ trait DeterminesSessionOutcome
 {
     private function twoFactorRequired(Authenticatable $user): bool
     {
-        return (bool) config('lukk.features.two_factor')
+        // `Lukk::guardConfig()`, never the global block — the same rule CLAUDE.md records for
+        // `features.abilities` and `gate_auth_routes`. Read globally, a guard that switches two-factor
+        // OFF was still challenged, and one that switches it ON was not.
+        return (bool) (Lukk::guardConfig()['features']['two_factor'] ?? false)
             && method_exists($user, 'hasEnabledTwoFactor')
             && $user->hasEnabledTwoFactor();
     }
