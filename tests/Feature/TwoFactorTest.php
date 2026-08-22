@@ -428,3 +428,16 @@ it('refuses a challenge when the second-factor secret cannot be read', function 
     expect(fn () => app(ChallengeTwoFactor::class)($user->getKey(), '000000', null))
         ->toThrow(ValidationException::class);
 });
+
+it('still accepts a recovery code when the second-factor secret cannot be read', function () {
+    // Recovery codes are the escape hatch for "my authenticator is unusable" — and a secret the
+    // server cannot decrypt is exactly that. Their verification never touches the secret, so
+    // refusing before this branch would lock the account out of its own recovery path.
+    config(['auth.providers.users.model' => UndecryptableTwoFactorUser::class]);
+    $user = UndecryptableTwoFactorUser::factory()->create();
+    $codes = $user->generateRecoveryCodes(8);
+
+    $resolved = app(ChallengeTwoFactor::class)($user->getKey(), null, $codes[0]);
+
+    expect($resolved->getAuthIdentifier())->toBe($user->getKey());
+});

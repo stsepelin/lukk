@@ -30,16 +30,18 @@ class ChallengeTwoFactor
         }
 
         /** @var Authenticatable&TwoFactorAuthenticatable $user */
-        // Refuse rather than cast. `(string) null` is `''`, which the bundled provider rejects but a
-        // custom `TwoFactorProvider` need not — turning "the secret could not be decrypted" (an
-        // APP_KEY rotation with a swallowed DecryptException) into a successful challenge.
         $secret = $user->twoFactorSecret();
 
-        if ($secret === null) {
-            $this->fail();
-        }
-
-        if ($code !== null && $code !== '' && $this->totp->verify($secret, $code)) {
+        // `$secret !== null` gates the TOTP branch ONLY, and must not be hoisted above it. Passing
+        // `(string) null` to the provider is the hazard — `''` is rejected by the bundled provider
+        // but a custom `TwoFactorProvider` need not, so an unreadable secret (an APP_KEY rotation
+        // with a swallowed DecryptException) would verify as a successful challenge.
+        //
+        // Refusing EARLY is the opposite mistake, and worse: recovery codes exist for exactly the
+        // case where the authenticator is unusable, which includes the server being unable to read
+        // the secret. Their verification does not touch the secret, so a null one must still fall
+        // through to them rather than lock the account out of its own escape hatch.
+        if ($code !== null && $code !== '' && $secret !== null && $this->totp->verify($secret, $code)) {
             return $user;
         }
 
