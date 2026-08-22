@@ -9,6 +9,7 @@ use Illuminate\Validation\ValidationException;
 use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Http\Concerns\IssuesConfirmationToken;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
 
 /**
@@ -20,6 +21,7 @@ use Lukk\Http\Requests\PasskeyAssertionRequest;
 class ConfirmablePasskeyController
 {
     use IssuesConfirmationToken;
+    use ResolvesAuthenticatedUser;
 
     public function __construct(
         private readonly ChallengeToken $challengeTokens,
@@ -29,7 +31,7 @@ class ConfirmablePasskeyController
     {
         $userId = $finishPasskeyLogin((string) $request->input('ceremony_id'), $request->array('credential'));
 
-        if ((string) $userId !== (string) $request->user()->getAuthIdentifier()) {
+        if ((string) $userId !== (string) $this->authenticated($request)->getAuthIdentifier()) {
             throw ValidationException::withMessages(['credential' => [__('That passkey does not belong to you.')]]);
         }
 

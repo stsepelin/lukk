@@ -46,7 +46,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
     private readonly AuthenticatorAssertionResponseValidator $assertion;
 
     /**
-     * @param  array{rp_id:?string,rp_name:string,origins:array<int,string>,user_verification:string}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(private readonly array $config)
     {
@@ -169,6 +169,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         return $record->counter;
     }
 
+    /** @param  array<string, mixed>  $response */
     private function credentialResponse(array $response): mixed
     {
         $credential = $this->serializer->deserialize(json_encode($response), PublicKeyCredential::class, 'json');
@@ -176,6 +177,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         return $credential->response;
     }
 
+    /** @return array<string, mixed> */
     private function toArray(object $options): array
     {
         return json_decode($this->serializer->serialize($options, 'json'), true);

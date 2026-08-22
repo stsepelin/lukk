@@ -14,7 +14,7 @@ use Illuminate\Support\Carbon;
  * @property ?string $name
  * @property string $public_key
  * @property int $sign_count
- * @property ?array $transports
+ * @property ?array<int, string> $transports
  * @property ?string $aaguid
  * @property ?Carbon $last_used_at
  */

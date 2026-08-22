@@ -102,6 +102,7 @@ class Abilities
      * cost of a diagnosable failure, and it is bounded to the single malformed name (never the
      * granted list); if your names are derived from customer data, it is worth knowing.
      */
+    /** @param  array<int, mixed>  $abilities */
     public static function fromArray(array $abilities): self
     {
         $granted = [];

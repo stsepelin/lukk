@@ -7,6 +7,7 @@ namespace Lukk\Actions;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
+use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Contracts\TwoFactorProvider;
 
 /**
@@ -28,6 +29,7 @@ class ChallengeTwoFactor
             $this->fail();
         }
 
+        /** @var Authenticatable&TwoFactorAuthenticatable $user */
         if ($code !== null && $code !== '' && $this->totp->verify($user->twoFactorSecret(), $code)) {
             return $user;
         }

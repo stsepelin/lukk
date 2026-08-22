@@ -109,6 +109,7 @@ class ChallengeToken
         return (string) $claims->sub;
     }
 
+    /** @return object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, iss?: mixed, aud?: mixed}|null */
     private function decode(string $kind, string $token): ?object
     {
         JWT::$leeway = $this->config['leeway'];

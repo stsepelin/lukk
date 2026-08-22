@@ -8,3 +8,13 @@ parameters:
         - tests
     stubFiles:
         - phpstan/TestCall.stub
+    ignoreErrors:
+        # `$this->app->make(Kernel::class)` is the CONTRACT `Illuminate\Contracts\Http\Kernel`,
+        # which does not declare these methods — a consumer's own kernel implementing only the
+        # contract genuinely lacks them, so the runtime guard is real. PHPStan narrows to the
+        # concrete Testbench kernel because that is what the analysed context binds, and then calls
+        # the check redundant. An analysis artefact, not dead code.
+        -
+            identifier: function.alreadyNarrowedType
+            path: src/LukkServiceProvider.php
+            message: '#addToMiddlewarePriority#'

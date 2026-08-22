@@ -29,7 +29,7 @@ class KeyRing
     private Key|array|null $verificationKeys = null;
 
     /**
-     * @param  array{algorithm:string,secret:?string,keys?:array<string,mixed>}  $config
+     * @param  array<string, mixed>  $config
      */
     public function __construct(private readonly array $config) {}
 

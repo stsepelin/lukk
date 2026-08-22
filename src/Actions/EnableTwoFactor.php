@@ -7,6 +7,7 @@ namespace Lukk\Actions;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Validation\ValidationException;
+use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Contracts\TwoFactorProvider;
 
 /**
@@ -23,6 +24,7 @@ class EnableTwoFactor
     /**
      * @return array{otpauth_uri:string,recovery_codes:array<int,string>}
      */
+    /** @param  Authenticatable&TwoFactorAuthenticatable  $user */
     public function __invoke(Authenticatable $user): array
     {
         // Re-enrolling used to overwrite the secret, null `two_factor_confirmed_at` and regenerate

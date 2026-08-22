@@ -6,6 +6,7 @@ namespace Lukk\Actions;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Validation\ValidationException;
+use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Contracts\TwoFactorProvider;
 
 /**
@@ -16,6 +17,7 @@ class ConfirmTwoFactor
 {
     public function __construct(private readonly TwoFactorProvider $totp) {}
 
+    /** @param  Authenticatable&TwoFactorAuthenticatable  $user */
     public function __invoke(Authenticatable $user, string $code): void
     {
         $secret = $user->twoFactorSecret();

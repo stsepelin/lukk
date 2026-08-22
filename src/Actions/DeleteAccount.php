@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Illuminate\Auth\Passwords\PasswordBroker;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\CanResetPassword;
 use Illuminate\Database\Eloquent\Model;
@@ -113,7 +114,9 @@ class DeleteAccount
             // install that never ran the broker's migration has no table, and that is the only case
             // worth skipping.
             if ($user instanceof CanResetPassword && $this->tableExists($this->passwordResetTable())) {
-                Password::broker($this->passwordBroker)->deleteToken($user);
+                /** @var PasswordBroker $broker */
+                $broker = Password::broker($this->passwordBroker);
+                $broker->deleteToken($user);
             }
 
             // Two-factor material lives in columns ON the user row, so deleting the row takes it.

@@ -197,8 +197,12 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function allForUser(int|string $userId): array
     {
-        return $this->scoped()->where('user_id', $userId)->orderBy('created_at')
-            ->get()->map(fn ($row) => $this->hydrate($row))->all();
+        // `hydrate()` is nullable only because it also serves the "row not found" reads; a row
+        // that came back from `get()` always hydrates, and `array_values` keeps the list shape.
+        return array_values(array_filter(
+            $this->scoped()->where('user_id', $userId)->orderBy('created_at')
+                ->get()->map(fn ($row) => $this->hydrate($row))->all()
+        ));
     }
 
     public function pruneExpired(): int
@@ -213,6 +217,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
      * The base query on the configured refresh-token model. Protected so a consumer can subclass
      * with a different model/table without re-implementing the repository.
      */
+    /** @return Builder<covariant \Lukk\Models\RefreshToken> */
     protected function query(): Builder
     {
         $model = Lukk::refreshTokenModel();
@@ -221,6 +226,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     }
 
     /** {@see query()} scoped to this repository's guard (no scope when guard is null). */
+    /** @return Builder<covariant \Lukk\Models\RefreshToken> */
     private function scoped(): Builder
     {
         $query = $this->query();

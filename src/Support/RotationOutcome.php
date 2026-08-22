@@ -21,7 +21,7 @@ class RotationOutcome
         public readonly ?array $access = null,
     ) {}
 
-    /** @param array{token:string,jti:string,expires_in:int} $access */
+    /** @param  array{token: string, jti: string, expires_in: int}  $access */
     public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings, array $access): self
     {
         return new self('issued', $familyId, $userId, $refreshSecret, $siblings, $access);

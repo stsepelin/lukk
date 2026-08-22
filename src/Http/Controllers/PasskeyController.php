@@ -10,6 +10,7 @@ use Illuminate\Http\Response;
 use Lukk\Actions\FinishPasskeyRegistration;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 use Lukk\Http\Requests\PasskeyRegistrationRequest;
 
 /**
@@ -21,6 +22,7 @@ use Lukk\Http\Requests\PasskeyRegistrationRequest;
 class PasskeyController
 {
     use PreventsCaching;
+    use ResolvesAuthenticatedUser;
 
     public function __construct(
         private readonly FinishPasskeyRegistration $finishRegistration,
@@ -33,21 +35,21 @@ class PasskeyController
             'id' => $passkey['credential_id'],
             'name' => $passkey['name'],
             'last_used_at' => $passkey['last_used_at'],
-        ], $this->passkeys->summariesForUser($request->user()->getAuthIdentifier()));
+        ], $this->passkeys->summariesForUser($this->authenticated($request)->getAuthIdentifier()));
 
         return $this->noStore(response()->json(['passkeys' => $passkeys]));
     }
 
     public function store(PasskeyRegistrationRequest $request): Response
     {
-        ($this->finishRegistration)($request->user(), $request->array('credential'), $request->input('name'));
+        ($this->finishRegistration)($this->authenticated($request), $request->array('credential'), $request->input('name'));
 
         return response()->noContent();
     }
 
     public function destroy(Request $request, string $credentialId): Response
     {
-        $this->passkeys->delete($request->user()->getAuthIdentifier(), $credentialId);
+        $this->passkeys->delete($this->authenticated($request)->getAuthIdentifier(), $credentialId);
 
         return response()->noContent();
     }

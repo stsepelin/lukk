@@ -10,6 +10,7 @@ use Illuminate\Http\Response;
 use Lukk\Actions\DisableTwoFactor;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 
 /**
  * Two-factor enrolment: `store` begins enrolment (returns the secret + otpauth
@@ -18,6 +19,7 @@ use Lukk\Http\Concerns\PreventsCaching;
 class TwoFactorAuthenticationController
 {
     use PreventsCaching;
+    use ResolvesAuthenticatedUser;
 
     public function __construct(
         private readonly EnableTwoFactor $enable,
@@ -26,12 +28,12 @@ class TwoFactorAuthenticationController
 
     public function store(Request $request): JsonResponse
     {
-        return $this->noStore(response()->json(($this->enable)($request->user())));
+        return $this->noStore(response()->json(($this->enable)($this->authenticated($request))));
     }
 
     public function destroy(Request $request): Response
     {
-        ($this->disable)($request->user());
+        ($this->disable)($this->authenticated($request));
 
         return response()->noContent();
     }
