@@ -17,7 +17,11 @@ class RotationOutcome
         public readonly ?string $refreshSecret = null,
         /** Live tokens in the family after this rotation — >1 means the grace window minted a sibling. */
         public readonly int $siblings = 1,
-        /** Minted INSIDE the transaction — see `RotateRefreshToken` for why. */
+        /**
+         * Minted INSIDE the transaction — see `RotateRefreshToken` for why.
+         *
+         * @var array{token: string, jti: string, expires_in: int}|null
+         */
         public readonly ?array $access = null,
     ) {}
 

@@ -200,7 +200,7 @@ class AttemptLogin
         return $hash ??= Hash::make('lukk-timing-equalizer');
     }
 
-    private function lockoutGuard(): ?string
+    private function lockoutGuard(): string
     {
         return $this->limiter->guard();
     }

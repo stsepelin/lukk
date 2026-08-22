@@ -35,6 +35,8 @@ class TokenController
         $presented = $request->post('refresh_token') ?? $request->json('refresh_token');
 
         // An array would raise "Array to string conversion" and hash the literal "Array".
-        return is_string($presented) ? $presented : (string) ($request->cookie(RefreshCookie::name()) ?? '');
+        $cookie = $request->cookie(RefreshCookie::name());
+
+        return is_string($presented) ? $presented : (is_string($cookie) ? $cookie : '');
     }
 }

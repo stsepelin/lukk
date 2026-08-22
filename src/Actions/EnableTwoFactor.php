@@ -22,9 +22,9 @@ class EnableTwoFactor
     ) {}
 
     /**
-     * @return array{otpauth_uri:string,recovery_codes:array<int,string>}
+     * @param  Authenticatable&TwoFactorAuthenticatable  $user
+     * @return array{otpauth_uri: string, recovery_codes: array<int, string>}
      */
-    /** @param  Authenticatable&TwoFactorAuthenticatable  $user */
     public function __invoke(Authenticatable $user): array
     {
         // Re-enrolling used to overwrite the secret, null `two_factor_confirmed_at` and regenerate

@@ -30,7 +30,9 @@ class ChallengeTwoFactor
         }
 
         /** @var Authenticatable&TwoFactorAuthenticatable $user */
-        if ($code !== null && $code !== '' && $this->totp->verify($user->twoFactorSecret(), $code)) {
+        $secret = (string) $user->twoFactorSecret();   // `enabled()` above proved it is set
+
+        if ($code !== null && $code !== '' && $this->totp->verify($secret, $code)) {
             return $user;
         }
 

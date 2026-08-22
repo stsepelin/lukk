@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers;
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Lukk\Actions\VerifyEmail;
 use Lukk\Contracts\EmailVerificationResponse;
@@ -19,7 +20,7 @@ class VerifyEmailController
 {
     public function __invoke(VerifyEmailRequest $request, VerifyEmail $verify): EmailVerificationResponse
     {
-        /** @var MustVerifyEmail $user Guaranteed non-null by the request's authorize(). */
+        /** @var Authenticatable&MustVerifyEmail $user Guaranteed non-null by the request's authorize(). */
         $user = $request->verifiable();
 
         $verify($user);

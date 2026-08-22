@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Resources;
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -24,6 +25,7 @@ class UserResource extends JsonResource
      */
     public function toArray(Request $request): array
     {
+        /** @var Authenticatable $user */
         $user = $this->resource;
 
         return [
@@ -50,7 +52,7 @@ class UserResource extends JsonResource
      *
      * @return array<string, mixed>
      */
-    protected function abilities(Request $request, object $user): array
+    protected function abilities(Request $request, Authenticatable $user): array
     {
         $token = VerifiedToken::forUser($request, $user);
 

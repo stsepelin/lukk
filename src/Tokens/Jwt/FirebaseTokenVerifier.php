@@ -33,7 +33,7 @@ class FirebaseTokenVerifier implements TokenVerifier
         $this->keys = new KeyRing($config);
     }
 
-    /** @return object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}|null */
+    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed})|null */
     public function verify(string $jwt): ?object
     {
         JWT::$leeway = $this->config['leeway'];
@@ -79,7 +79,7 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        /** @var object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed} $claims */
+        /** @var (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}) $claims */
         return $claims;
     }
 }

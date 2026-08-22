@@ -26,6 +26,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function transaction(Closure $callback): mixed
     {
+        /** @var Closure(): mixed $callback */
         return DB::transaction($callback);
     }
 

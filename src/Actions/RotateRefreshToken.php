@@ -257,6 +257,9 @@ class RotateRefreshToken
 
     private function pair(RotationOutcome $outcome): TokenPair
     {
+        // Only ever called on an `issued` outcome, which is the one shape that carries both.
+        assert($outcome->access !== null && $outcome->refreshSecret !== null);
+
         return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
     }
 

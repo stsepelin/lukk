@@ -17,7 +17,10 @@ class RegenerateRecoveryCodes
     /**
      * @return array<int,string>
      */
-    /** @param  Authenticatable&TwoFactorAuthenticatable  $user */
+    /**
+     * @param  Authenticatable&TwoFactorAuthenticatable  $user
+     * @return array<int, string>
+     */
     public function __invoke(Authenticatable $user): array
     {
         return $user->generateRecoveryCodes($this->recoveryCodes);

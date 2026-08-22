@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers;
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Lukk\Actions\RegenerateRecoveryCodes;
@@ -27,7 +28,7 @@ class RecoveryCodeController
 
     public function index(Request $request): JsonResponse
     {
-        /** @var TwoFactorAuthenticatable $user */
+        /** @var Authenticatable&TwoFactorAuthenticatable $user */
         $user = $this->authenticated($request);
 
         return $this->noStore(response()->json([
@@ -38,6 +39,9 @@ class RecoveryCodeController
 
     public function store(Request $request): JsonResponse
     {
-        return $this->noStore(response()->json(['recovery_codes' => ($this->regenerate)($this->authenticated($request))]));
+        /** @var Authenticatable&TwoFactorAuthenticatable $user */
+        $user = $this->authenticated($request);
+
+        return $this->noStore(response()->json(['recovery_codes' => ($this->regenerate)($user)]));
     }
 }

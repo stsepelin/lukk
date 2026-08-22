@@ -1,3 +1,9 @@
+# The CI gate: `src/` must be CLEAN at level 8.
+#
+# Standalone rather than `includes: phpstan.neon`, because `includes` MERGES `paths` instead of
+# replacing them — inheriting it pulled `tests/` back into the analysis.
+#
+# The Pest stub is deliberately absent here — it only matters when `tests/` is analysed.
 includes:
     - vendor/larastan/larastan/extension.neon
 
@@ -5,20 +11,22 @@ parameters:
     level: 8
     paths:
         - src
-        - tests
-    stubFiles:
-        - phpstan/TestCall.stub
     ignoreErrors:
-        # `$this->app->make(Kernel::class)` is the CONTRACT `Illuminate\Contracts\Http\Kernel`,
-        # which does not declare these methods — a consumer's own kernel implementing only the
-        # contract genuinely lacks them, so the runtime guard is real. PHPStan narrows to the
-        # concrete Testbench kernel because that is what the analysed context binds, and then calls
-        # the check redundant. An analysis artefact, not dead code.
         # Both sites probe for a method the CONTRACT does not declare — `Illuminate\Contracts\Http\Kernel`
         # has no `addToMiddlewarePriorityBefore`, and a container need not be `Foundation\Application`
         # with `runningUnitTests`. A consumer supplying either genuinely lacks them, so the runtime
         # guards are real. PHPStan narrows to the concrete classes the analysed context happens to
         # bind and then calls the checks redundant: an analysis artefact, not dead code.
+        # lukk's CONSUMER-facing traits. A user model composes them; lukk itself never does, so
+        # "used zero times" is the correct and permanent answer for a package analysed on its own.
+        # They are exercised by the test fixtures, which this gate does not analyse.
+        -
+            identifier: trait.unused
+            paths:
+                - src/Concerns/HasRefreshTokens.php
+                - src/Concerns/HasTokenAbilities.php
+                - src/Concerns/HasTwoFactorAuthentication.php
+
         -
             identifier: function.alreadyNarrowedType
             message: '#method_exists\(\) with .* will always evaluate to true#'

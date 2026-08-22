@@ -37,7 +37,7 @@ class AuthenticatedSessionController
         $user = ($this->attempt)($request);
 
         if ($this->twoFactorRequired($user)) {
-            return $this->twoFactorChallenge($user);
+            return $this->twoFactorChallenge($user, $this->challengeTokens);
         }
 
         // Opt-in: refuse login for an unverified email. Runs only after a successful credential

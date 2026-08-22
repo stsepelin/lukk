@@ -326,7 +326,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             $app->make(TwoFactorProvider::class), (int) $this->config()['two_factor']['recovery_codes']));
         $this->app->bind(ChallengeTwoFactor::class, fn ($app) => new ChallengeTwoFactor(
-            $this->userProvider(), $app->make(TwoFactorProvider::class)));
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(TwoFactorProvider::class)));
         $this->app->bind(VerifyTwoFactorChallenge::class, fn ($app) => new VerifyTwoFactorChallenge(
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             (int) $this->config()['rate_limits']['two_factor']['max_attempts'],
@@ -571,11 +571,6 @@ class LukkServiceProvider extends ServiceProvider
         CacheStoreGuard::assertCanHoldRevocations($store);
 
         return $store;
-    }
-
-    private function userProvider(): ?UserProvider
-    {
-        return $this->app->make('auth')->createUserProvider($this->config()['user_provider'] ?? null);
     }
 
     /**

@@ -14,10 +14,11 @@ use Lukk\Contracts\TwoFactorChallengeResponse;
  * resolved user must clear a 2FA challenge, and whether an unverified email should withhold
  * the session (opt-in). Kept in one home so login and register can never drift apart.
  *
- * @property-read ChallengeToken $challengeTokens
- *
- * Using classes must expose a `Lukk\Auth\ChallengeToken $challengeTokens` property (both
- * controllers do) for {@see twoFactorChallenge()}.
+ * `twoFactorChallenge()` takes its `ChallengeToken` as an ARGUMENT rather than reading a property
+ * off the using class. It used to require `$this->challengeTokens`, which was an unenforceable
+ * contract: `PasskeyAuthenticatedSessionController` uses this trait and has no such property. That
+ * was harmless only because passkey login is already multi-factor and never reaches the challenge —
+ * an invisible coupling one refactor away from a fatal.
  */
 trait DeterminesSessionOutcome
 {
@@ -28,9 +29,9 @@ trait DeterminesSessionOutcome
             && $user->hasEnabledTwoFactor();
     }
 
-    private function twoFactorChallenge(Authenticatable $user): TwoFactorChallengeResponse
+    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens): TwoFactorChallengeResponse
     {
-        return app(TwoFactorChallengeResponse::class, ['challenge' => $this->challengeTokens->issue(
+        return app(TwoFactorChallengeResponse::class, ['challenge' => $challengeTokens->issue(
             '2fa', $user->getAuthIdentifier(), (int) config('lukk.two_factor.challenge_ttl', 300),
         )]);
     }

@@ -28,6 +28,7 @@ class FinishPasskeyLogin
         private readonly ?string $guard = null,
     ) {}
 
+    /** @param  array<string, mixed>  $response */
     public function __invoke(string $ceremonyId, array $response): int|string
     {
         $challenge = $this->challenges->pullForCeremony($ceremonyId);

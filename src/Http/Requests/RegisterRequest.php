@@ -59,6 +59,9 @@ class RegisterRequest extends FormRequest
     {
         $provider = (string) config('lukk.user_provider', 'users');
 
-        return (string) config("auth.providers.{$provider}.model");
+        /** @var class-string $model */
+        $model = (string) config("auth.providers.{$provider}.model");
+
+        return $model;
     }
 }

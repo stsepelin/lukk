@@ -230,6 +230,7 @@ class Lukk
      */
     public static function customClaimsFor(int|string $userId): array
     {
+        /** @var mixed $claims */
         $claims = self::$tokenClaimsUsing !== null ? (self::$tokenClaimsUsing)($userId) : [];
 
         return is_array($claims) ? $claims : [];
@@ -420,10 +421,10 @@ class Lukk
      */
     public static function driverGuardNames(): array
     {
-        return array_values(array_keys(array_filter(
+        return array_keys(array_filter(
             (array) config('auth.guards', []),
             fn ($config) => is_array($config) && ($config['driver'] ?? null) === 'lukk-jwt',
-        )));
+        ));
     }
 
     /** The lukk guard active for the current request (default: `config('lukk.guard')`). */
@@ -529,6 +530,7 @@ class Lukk
     /**
      * Authenticate a user for the duration of the current test (Sanctum-style).
      */
+    /** @param  array<int, string>|null  $abilities */
     public static function actingAs(Authenticatable $user, string $guard = 'api', ?array $abilities = null): void
     {
         app('auth')->guard($guard)->setUser($user);

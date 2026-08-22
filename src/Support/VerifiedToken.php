@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Support;
 
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
 use Lukk\Lukk;
 use RuntimeException;
@@ -100,6 +101,7 @@ class VerifiedToken
         // Keyed by guard, exactly as `put()` is. A single slot meant a multi-guard test acting as an
         // admin and then as a user silently clobbered the first — `$admin->tokenCan('admin.all')`
         // came back false with no error to explain it.
+        /** @var array<string, self> $assumed */
         $assumed = $app->bound(self::class) ? $app->make(self::class) : [];
         $assumed[$token->guard] = $token;
 
@@ -117,6 +119,7 @@ class VerifiedToken
         // A real, verified bearer token always wins: an assumed one is only consulted when the
         // guard recorded nothing at all.
         if ($tokens === [] && app()->bound(self::class)) {
+            /** @var array<string, self> $tokens */
             $tokens = app(self::class);
         }
 
@@ -132,11 +135,12 @@ class VerifiedToken
      * breaks the tie, and an ambiguous tie grants nothing. Handing back *some* other guard's grant
      * would answer an authorization question with a token issued for a different audience.
      */
-    public static function forUser(Request $request, object $user): ?self
+    public static function forUser(Request $request, Authenticatable $user): ?self
     {
         $candidates = [];
 
         foreach (self::all($request) as $token) {
+            /** @var self $token */
             if ($user::class !== $token->userClass || (string) $user->getAuthIdentifier() !== (string) $token->userId) {
                 continue;
             }
