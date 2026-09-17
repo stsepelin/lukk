@@ -71,4 +71,20 @@ interface LockoutRepository
      * @return int rows deleted
      */
     public function forget(array $subjects, ?string $guard): int;
+
+    /**
+     * Every counter held for a set of subjects on one guard, for the data-subject export.
+     *
+     * The read-side mirror of {@see forget()}, and it must reach exactly the same rows: erasure deletes
+     * these as personal data, so an Art. 15 export that omitted them would under-disclose precisely
+     * what Art. 17 destroys. Same subject list (build it with `LoginRateLimiter::lockoutSubject()`),
+     * same guard scoping — two accounts sharing an email share a subject, and one must not be shown
+     * the other's counters (Art. 15(4)).
+     *
+     * Timestamps are unix seconds, like `RefreshTokenRecord`; the export formats them.
+     *
+     * @param  array<int, string>  $subjects
+     * @return array<int, array{purpose: string, attempts: int, locked_at: ?int, first_failed_at: ?int, last_failed_at: ?int}>
+     */
+    public function summariesForSubjects(array $subjects, ?string $guard): array;
 }

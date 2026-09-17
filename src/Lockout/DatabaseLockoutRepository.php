@@ -145,6 +145,29 @@ class DatabaseLockoutRepository implements LockoutRepository
         return Lockout::query()->whereIn('subject', $subjects)->where('guard', (string) $guard)->delete();
     }
 
+    public function summariesForSubjects(array $subjects, ?string $guard): array
+    {
+        // The same empty-subject filter and table guard as `forget()`, so the two can never reach
+        // different rows.
+        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== ''));
+
+        if ($subjects === [] || ! Schema::hasTable((new Lockout)->getTable())) {
+            return [];
+        }
+
+        return Lockout::query()
+            ->whereIn('subject', $subjects)->where('guard', (string) $guard)
+            ->orderBy('purpose')->orderBy('created_at')
+            ->get()
+            ->map(fn (Lockout $row) => [
+                'purpose' => $row->purpose,
+                'attempts' => $row->attempts,
+                'locked_at' => $row->locked_at?->getTimestamp(),
+                'first_failed_at' => $row->created_at?->getTimestamp(),
+                'last_failed_at' => $row->updated_at?->getTimestamp(),
+            ])->all();
+    }
+
     public function prune(int $staleAfterDays): int
     {
         if (! Schema::hasTable((new Lockout)->getTable())) {

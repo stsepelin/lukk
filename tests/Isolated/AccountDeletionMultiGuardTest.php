@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\ExportAccount;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Lukk;
 use Lukk\Models\Passkey;
@@ -60,6 +61,19 @@ it('never exports another subject\'s sessions', function () {
     $export = app(ExportAccount::class)($user);
 
     expect($export['sessions'])->toHaveCount(1);
+});
+
+it('never exports another guard\'s lockout counters for a colliding id', function () {
+    // Lockout subjects collide across providers exactly as ids do, so the export read is guard-scoped
+    // like `forget()` on the erasure side.
+    $user = User::factory()->create();
+    $admin = Admin::factory()->create();
+    expect((string) $admin->getKey())->toBe((string) $user->getKey());
+
+    app(LockoutRepository::class)->recordFailure('confirm', (string) $admin->getKey(), 'admin');
+    app(LockoutRepository::class)->recordFailure('confirm', (string) $user->getKey(), 'api');
+
+    expect(app(ExportAccount::class)($user)['lockouts'])->toHaveCount(1);
 });
 
 it('never prunes a passkey belonging to another guard\'s provider', function () {

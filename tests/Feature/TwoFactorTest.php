@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
@@ -511,4 +512,99 @@ it('refuses to CONFIRM enrolment on an empty secret', function () {
     expect(fn () => app(ConfirmTwoFactor::class)($user, 'literally-anything'))
         ->toThrow(ValidationException::class)
         ->and($user->refresh()->two_factor_confirmed_at)->toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// `block_unverified_login` on the two-factor path. Password-only and passkey logins refused an
+// unverified user with a 403; a user who had ALSO enrolled a second factor was handed a challenge
+// first and then a full session by the redemption route, which never ran the gate. Enrolling MORE
+// security made the account exempt from the verification policy.
+// ---------------------------------------------------------------------------
+
+it('refuses an unverified two-factor user at login, before any challenge is issued', function () {
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => null]);
+    confirmedTwoFactor($user);
+
+    // The same 403 the password-only path answers with, at the same point — AFTER the credential
+    // check, so it tells a caller nothing the password-only path does not. No challenge either:
+    // redeeming one would burn a single-use recovery code on a login that is going to be refused.
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('challenge_token')
+        ->assertJsonMissingPath('access_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
+it('still answers a wrong password with 422, not the unverified 403', function () {
+    // The gate runs only after the credentials verify, so it must not become an oracle for them.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => null]);
+    confirmedTwoFactor($user);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'wrong'])->assertStatus(422);
+});
+
+it('refuses to redeem a challenge with a TOTP code once the user is unverified', function () {
+    // A challenge minted while the account was verified (or before the flag was switched on) and
+    // redeemed after an email change nulled `email_verified_at`: the redemption route must not be a
+    // way around the gate the login route enforces.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $secret = confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    $user->forceFill(['email_verified_at' => null])->save();
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('access_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
+it('refuses to redeem a challenge with a recovery code once the user is unverified', function () {
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    $user->forceFill(['email_verified_at' => null])->save();
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('access_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
+it('lets a verified two-factor user through when block_unverified_login is on', function () {
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $secret = confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->assertJsonPath('two_factor', true)->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
+        ->assertOk()
+        ->assertJsonStructure(['access_token', 'refresh_token']);
+});
+
+it('does not gate an unverified two-factor user when block_unverified_login is off', function () {
+    config(['lukk.email_verification.block_unverified_login' => false]);
+    $user = User::factory()->create(['email_verified_at' => null]);
+    $secret = confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->assertJsonPath('two_factor', true)->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertOk()
+        ->assertJsonStructure(['access_token']);
 });

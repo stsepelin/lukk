@@ -10,10 +10,10 @@ use Lukk\Contracts\TokenVerifier;
 /**
  * The caller's own refresh-token family, read from their VERIFIED bearer token.
  *
- * Three controllers need it — logout, revoke-other-sessions and change-password — and all three
- * need it for the same reason: to name a session without letting the caller name someone else's.
- * Taking it from the request body would do exactly that. It comes from the same token the guard
- * authenticated with, so `sub` and `fid` are structurally consistent.
+ * Change-password needs it to name the caller's session without letting the caller name someone
+ * else's — taking it from the request body would do exactly that. It comes from the same token the
+ * guard authenticated with, so `sub` and `fid` are structurally consistent. (Logout does not use
+ * it: it may also be named by a refresh token, and that policy lives in `Actions\EndSession`.)
  *
  * Null when the token carries no `fid` — a co-issuer sharing the secret, in the verify-only
  * topology. Callers must decide what that means for them rather than assuming a family exists.

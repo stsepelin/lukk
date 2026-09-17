@@ -5,6 +5,36 @@ All notable changes to `lukk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`POST /auth/logout` ends a session with an expired access token.** It sat behind `auth:{guard}`, so the most ordinary client state — an idle tab whose access token had lapsed — got a 401, nothing was revoked, and in cookie mode the `__Host-refresh` cookie stayed valid for its whole TTL (RFC 7009 §2.1–2.2, ASVS 5.0 V7.4.1). Logout now accepts **either** credential: a valid access token revokes its family exactly as before (and still authenticates the request as its user), and the refresh token the client holds revokes the family it belongs to on that guard. An expired access token is **not** honoured on its own, even with a good signature: that would make every access token that ever reached a log a 30-day capability to end its session, and needs a second verification path that skips `exp`. The answer is always `204` — nothing reveals whether a token existed. A consumed token presented past grace dispatches `RefreshTokenReused` exactly as `/refresh` would; a token rotated inside grace ends the session, sibling included, without the event. A valid bearer with no `fid` (a co-issuer's token) now has its `jti` denylisted for the rest of its life, where before logout did nothing for it.
+
+  **CSRF.** `SameSite=Strict` does not stop a same-*site* sibling page (evil.example.com → api.example.com) from form-POSTing with the cookie, and even cross-site the clearing `Set-Cookie` is stored after a top-level navigation. The refresh cookie is therefore used — and cleared — only on a request a form cannot produce: `Content-Type: application/json` (matched on the MIME essence, since `text/plain; x=/json` is CORS-safelisted) or `Sec-Fetch-Site: same-origin`/`none`. A direct-mode SPA on a sibling subdomain sends `{}` as JSON. The body `refresh_token` is read from a JSON body only. `/refresh` is unchanged: a forged refresh only rotates the cookie into a response the attacker cannot read.
+
+  **Throttling.** No route throttle: a per-IP limit shared with `/refresh` let junk refresh traffic from one address (a NAT, a BFF not forwarding the client) turn a valid-bearer logout into a 429. Only the refresh-token lookup is metered, on its own per-guard, per-caller bucket with the `rate_limits.refresh` limits, reserved atomically before it is checked. A request carrying a valid bearer is not metered — the bearer is revoked by the call, so it cannot be replayed for more lookups — so ordinary BFF logouts no longer exhaust the bucket. When the lookup *is* throttled the answer is **429 with `Retry-After`** and the cookie is left in place: a 204 there would tell the client it had logged out while its refresh token stayed valid (ASVS 5.0 V7.4.1), and a 429 reveals nothing about the token.
+
+- **`features.logout_all` is honoured.** It was documented as a switch and read by nothing. `false` now leaves `DELETE /auth/sessions` unmounted, read per guard like the other route gates. Default stays `true`.
+
+### Removed
+
+- **`features.rotation`, `features.reuse_detection`, `features.denylist`.** Never read: rotation, reuse detection and the denylist are the security model and cannot be switched off. A published config still carrying them keeps working; the keys are inert.
+
+### Fixed
+
+- **Two-factor login bypassed `block_unverified_login`.** The password path checked the challenge before the verification gate, and the challenge-redemption route minted a session without asking, so enrolling a second factor exempted an unverified account from the policy that password-only and passkey logins enforced. Login now refuses before issuing a challenge — the same 403 at the same point as the password-only path, after the credential check, so it tells a caller nothing new and never lets a recovery code be spent on a login that will be refused — and redemption refuses a challenge that outlived the account's verified state. `emailUnverified()` is also read through `Lukk::guardConfig()`, so a per-guard override is honoured.
+
+- **`LogoutResponse` read the global `cookie_mode`.** `EmitsTokens` sets the cookie per guard; logout now clears it per guard, so a guard that opted into cookie mode gets its `__Host-refresh-{guard}` cleared.
+
+- **A passkey challenge could be redeemed twice under a race.** `Cache::pull()` is get-then-forget. Redemption now claims the challenge with an atomic `add()` — the primitive the TOTP replay defence already uses — keyed on the challenge value, so exactly one concurrent request wins.
+
+- **`DELETE /auth/sessions/others` cleared the caller's refresh cookie in cookie mode.** It answered through `LogoutResponse`, which ends the *caller's* session client-side, while the route keeps that session alive server-side — the client could no longer refresh and was logged out at its next refresh. It now answers a bare `204` directly (same status and empty body as before, so clients such as lukk-js `revokeOtherSessions()` are unaffected) and sets no cookie. A rebound `LogoutResponse` no longer applies to this route: it is a fixed acknowledgement, not a swap seam.
+
+- **A logout racing a refresh could leave a live token behind on PostgreSQL.** Rotation checks the denylist under its row lock, which catches a revoke that started first — but not one whose denylist write lands after that check and before the rotation commits. PostgreSQL's `UPDATE` then took its snapshot before the successor committed, blocked on the parent row, re-checked only that row and missed the successor, which rotated again once the denylist entry expired. `revokeFamily()` and the bulk revoke (logout-all, revoke-others, password change and reset) now run a second `UPDATE`, whose fresh READ COMMITTED snapshot sees the committed successor; the bulk pass is limited to the families already denylisted. MySQL was unaffected. Pinned in `tests/Concurrency/`.
+
+- **The account export omitted lockout counters** that erasure deletes (GDPR Art. 15 completeness). `GET /auth/account/export` gains a `lockouts` section — purpose, attempts, and timestamps, never lukk's internal subject keys — reached through the same three key spaces and guard scoping as the erasure sweep. `LockoutRepository` gains `summariesForSubjects()` (see the upgrade guide).
+
 ## [0.6.0] - 2026-08-22
 
 ### Added

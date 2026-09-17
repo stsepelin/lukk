@@ -7,6 +7,8 @@ namespace Lukk\Actions;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Schema;
+use Lukk\Auth\LoginRateLimiter;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshTokenRepository;
 
@@ -31,6 +33,10 @@ class ExportAccount
         private readonly RefreshTokenRepository $tokens,
         private readonly PasskeyRepository $passkeys,
         private readonly string $identifierColumn,
+        // Optional only so a direct construction written against 0.6 keeps working; the provider
+        // always supplies both, and without them the export simply has no lockout section to fill.
+        private readonly ?LockoutRepository $lockouts = null,
+        private readonly ?string $guard = null,
     ) {}
 
     /** A unix timestamp as ISO-8601 — the shape `RefreshTokenRecord` stores its times in. */
@@ -119,6 +125,41 @@ class ExportAccount
                 'enabled' => method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor(),
                 'confirmed_at' => $this->iso($user->two_factor_confirmed_at ?? null),
             ],
+            'lockouts' => $this->lockoutsFor($user),
         ];
+    }
+
+    /**
+     * The consecutive-failure counters held against this account — the rows `DeleteAccount` erases,
+     * reached through the same three key spaces, so an access request discloses everything erasure
+     * would destroy.
+     *
+     * The purpose and counts, never the subject key: `id:`/`idn:` is lukk's storage format, not
+     * information about the person. Guarded on the table, not the feature flag, for the same reason
+     * as passkeys above — a switched-off feature leaves its rows behind.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function lockoutsFor(Authenticatable $user): array
+    {
+        if ($this->lockouts === null || ! $this->tableExists('lukk_lockouts')) {
+            return [];
+        }
+
+        $identifier = $this->identifierOf($user);
+
+        $rows = $this->lockouts->summariesForSubjects([
+            LoginRateLimiter::lockoutSubject($user, ''),                                        // id:<userId>   — login
+            (string) $user->getAuthIdentifier(),                                                // <userId>      — confirm / two-factor
+            $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier),    // idn:<normalized>
+        ], $this->guard);
+
+        return array_map(fn (array $row) => [
+            'purpose' => $row['purpose'],
+            'attempts' => $row['attempts'],
+            'locked_at' => $this->fromTimestamp($row['locked_at']),
+            'first_failed_at' => $this->fromTimestamp($row['first_failed_at']),
+            'last_failed_at' => $this->fromTimestamp($row['last_failed_at']),
+        ], $rows);
     }
 }

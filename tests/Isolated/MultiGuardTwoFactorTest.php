@@ -112,3 +112,28 @@ it('refuses a challenge whose sub is not a string', function () {
 
     expect(app(ChallengeToken::class)->verify('2fa', $token))->toBeNull();
 });
+
+it('honours a per-guard block_unverified_login override on the two-factor path', function () {
+    // Read from the global block, a guard that switched the gate ON was silently not gated. The
+    // admin guard is pointed at the users provider so the account implements MustVerifyEmail.
+    config([
+        'lukk.features.two_factor' => true,
+        'lukk.email_verification.block_unverified_login' => false,
+        'lukk.guards.admin.email_verification.block_unverified_login' => true,
+        'auth.guards.admin.provider' => 'users',
+    ]);
+    $user = User::factory()->create(['email' => 'unverified@example.test', 'email_verified_at' => null]);
+    enrolTwoFactor($user);
+
+    $this->postJson('/admin/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('challenge_token');
+
+    // The default guard did not opt in, so the same account is challenged there as before.
+    app('auth')->forgetGuards();
+    Lukk::useGuard(null);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()
+        ->assertJsonPath('two_factor', true);
+});

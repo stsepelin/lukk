@@ -38,15 +38,32 @@ use Lukk\Support\Abilities;
  * a narrow grant could still log an ADMIN account out everywhere — the gate absent from exactly the
  * mount a multi-guard install cares about. One definition makes that class of omission impossible.
  */
-$sessionRoutes = function (string $guard, string $throttle = ''): void {
-    Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->middleware($guard);
+$sessionRoutes = function (string $guardName, string $throttle = ''): void {
+    $guard = 'auth:'.$guardName;
+
+    // NOT behind `auth:{guard}`: a client whose access token has expired must still be able to end
+    // its session, with the refresh token it holds (see `Actions\EndSession`). Its CSRF defence is the
+    // request-shape check on the cookie (`ReadsLogoutCredentials`), not the route stack.
+    //
+    // No route throttle either. A per-IP route limit shared with refresh let junk `/refresh` traffic
+    // from one address — a NAT, a BFF not forwarding the client — turn a valid-bearer logout into a 429.
+    // `EndSession` meters only the refresh-token lookup, which is the part worth metering.
+    Route::post('logout', [AuthenticatedSessionController::class, 'destroy']);
 
     // Gated on `lukk.sessions`: these revoke OTHER sessions, so a token pinned to a narrow grant —
     // a personal access token, a capped impersonation session — must not reach them. `logout` and
     // `refresh` are deliberately NOT gated: they act on the calling session alone, and a pinned
     // token has to be able to end and renew itself.
     $pinned = RequirePinnedAbility::class.':';
-    Route::delete('sessions', [SessionController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
+
+    // Route-gated like `change_password` / `account_deletion`: absent, not 403 — an install that
+    // switched it off does not offer the endpoint at all. Read through the guard's RESOLVED config,
+    // like `two_factor` on the extra-guard mount, so a per-guard override is honoured; `?? true`
+    // because no key is guaranteed under a cached config (see `Lukk::guardConfig()`).
+    if ((bool) (Lukk::guardConfig($guardName)['features']['logout_all'] ?? true)) {
+        Route::delete('sessions', [SessionController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
+    }
+
     Route::delete('sessions/others', [OtherSessionsController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
 
     // Throttled like login: it re-verifies the SAME password, so leaving it unmetered made the sudo
@@ -71,8 +88,6 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
         ->prefix((string) ($cfg['path'] ?? 'auth'))
         ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.$guardName])
         ->group(function () use ($guardName, $sessionRoutes) {
-            $guard = 'auth:'.$guardName;
-
             Route::get('jwks', JwksController::class);
             Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-login');
             Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-refresh');
@@ -88,7 +103,7 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
                     ->middleware('throttle:lukk-'.$guardName.'-2fa');
             }
 
-            $sessionRoutes($guard, $guardName.'-');
+            $sessionRoutes((string) $guardName, $guardName.'-');
         });
 }
 
@@ -111,7 +126,7 @@ Route::domain(config('lukk.domain'))
 
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
-        $sessionRoutes($guard);
+        $sessionRoutes((string) config('lukk.guard', 'api'));
 
         if (config('lukk.features.account_deletion')) {
             // Step-up confirmed AND gated on its own ability, which are two different controls doing

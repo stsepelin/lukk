@@ -756,17 +756,26 @@ return [
     | Feature Toggles
     |--------------------------------------------------------------------------
     |
-    | Switches consumed by the Actions to enable or disable behavior. The core
-    | features (rotation, reuse detection, denylist, logout-all) are on by
-    | default; the two below are opt-in.
+    | Switches for optional behavior. Refresh-token rotation, reuse detection
+    | and the revocation denylist are NOT here: they are the security model,
+    | always on, and cannot be disabled.
     |
     */
 
     'features' => [
 
-        'rotation' => true,
-        'reuse_detection' => true,
-        'denylist' => true,
+        /*
+        |--------------------------------------------------------------------------
+        | Log Out Everywhere
+        |--------------------------------------------------------------------------
+        |
+        | Mounts `DELETE /auth/sessions`, which revokes every session the account
+        | holds on this guard. On by default. Turn it off where "log out all
+        | devices" is owned elsewhere. `POST /auth/logout` (this session) and
+        | `DELETE /auth/sessions/others` are unaffected. Honoured per guard.
+        |
+        */
+
         'logout_all' => true,
 
         /*

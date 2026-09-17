@@ -25,6 +25,7 @@ use Lukk\Actions\ChangePassword;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\EnableTwoFactor;
+use Lukk\Actions\EndSession;
 use Lukk\Actions\ExportAccount;
 use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Actions\RegenerateRecoveryCodes;
@@ -275,12 +276,19 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RefreshTokenRepository::class),
             $app->make(PasskeyRepository::class),
             (string) ($this->config()['username'] ?? 'email'),
+            // Unconditional, like `DeleteAccount` above: export must reach every row erasure reaches.
+            $app->make(LockoutRepository::class),
+            Lukk::currentGuard(),
         ));
 
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+        $this->app->bind(EndSession::class, fn ($app) => new EndSession(
+            $app->make(TokenVerifier::class), $app->make(TokenIssuer::class), $app->make(RefreshTokenRepository::class),
+            $app->make(RevokeSession::class), $app->make(Denylist::class), $app->make(RateLimiter::class),
+            Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RevokeOtherSessions::class, fn ($app) => new RevokeOtherSessions(

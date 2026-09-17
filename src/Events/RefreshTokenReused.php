@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace Lukk\Events;
 
 /**
- * Dispatched when a refresh token that should no longer be usable is presented
- * and its whole family is force-revoked. A security signal — attach a listener
- * to log/alert. `$reason` is 'reuse' (a consumed token replayed past the grace
- * window — the textbook theft signal) or 'revoked' (an already-killed token
- * replayed).
+ * Dispatched when a consumed refresh token is presented past the grace window —
+ * the textbook theft signal — and its whole family is force-revoked. Fired from
+ * `/refresh` and, with the same decision order, from `/logout`. A security signal —
+ * attach a listener to log/alert. `$reason` is 'reuse'; an already-revoked token
+ * replayed after a logout is ordinary and no longer fires it (since 0.5.0).
  */
 class RefreshTokenReused
 {
