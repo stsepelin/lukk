@@ -101,6 +101,39 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Unclaimed Session Window
+    |--------------------------------------------------------------------------
+    |
+    | Off by default (0). When set, a session started by a sign-in must be USED
+    | within this many seconds, or its ORIGINAL sign-in credential is revoked —
+    | the whole family (Events\SessionUnclaimed) — on its first use after that.
+    | For sign-in responses that never reached their client (a dropped
+    | connection, an aborted request), which otherwise live until they expire.
+    |
+    | THE CONTRACT when on: within the window every client must do one of
+    |   - call `POST {path}/session/claim` right after signing in (recommended);
+    |   - make an authenticated request to THIS lukk app; or
+    |   - refresh.
+    | A client that uses its access token only on ANOTHER service must call the
+    | claim route.
+    |
+    | The effective window is at least `access_ttl + leeway` and at least 60 s,
+    | so the original access token has expired before it could be late. Only a
+    | credential minted at sign-in is ever revoked; one minted by a refresh
+    | proves the session was used. Sessions with a pinned grant are never marked.
+    |
+    | Markers live in the denylist store. Losing them fails OPEN (treated as
+    | claimed); restoring an old snapshot can at most revoke a session still
+    | presenting its ORIGINAL sign-in refresh token after the window. Cost when
+    | on: one cache read per authenticated request; when off, none. 600 suits
+    | most apps.
+    |
+    */
+
+    'claim_seconds' => (int) env('LUKK_CLAIM_SECONDS', 0),
+
+    /*
+    |--------------------------------------------------------------------------
     | Family Fork Threshold
     |--------------------------------------------------------------------------
     |

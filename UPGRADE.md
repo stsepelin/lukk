@@ -36,8 +36,9 @@ Logout accepts a valid access token **or** the refresh token the client holds. W
   POSTs to logout with no body from a sibling subdomain must now send `{}` as JSON (lukk-js does), or
   its cookie is neither revoked through logout nor cleared — the bearer still ends the session.
 - A body `refresh_token` is read from a **JSON** body only, never a form body or the query string.
-- The route has **no throttle**. Only the refresh-token lookup is metered (`rate_limits.refresh`, per
-  guard and caller), and only when no valid bearer is presented. When it is throttled the answer is
+- The route has **no throttle**. Only refresh-token lookups that MISS are counted (`rate_limits.refresh`,
+  per guard and caller), and only when no valid bearer is presented; an exhausted bucket refuses the
+  lookup up front. When it is throttled the answer is
   **429 with `Retry-After`** and the cookie is not cleared — the session is still live, so the client
   must retry rather than treat it as logged out.
 - A consumed refresh token presented past the grace window dispatches `RefreshTokenReused` and
@@ -68,6 +69,36 @@ The route keeps the caller's session alive, but `LogoutResponse` ends the caller
 client-side: in cookie mode it cleared the refresh cookie and the client could no longer refresh. It
 now answers a bare `204` directly — the same status and empty body as before, so clients need no
 change. A rebound `LogoutResponse` still applies to `POST /auth/logout` and `DELETE /auth/sessions`.
+
+### New: unclaimed sessions (`claim_seconds`) and `POST /auth/session/claim`
+
+**Low impact — off by default; the route is new but inert until you set the key.**
+
+```php
+// config/lukk.php (top level, or per guard under `guards.{name}`)
+'claim_seconds' => (int) env('LUKK_CLAIM_SECONDS', 0),   // e.g. 600
+```
+
+With a window set, the ORIGINAL credentials of a session started by a sign-in — its first access
+token and never-rotated refresh token — are revoked (the whole family, `Events\SessionUnclaimed`) if the
+session is not used within the window. **The contract:** every client must, within the window, call
+`POST /auth/session/claim` (204, authenticated, not pin-gated), or make an authenticated request to this
+lukk app, or refresh. A client that uses its access token only on another service must call the claim
+route. The effective window is at least `access_ttl + leeway` and at least 60 seconds. Sessions with a
+pinned grant are exempt.
+
+The clamp only guarantees the original *access* token cannot be used past the window. A client that
+does not make an authenticated request to this app or refresh within it — including one that uses the
+token only on another service and refreshes after that service's 401 — must call the claim route.
+
+If you implement `RefreshTokenRepository` yourself, populate `RefreshTokenRecord::$createdAt` (the row's
+creation time); a `Lukk::useRefreshTokenModel` subclass must keep `$timestamps` on. Without it the
+original refresh token is never recognised, so nothing is revoked, and lukk logs a warning once per
+worker process.
+
+Markers live in the denylist cache store. Losing them fails open; restoring an old snapshot can at most
+revoke a session still presenting its original sign-in refresh token after the window. A published
+config without the key — or a cached one — leaves the feature off.
 
 ### An unverified two-factor user is refused at login
 

@@ -19,7 +19,12 @@ class RefreshTokenRecord
         public readonly int $expiresAt,
         /** The family's own scope claim, or null to derive it per mint. */
         public readonly ?string $scope = null,
-        /** When the session started — meaningful to a data subject reading their own export. */
+        /**
+         * When this ROW was created — meaningful to a data subject reading their own export, and REQUIRED
+         * for `claim_seconds`: it is how a never-rotated row is recognised as the sign-in's original
+         * refresh token. A repository leaving it null silently disables that revocation (lukk logs a
+         * warning once per worker process).
+         */
         public readonly ?int $createdAt = null,
     ) {}
 }

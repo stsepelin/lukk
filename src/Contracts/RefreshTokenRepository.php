@@ -23,6 +23,10 @@ interface RefreshTokenRepository
      * the transaction, so the application's `abilitiesUsing` callback never runs while a row lock is
      * held. A token hash's subject and family are written once and never updated, so reading them
      * outside the lock is safe.
+     *
+     * The record must carry `createdAt` (the row's creation time, unix seconds) for `claim_seconds`
+     * to work — it is how the sign-in's original refresh row is recognised. Left null, a late original
+     * is never revoked, and lukk logs a warning once per worker process.
      */
     public function findByHash(string $hash): ?RefreshTokenRecord;
 

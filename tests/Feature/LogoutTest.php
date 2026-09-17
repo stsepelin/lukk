@@ -472,32 +472,98 @@ it('still meters a valid bearer that cannot be revoked, since it could be replay
     $this->withToken($unrevocable)->postJson('/auth/logout', ['refresh_token' => 'guess-2'])->assertStatus(429);
 });
 
-it('cannot exceed the lookup limit under a concurrent burst', function () {
-    // Check-then-act (`tooManyAttempts` then `hit`, which is also what `RateLimiter::attempt()` does)
-    // lets two requests both read "under the limit" before either counts. The reservation is taken
-    // first instead. A second logout is run from INSIDE the first one's reservation, before it lands.
+it('never exhausts the lookup budget with logouts that present real refresh tokens', function () {
+    // The budget exists to stop PROBING, and probing always misses. A token that resolves — valid,
+    // rotated, revoked or expired — costs nothing, so a BFF logging many users out from one address
+    // (no bearer, just their refresh tokens) is never refused.
     config(['lukk.rate_limits.refresh.max_attempts' => 1]);
     $user = User::factory()->create();
-    $first = $user->startSession();
-    $second = $user->startSession();
+
+    foreach (range(1, 4) as $ignored) {
+        $pair = expiredSession($user);
+        $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+        expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+    }
+});
+
+it('does no revocation work for an already-revoked token, and counts it against the budget', function () {
+    // One known token — even a long-dead one — must not let an unauthenticated caller trigger a
+    // denylist write and UPDATEs on every request. A legitimate resent logout is one request.
+    config(['lukk.rate_limits.refresh.max_attempts' => 2]);
+    $pair = expiredSession(User::factory()->create());
+    revokeSession()(familyOf($pair->refreshToken));
+
+    $denylist = app(Denylist::class);
+    $writes = new ArrayObject;
+    app()->instance(Denylist::class, new class($denylist, $writes) implements Denylist
+    {
+        public function __construct(private Denylist $inner, private ArrayObject $writes) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->writes[] = 'jti';
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->writes[] = 'fid';
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return $this->inner->has($type, $id);
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return $this->inner->hasAny($types);
+        }
+    });
+
+    DB::listen(function ($query) use ($writes) {
+        if (str_starts_with(strtolower($query->sql), 'update')) {
+            $writes[] = 'update';
+        }
+    });
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertStatus(429);
+
+    expect($writes->getArrayCopy())->toBe([]);
+});
+
+it('counts misses, and refuses once they exhaust the budget — even for a real token', function () {
+    // Refusing a real token is deliberate: whether it exists is only knowable by looking it up, and
+    // the lookup is exactly what an exhausted bucket must not perform. The 429 leaves the cookie and
+    // the session alone, so the client retries after Retry-After.
+    config(['lukk.rate_limits.refresh.max_attempts' => 2]);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'miss-1'])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => 'miss-2'])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertStatus(429);
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeTrue();
+});
+
+it('counts every concurrent miss, and never answers differently for a hit and a miss', function () {
+    // Two misses racing past the pre-check both run their lookup and both count — so the bucket ends
+    // over its limit and the next request is refused. Neither racing request is answered from that
+    // post-lookup count: a 429 for the miss and a 204 for a hit at the budget edge would reveal which
+    // tokens exist.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+    $pair = expiredSession(User::factory()->create());
 
     $limiter = new class(app('cache')->store()) extends RateLimiter
     {
         public ?Closure $concurrent = null;
 
-        public function hit($key, $decaySeconds = 60)
-        {
-            $concurrent = $this->concurrent;
-            $this->concurrent = null;
-            $concurrent && $concurrent();
-
-            return parent::hit($key, $decaySeconds);
-        }
-
         public function tooManyAttempts($key, $maxAttempts)
         {
-            // The race check-then-act loses: this request has READ "under the limit", and the other
-            // runs to completion before this one counts.
+            // This request has READ "under the limit"; the other runs to completion before it looks up.
             $tooMany = parent::tooManyAttempts($key, $maxAttempts);
             $concurrent = $this->concurrent;
             $this->concurrent = null;
@@ -509,25 +575,25 @@ it('cannot exceed the lookup limit under a concurrent burst', function () {
     app()->instance(RateLimiter::class, $limiter);
 
     $outcomes = [];
-    $limiter->concurrent = function () use (&$outcomes, $second) {
+    $run = function (string $token) use (&$outcomes) {
         try {
-            app(EndSession::class)('', [$second->refreshToken], 'burst');
+            app(EndSession::class)('', [$token], 'burst');
             $outcomes[] = 'ok';
         } catch (ThrottleRequestsException) {
             $outcomes[] = '429';
         }
     };
 
-    try {
-        app(EndSession::class)('', [$first->refreshToken], 'burst');
-        $outcomes[] = 'ok';
-    } catch (ThrottleRequestsException) {
-        $outcomes[] = '429';
-    }
+    $limiter->concurrent = fn () => $run('miss-concurrent');
+    $run('miss-first');
 
-    sort($outcomes);
-    expect($outcomes)->toBe(['429', 'ok'])
-        ->and(collect([$first, $second])->filter(fn ($p) => ! familyIsLive(familyOf($p->refreshToken))))->toHaveCount(1);
+    expect($outcomes)->toBe(['ok', 'ok'])
+        ->and($limiter->attempts('lukk-logout|api|burst'))->toBe(2);
+
+    $run($pair->refreshToken);
+
+    expect($outcomes[2])->toBe('429')
+        ->and(familyIsLive(familyOf($pair->refreshToken)))->toBeTrue();
 });
 
 it('meters logout lookups per guard, independently of the refresh route', function () {

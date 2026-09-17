@@ -22,6 +22,7 @@ use Illuminate\Support\ServiceProvider;
 use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ChangePassword;
+use Lukk\Actions\ClaimSession;
 use Lukk\Actions\ConfirmPassword;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\EnableTwoFactor;
@@ -82,6 +83,7 @@ use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Support\CacheDenylist;
 use Lukk\Support\CacheStoreGuard;
 use Lukk\Support\OptionalDependency;
+use Lukk\Support\UnclaimedSessions;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
 use Lukk\TwoFactor\Google2FaTotpProvider;
@@ -217,6 +219,10 @@ class LukkServiceProvider extends ServiceProvider
             $this->cacheStore(), (int) $this->config()['passkeys']['challenge_ttl'],
         ));
 
+        // Shares the revocation store: a marker has to be visible to every worker, exactly like the
+        // denylist entry it may lead to.
+        $this->app->singleton(UnclaimedSessions::class, fn () => new UnclaimedSessions($this->cacheStore()));
+
         $this->app->singleton(WebAuthnCeremony::class, function () {
             OptionalDependency::ensure(AuthenticatorAttestationResponseValidator::class, 'web-auth/webauthn-lib', 'passkeys');
 
@@ -282,9 +288,14 @@ class LukkServiceProvider extends ServiceProvider
         ));
 
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
-            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard()));
+            $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard(),
+            $this->unclaimedSessions($app)));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(),
+            $this->unclaimedSessions($app)));
+        $this->app->bind(ClaimSession::class, fn ($app) => new ClaimSession(
+            $app->make(UnclaimedSessions::class), $app->make(RevokeSession::class),
+            UnclaimedSessions::window(Lukk::guardConfig()), (int) (Lukk::guardConfig()['leeway'] ?? 0), Lukk::currentGuard()));
         $this->app->bind(EndSession::class, fn ($app) => new EndSession(
             $app->make(TokenVerifier::class), $app->make(TokenIssuer::class), $app->make(RefreshTokenRepository::class),
             $app->make(RevokeSession::class), $app->make(Denylist::class), $app->make(RateLimiter::class),
@@ -295,7 +306,8 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
-            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
+            $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard(),
+            $this->unclaimedSessions($app) === null ? null : $app->make(ClaimSession::class)));
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
@@ -398,7 +410,9 @@ class LukkServiceProvider extends ServiceProvider
             // for another guard fails the audience (and signature, if keys differ) check and returns
             // null before any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
             $verifier = new FirebaseTokenVerifier(Lukk::guardConfig($name), $app->make(Denylist::class));
-            $guard = new JwtGuard($verifier, $provider, $name);
+            // The claim window is resolved here, once per guard build, so a request on an install that
+            // leaves `claim_seconds` off pays an integer compare and nothing else.
+            $guard = new JwtGuard($verifier, $provider, $name, UnclaimedSessions::window(Lukk::guardConfig($name)));
 
             return new RequestGuard(fn ($request) => $guard($request), $app->make('request'), $provider);
         });
@@ -456,6 +470,8 @@ class LukkServiceProvider extends ServiceProvider
             });
         }
 
+        $this->registerClaimLimiter($limiter, 'lukk-claim', (string) ($this->config()['guard'] ?? 'api'));
+
         $limiter->for('lukk-login', function ($request) {
             $limit = (array) ($this->config()['rate_limits']['login'] ?? []);
 
@@ -480,6 +496,8 @@ class LukkServiceProvider extends ServiceProvider
             // so it needs its own bucket. Registered unconditionally: a limiter attached to a route
             // that never mounts is inert, whereas a route mounted against a MISSING limiter is a
             // 500 on the endpoint standing between a user and their account.
+            $this->registerClaimLimiter($limiter, "lukk-{$guardName}-claim", (string) $guardName);
+
             $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
                 decaySeconds: (int) ($limits['two_factor']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
@@ -506,6 +524,34 @@ class LukkServiceProvider extends ServiceProvider
                 return $out;
             });
         }
+    }
+
+    /**
+     * The claim route's limiter: per USER, with the refresh limits.
+     *
+     * Not per address. Every call is already authenticated (framework priority runs `Authenticate`
+     * before `ThrottleRequests`), and an address-keyed bucket is the one a NAT or a BFF shares — the
+     * mistake that made a valid logout 429. A claim is at most one call per session, so the refresh
+     * limits are generous; the bucket only has to stop one token hammering the route.
+     */
+    private function registerClaimLimiter(RateLimiter $limiter, string $name, string $guard): void
+    {
+        $limiter->for($name, function ($request) use ($name, $guard) {
+            $limits = (array) (Lukk::guardConfig($guard)['rate_limits']['refresh'] ?? []);
+            $user = $request->user($guard);
+
+            return (new Limit(maxAttempts: (int) ($limits['max_attempts'] ?? 30), decaySeconds: (int) ($limits['decay_seconds'] ?? 60)))
+                ->by($user === null ? $name.'|'.Lukk::rateLimitKey($request) : $name.'|'.$guard.'|user|'.$user->getAuthIdentifier());
+        });
+    }
+
+    /**
+     * The unclaimed-session markers, or null when the CURRENT guard's `claim_seconds` is off — so the
+     * actions never resolve the cache store for a feature nobody enabled.
+     */
+    private function unclaimedSessions(Application $app): ?UnclaimedSessions
+    {
+        return UnclaimedSessions::window(Lukk::guardConfig()) > 0 ? $app->make(UnclaimedSessions::class) : null;
     }
 
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */

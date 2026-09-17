@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Route;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
@@ -353,4 +354,46 @@ it('meters logout lookups per guard, so one guard\'s traffic cannot throttle ano
     $this->postJson('/admin/auth/logout', ['refresh_token' => $adminPair->refreshToken])->assertNoContent();
 
     expect(RefreshToken::where('guard', 'admin')->whereNull('revoked_at')->exists())->toBeFalse();
+});
+
+it('marks, claims and expires unclaimed sessions per guard', function () {
+    // Enabled for the admin guard only. The users guard's sessions are never marked, and an admin's
+    // late first use revokes only the admin family, despite colliding ids.
+    config(['lukk.access_ttl' => 300, 'lukk.claim_seconds' => 0, 'lukk.guards.admin.claim_seconds' => 600]);
+    User::factory()->create(['email' => 'user@corp.com']);
+    Admin::factory()->create(['email' => 'root@corp.com']);
+
+    forget();
+    $users = $this->postJson('/auth/login', ['email' => 'user@corp.com', 'password' => 'password'])->assertOk()->json();
+    forget();
+    $admin = $this->postJson('/admin/auth/login', ['email' => 'root@corp.com', 'password' => 'password'])->assertOk()->json();
+
+    $familyOf = fn (string $refresh) => (string) RefreshToken::where('token_hash', hash('sha256', $refresh))->value('family_id');
+
+    expect(Cache::has('lukk:unclaimed:'.$familyOf($users['refresh_token'])))->toBeFalse()
+        ->and(Cache::has('lukk:unclaimed:'.$familyOf($admin['refresh_token'])))->toBeTrue();
+
+    $this->travel(601)->seconds();
+
+    forget();
+    $this->withToken($users['access_token'])->postJson('/auth/session/claim')->assertNoContent();
+    forget();
+    $this->withToken($admin['access_token'])->postJson('/admin/auth/session/claim')->assertUnauthorized();
+
+    expect(RefreshToken::where('guard', 'admin')->whereNull('revoked_at')->exists())->toBeFalse()
+        ->and(RefreshToken::where('guard', 'api')->whereNull('revoked_at')->exists())->toBeTrue();
+});
+
+it('claims an admin session through the admin guard\'s own claim route', function () {
+    config(['lukk.access_ttl' => 300, 'lukk.guards.admin.claim_seconds' => 600]);
+    Admin::factory()->create(['email' => 'boss@corp.com']);
+
+    forget();
+    $admin = $this->postJson('/admin/auth/login', ['email' => 'boss@corp.com', 'password' => 'password'])->assertOk()->json();
+    forget();
+    $this->withToken($admin['access_token'])->postJson('/admin/auth/session/claim')->assertNoContent();
+
+    $this->travel(601)->seconds();
+    forget();
+    $this->withToken($admin['access_token'])->postJson('/admin/auth/session/claim')->assertNoContent();
 });

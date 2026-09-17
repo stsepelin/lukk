@@ -51,6 +51,8 @@ class RotateRefreshToken
          * gates then honoured.
          */
         private readonly string $guard = 'api',
+        /** Null unless this guard's `claim_seconds` is on. */
+        private readonly ?ClaimSession $claim = null,
     ) {}
 
     public function __invoke(string $presentedSecret): TokenPair
@@ -75,6 +77,24 @@ class RotateRefreshToken
         // insert and never updated, so the locked read cannot disagree about them. It re-reads
         // everything the DECISION depends on (rotated_at, revoked_at, expires_at) under the lock.
         $preRead = $this->repository->findByHash($hash);
+
+        // Unclaimed sessions: a refresh is a use, so it claims — or, after the window, revokes. Here,
+        // before the transaction and before any application callback, for the same reasons those are
+        // hoisted: a cache round trip must not extend the row lock, and the revocation it may perform
+        // must run outside a transaction. Only for a token the transaction would accept; a rejected
+        // one is not a use, and reuse detection must stay the thing that decides a replay.
+        // `unclaimed`, not `reuse`: nothing was replayed, so `RefreshTokenReused` does not fire.
+        if ($this->claim !== null && $preRead !== null && ! $this->rejectable($preRead, $grace)
+            // The family's ORIGINAL row is the never-rotated one created with it; a successor row was
+            // created by a refresh, so presenting it proves the session was used.
+            && ! ($this->claim)(
+                $preRead->familyId,
+                $preRead->rotatedAt === null ? $preRead->createdAt : null,
+                $preRead->rotatedAt === null && $preRead->createdAt === null,
+            )) {
+            throw new InvalidRefreshToken('unclaimed');
+        }
+
         [$abilities, $claims] = $this->resolveMint($preRead, $grace);
 
         $outcome = $this->repository->transaction(function () use ($hash, $grace, $secret, $secretHash, $abilities, $claims, $preRead): RotationOutcome {

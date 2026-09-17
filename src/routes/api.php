@@ -20,6 +20,7 @@ use Lukk\Http\Controllers\PasswordController;
 use Lukk\Http\Controllers\PasswordResetLinkController;
 use Lukk\Http\Controllers\RecoveryCodeController;
 use Lukk\Http\Controllers\RegisteredUserController;
+use Lukk\Http\Controllers\SessionClaimController;
 use Lukk\Http\Controllers\SessionController;
 use Lukk\Http\Controllers\TokenController;
 use Lukk\Http\Controllers\TwoFactorAuthenticationController;
@@ -49,6 +50,12 @@ $sessionRoutes = function (string $guardName, string $throttle = ''): void {
     // from one address — a NAT, a BFF not forwarding the client — turn a valid-bearer logout into a 429.
     // `EndSession` meters only the refresh-token lookup, which is the part worth metering.
     Route::post('logout', [AuthenticatedSessionController::class, 'destroy']);
+
+    // Claim a new session (`claim_seconds`). The guard does the claiming while it authenticates; this
+    // is the no-op a client can call first. NOT pin-gated, like logout and refresh: it acts on the
+    // calling session alone and grants nothing, and a pinned token has to be able to do what any token
+    // does. Mounted even with the feature off, so clients need not know the setting.
+    Route::post('session/claim', SessionClaimController::class)->middleware([$guard, 'throttle:lukk-'.$throttle.'claim']);
 
     // Gated on `lukk.sessions`: these revoke OTHER sessions, so a token pinned to a narrow grant —
     // a personal access token, a capped impersonation session — must not reach them. `logout` and
