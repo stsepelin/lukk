@@ -39,6 +39,37 @@ function currentOtp(string $secret): string
     return app(Google2FA::class)->getCurrentOtp($secret);
 }
 
+it('clamps the TOTP window, so one env typo cannot widen the accepted set', function () {
+    // RFC 6238 §5.2 recommends at most one time step for network delay. Each step admits two more
+    // 30-second codes, so an unclamped `window: 100` made 201 of the million codes valid at any
+    // instant — ~67x weaker per guess. It was the only unclamped numeric knob in the package.
+    config(['lukk.two_factor.window' => 100]);
+    app()->forgetInstance(TwoFactorProvider::class); // a singleton, resolved with the old window
+    $secret = app(TwoFactorProvider::class)->generateSecret();
+
+    // `getCurrentOtp()` takes no timestamp — it is `oathTotp($secret, getTimestamp())`. Address the
+    // counter directly: 11 steps back is outside the clamp (10) but well inside the configured 100.
+    $engine = app(Google2FA::class);
+    $far = $engine->oathTotp($secret, $engine->getTimestamp() - 11);
+    $near = $engine->oathTotp($secret, $engine->getTimestamp() - 9);
+
+    expect(app(TwoFactorProvider::class)->verify($secret, $far))->toBeFalse()
+        // …and the clamp is a ceiling, not a replacement: 9 steps back is still inside it.
+        ->and(app(TwoFactorProvider::class)->verify($secret, $near))->toBeTrue();
+});
+
+it('renders 422, not a 500, for a non-scalar confirmation code', function () {
+    // The one OTP-verifying controller without a typed `code`: `(string) $array` raised an
+    // ErrorException, while its sibling `POST /auth/two-factor-challenge` answers 422 for the same
+    // payload because `TwoFactorChallengeRequest` types the field.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+
+    $this->withToken($access)->withHeaders(confirmedHeaders($access))
+        ->postJson('/auth/two-factor/confirm', ['code' => ['123456']])
+        ->assertStatus(422);
+});
+
 it('requires a fresh confirmation to manage 2FA', function () {
     $token = User::factory()->create()->startSession()->accessToken;
 

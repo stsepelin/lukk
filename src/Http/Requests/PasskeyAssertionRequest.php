@@ -26,6 +26,11 @@ class PasskeyAssertionRequest extends FormRequest
         return [
             'ceremony_id' => ['required', 'string'],
             'credential' => ['required', 'array'],
+            // One rung deeper than `array`: `FinishPasskeyLogin` casts this to string, and an array or
+            // object there raised an ErrorException — a 500 on an UNAUTHENTICATED route, against this
+            // package's own rule that malformed input renders 422. WebAuthn L3 §5.1 types `id` as a
+            // DOMString, so nothing legitimate is lost.
+            'credential.id' => ['required', 'string'],
         ];
     }
 }

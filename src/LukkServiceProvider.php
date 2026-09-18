@@ -252,7 +252,11 @@ class LukkServiceProvider extends ServiceProvider
 
             return new Google2FaTotpProvider(new Google2FA, $this->cacheStore(), [
                 'issuer' => $twoFactor['issuer'] ?? $this->appName(),
-                'window' => (int) ($twoFactor['window'] ?? 1),
+                // Clamped 0..10, like every other numeric knob here (`recovery_codes` is 1..100). RFC 6238
+                // §5.2 recommends "at most one time step" for network delay; each extra step widens the
+                // accepted set by two 30-second codes, so an unclamped `window: 100` made 201 of the
+                // million codes valid at once — 67x weaker per guess, from one env var typo.
+                'window' => max(0, min(10, (int) ($twoFactor['window'] ?? 1))),
             ]);
         });
     }

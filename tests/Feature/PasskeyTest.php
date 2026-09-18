@@ -47,6 +47,19 @@ it('requires confirmation to register a passkey', function () {
     $this->withToken($access)->postJson('/auth/passkeys/registration-options')->assertStatus(423);
 });
 
+it('renders 422, not a 500, for a non-scalar credential id', function () {
+    // `credential` was typed only as `array`, so `credential.id` could be an array or object and
+    // `FinishPasskeyLogin`'s `(string) $id` raised an ErrorException — a 500 from an UNAUTHENTICATED
+    // caller, against this package's own rule that malformed input is a 422. The ceremony id comes
+    // free from the public `login-options` route, so the whole path is pre-auth.
+    $id = $this->postJson('/auth/passkeys/login-options')->assertOk()->json('ceremony_id');
+
+    foreach ([['a'], ['k' => 'v']] as $hostile) {
+        $this->postJson('/auth/passkeys/login', ['ceremony_id' => $id, 'credential' => ['id' => $hostile]])
+            ->assertStatus(422);
+    }
+})->group('passkeys');
+
 it('rejects registration with an invalid attestation', function () {
     $user = User::factory()->create();
     $access = $user->startSession()->accessToken;

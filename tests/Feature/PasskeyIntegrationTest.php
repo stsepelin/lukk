@@ -76,23 +76,25 @@ it('rejects a presence-only assertion when user verification is required', funct
     $access = $user->startSession()->accessToken;
     $headers = confirmedHeaders($access);
 
-    // Registration only checks presence, so it still succeeds...
+    // Refused at REGISTRATION, per WebAuthn L3 §7.1 step 17. It used to enrol: the creation options
+    // omitted `authenticatorSelection`, so `CheckUserVerification` read null and returned early. The
+    // credential was then stored and listed while every assertion was refused by the check the
+    // assertion side does perform — a passkey the visitor could see but never use, and a self-lockout
+    // if they trusted that listing and pruned their other factors.
     $options = $this->withToken($access)->withHeaders($headers)
         ->postJson('/auth/passkeys/registration-options')->assertOk()->json();
+
     $this->withToken($access)->withHeaders($headers)
         ->postJson('/auth/passkeys', ['credential' => toBase64Url($authenticator->getAttestation($options, 'https://localhost'))])
-        ->assertNoContent();
-
-    // ...but login now requires user verification, which the emulator (user-present
-    // only) does not perform — so the assertion is rejected.
-    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
-    $assertion = toBase64Url($authenticator->getAssertion('localhost', null, $start['options']['challenge'], 'https://localhost'));
-
-    $this->postJson('/auth/passkeys/login', ['ceremony_id' => $start['ceremony_id'], 'credential' => $assertion])
         ->assertStatus(422);
+
+    // And nothing was stored, so the list does not advertise a factor that cannot authenticate.
+    $this->withToken($access)->getJson('/auth/passkeys')->assertOk()->assertJsonCount(0, 'passkeys');
 });
 
 it('rejects responses presented to the wrong ceremony', function () {
+    // Not a UV test: the emulator is user-present only, and `required` now refuses it at registration.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
     $authenticator = new Authenticator(new InMemoryRepository);
     $ceremony = app(WebAuthnCeremony::class);
 
