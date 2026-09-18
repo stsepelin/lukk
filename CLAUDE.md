@@ -10,6 +10,7 @@ User-facing docs live in the separate **[lukk-docs](https://github.com/stsepelin
 composer install
 vendor/bin/pest                                   # full suite (Testbench, sqlite :memory:, array cache)
 XDEBUG_MODE=coverage vendor/bin/pest --coverage   # coverage
+composer test:mutation                            # Pest's own mutation testing (minutes, not seconds)
 vendor/bin/pint                                   # lint (Laravel preset, pint.json)
 php artisan lukk:secret                           # generate LUKK_SECRET into .env
 php artisan lukk:keygen                            # generate an RS256/ES256 signing keypair
@@ -27,6 +28,8 @@ php artisan lukk:prune                            # delete expired/revoked refre
 ## Security invariants — do not break
 
 - **One runtime dependency** (`firebase/php-jwt`). Never hand-roll JWS, TOTP, or WebAuthn. The 2FA/passkey libs are the only sanctioned extra deps — `suggest` + `require-dev`, gated behind `features.two_factor`/`features.passkeys`, never autoloaded unless enabled.
+- **Coverage is the weaker half of the gate.** 100% says every line ran, not that any test would fail if it behaved differently. Measured here: **25 of 30 `?? default` guards could be deleted one at a time with the whole suite green**, and the tests meant to pin them had been written alongside the very change they were supposed to catch. `composer test:mutation` (Pest 4's built-in mutation testing — no extra dependency, and deliberately NOT Infection, which needs a Composer plugin this repo's `allow-plugins` policy excludes) asks the other question. CI runs it per-PR on the changed classes and nightly in full. Both use `--min=70`, a **provisional** floor: a whole-package run takes over an hour locally, so unlike lukk-js (which pins its measured 86/85) this one was not measured before landing. **Raise it from the first nightly's printed score** — at 70 it tolerates a large regression, which is the one thing it exists to prevent. Not 100 either: at a mid-eighties score that would fail nearly every PR, and a gate that is always red gets switched off. Two standing guards back it: `tests/Feature/ConfigDegradationTest.php` strips each config key in both shapes it goes missing in and runs the flow it sits on, and its last test scans `src/` so a NEW guarded read cannot ship unexercised — it fails by key name.
+
 - **No `lukk` config key is guaranteed at runtime — always read with a `?? default`.** The provider deep-merges (`mergeConfigDeep`) so a stale published config is backfilled, but that method **early-returns when `configurationIsCached()`**, which is the production norm and is pinned by `tests/Unit/ConfigMergeTest.php`. An app that ran `config:cache` on one version and upgrades to one that adds a key gets **no backfill at all**. `Lukk::guardConfig()` is therefore typed `array<string, mixed>` on purpose, never a precise `array{...}` shape. Deleting the `??` defaults on the strength of such a shape turned a degraded-but-working install into a hard 500 — one of them inside `boot()`, so the whole application rather than just the auth routes.
 
 - **Alg pinning:** always decode with an explicit algorithm; reject `alg=none` and alg-mismatch. Validate `iss`/`aud`/`exp`/`nbf` every request.

@@ -26,6 +26,42 @@ use PragmaRX\Google2FA\Google2FA;
  */
 uses()->group('config');
 
+/** Keys the twoFactor flow reads. */
+function twoFactorKeys(): array
+{
+    return [
+        'two_factor.challenge_ttl',
+        'two_factor.window',
+        'rate_limits.two_factor.max_attempts',
+        'rate_limits.two_factor.decay_seconds',
+        'leeway',
+        'algorithm',
+    ];
+}
+
+/** Keys the confirm flow reads. */
+function confirmKeys(): array
+{
+    return ['confirm.ttl', 'confirm.header', 'leeway', 'algorithm'];
+}
+
+/** Keys the passkey flow reads. */
+function passkeyKeys(): array
+{
+    return ['passkeys.challenge_ttl', 'passkeys.user_verification', 'passkeys.rp_name'];
+}
+
+/** Keys the ordinary sign-in → authenticate → rotate flow reads. */
+function coreKeys(): array
+{
+    return [
+        'access_ttl', 'algorithm', 'leeway', 'grace_seconds', 'refresh_ttl', 'claim_seconds',
+        'username', 'user_provider', 'guard', 'guards', 'routes', 'denylist_store', 'fork_threshold',
+        'rate_limits.login', 'rate_limits.login.max_attempts', 'rate_limits.login.decay_seconds',
+        'rate_limits.login.account_max_attempts', 'rate_limits.refresh',
+    ];
+}
+
 /** A key absent entirely, as a config cached before it existed would have it. */
 function withoutLukk(string $key): void
 {
@@ -85,7 +121,7 @@ it('signs in, authenticates and rotates without it', function (Closure $break, s
     test()->withToken($tokens['access_token'])->postJson('/auth/session/claim')->assertSuccessful();
     app('auth')->forgetGuards();
     test()->postJson('/auth/refresh', ['refresh_token' => $tokens['refresh_token']])->assertOk();
-})->with('missing')->with(['access_ttl', 'algorithm', 'leeway', 'grace_seconds', 'refresh_ttl', 'claim_seconds']);
+})->with('missing')->with(coreKeys());
 
 it('completes a two-factor sign-in without it', function (Closure $break, string $key) {
     $break($key);
@@ -103,14 +139,7 @@ it('completes a two-factor sign-in without it', function (Closure $break, string
         'challenge_token' => $challenge,
         'code' => app(Google2FA::class)->getCurrentOtp($secret),
     ])->assertOk()->assertJsonStructure(['access_token', 'refresh_token']);
-})->with('missing')->with([
-    'two_factor.challenge_ttl',
-    'two_factor.window',
-    'rate_limits.two_factor.max_attempts',
-    'rate_limits.two_factor.decay_seconds',
-    'leeway',
-    'algorithm',
-]);
+})->with('missing')->with(twoFactorKeys());
 
 it('earns and spends a step-up confirmation without it', function (Closure $break, string $key) {
     $break($key);
@@ -126,7 +155,7 @@ it('earns and spends a step-up confirmation without it', function (Closure $brea
     $header = (string) (config('lukk.confirm.header') ?? 'X-Lukk-Confirmation');
     test()->withToken($access)->withHeaders([$header => $token])
         ->postJson('/auth/two-factor')->assertSuccessful();
-})->with('missing')->with(['confirm.ttl', 'confirm.header', 'leeway', 'algorithm']);
+})->with('missing')->with(confirmKeys());
 
 it('registers a passkey without it', function (Closure $break, string $key) {
     app()->bind(WebAuthnCeremony::class, FakeWebAuthnCeremony::class);
@@ -146,7 +175,7 @@ it('registers a passkey without it', function (Closure $break, string $key) {
     ])->assertNoContent();
 
     expect(app(PasskeyRepository::class)->findByCredentialId('cred-1'))->not->toBeNull();
-})->with('missing')->with(['passkeys.challenge_ttl', 'passkeys.user_verification', 'passkeys.rp_name']);
+})->with('missing')->with(passkeyKeys());
 
 it('hands out the documented number of recovery codes without it', function (Closure $break, string $key) {
     $break($key);
@@ -188,3 +217,93 @@ it('refuses tokens rather than inventing an identity, when the binding claims ar
         'code' => app(Google2FA::class)->getCurrentOtp($secret),
     ])->assertStatus(422);
 })->with('missing')->with(['issuer', 'audience']);
+
+/**
+ * Every guarded read in `src/` is either exercised above, or named here with a reason.
+ *
+ * The point of this test is the FAILURE mode: adding a `?? default` without covering it turns this red,
+ * so a default cannot quietly ship unexercised again. That is how 25 of 30 of them got here.
+ */
+function guardedConfigKeys(): array
+{
+    $keys = [];
+
+    foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(__DIR__.'/../../src')) as $file) {
+        if ($file->getExtension() !== 'php') {
+            continue;
+        }
+
+        preg_match_all(
+            "/config(?:\(\))?(?:\('lukk\.([a-z_.]+)'\))?((?:\['[a-z_]+'\])*)\s*\?\?/",
+            (string) file_get_contents($file->getPathname()),
+            $matches,
+            PREG_SET_ORDER,
+        );
+
+        foreach ($matches as $match) {
+            preg_match_all("/'([a-z_]+)'/", $match[2] ?? '', $brackets);
+            $path = $match[1] !== '' ? $match[1] : implode('.', $brackets[1]);
+
+            if ($path !== '') {
+                $keys[$path] = true;
+            }
+        }
+    }
+
+    return array_keys($keys);
+}
+
+it('leaves no guarded config read unexercised', function () {
+    // A slice read (`['passkeys'] ?? []`) counts as covered by any leaf under it, and a leaf read through
+    // an already-sliced variable (`$twoFactor['window']`) by the full path it belongs to.
+    $covered = [
+        ...coreKeys(), ...twoFactorKeys(), ...confirmKeys(), ...passkeyKeys(),
+        'two_factor.recovery_codes', 'issuer', 'audience',
+    ];
+
+    $exempt = [
+        // No default is possible: `firebase/php-jwt` ^7 throws on a short or empty HMAC key, which is the
+        // documented behaviour — fail loud rather than sign weakly.
+        'secret' => 'no default possible; the JWT library throws',
+        // Read only on RS256/ES256, where `KeyRing` fails loud by design if the active kid is unusable.
+        'keys.active' => 'asymmetric only; KeyRing fails loud',
+        'keys.private' => 'asymmetric only; KeyRing fails loud',
+        'keys.public' => 'asymmetric only; KeyRing fails loud',
+        'keys.passphrase' => 'asymmetric only; optional by nature',
+        // Laravel's own guard/provider config arrays, not the `lukk` block.
+        'driver' => "Laravel's auth guard config, not lukk's",
+        'provider' => "Laravel's auth guard config, not lukk's",
+        // Feature flags: absent disables an OPTIONAL feature, which is degradation working as intended.
+        // The two that default to true — and so would silently unmount a documented route — are covered
+        // by their own feature suites (AccountDeletionTest, ChangePasswordTest).
+        'features.account_deletion' => 'defaults true; route mount pinned by AccountDeletionTest',
+        'features.change_password' => 'defaults true; route mount pinned by ChangePasswordTest',
+        'features.email_verification' => 'defaults false; absent disables an optional feature',
+        'features.lockout' => 'defaults false; absent disables an optional feature',
+        'features.password_reset' => 'defaults false; absent disables an optional feature',
+        // Optional-feature settings, exercised by those features' own suites.
+        'lockout' => 'optional feature; LockoutTest',
+        'email_verification.expire' => 'optional feature; EmailVerificationTest',
+        'email_verification.block_unverified_login' => 'optional feature; EmailVerificationTest',
+        'password_reset.broker' => 'optional feature; PasswordResetTest',
+        'password_reset.frontend_url' => 'optional feature; PasswordResetTest',
+        'password_reset.revoke_sessions' => 'optional feature; PasswordResetTest',
+        'registration.login' => 'optional feature; RegistrationTest',
+    ];
+
+    $unexercised = array_values(array_filter(guardedConfigKeys(), function (string $key) use ($covered, $exempt) {
+        if (isset($exempt[$key])) {
+            return false;
+        }
+
+        foreach ($covered as $one) {
+            if ($key === $one || str_ends_with($one, ".$key") || str_starts_with($one, "$key.")) {
+                return false;
+            }
+        }
+
+        return true;
+    }));
+
+    expect($unexercised)->toBe([]);
+});

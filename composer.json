@@ -55,6 +55,11 @@
             ]
         }
     },
+    "scripts": {
+        "test": "pest",
+        "test:coverage": "XDEBUG_MODE=coverage pest --coverage",
+        "test:mutation": "XDEBUG_MODE=coverage pest --mutate --parallel --covered-only --everything"
+    },
     "minimum-stability": "stable",
     "prefer-stable": true,
     "config": {
