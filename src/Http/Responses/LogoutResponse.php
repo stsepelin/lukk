@@ -28,7 +28,11 @@ class LogoutResponse implements LogoutResponseContract
         if ($this->clearRefreshCookie && (bool) (Lukk::guardConfig()['cookie_mode'] ?? false)) {
             // Delete with the same name + attributes (Secure + Path=/) the cookie was
             // set with, so strict browsers actually honor the removal.
-            $response->withCookie(cookie()->make(
+            // `->withDomain(null)`: `CookieJar` resolves the domain as `$domain ?: $this->domain` and
+            // its default comes from `session.domain`, so under `SESSION_DOMAIN` this clear carried a
+            // Domain the set never had — and a `__Host-` cookie with Domain is discarded outright
+            // (rfc6265bis §4.1.3.2), leaving the very cookie this exists to remove in place.
+            $response->withCookie((cookie()->make(
                 name: RefreshCookie::name(),
                 value: '',
                 minutes: -2628000,
@@ -38,7 +42,7 @@ class LogoutResponse implements LogoutResponseContract
                 httpOnly: true,
                 raw: false,
                 sameSite: 'Strict',
-            ));
+            ))->withDomain(null));
         }
 
         return $response;

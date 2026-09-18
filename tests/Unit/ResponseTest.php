@@ -58,6 +58,28 @@ it('puts the refresh token in a __Host- cookie and omits it from the body in coo
     expect($cookie->getDomain())->toBeNull();
 });
 
+it('carries no Domain even under SESSION_DOMAIN — a __Host- cookie with one is discarded', function () {
+    // `CookieJar` resolves the domain as `$domain ?: $this->domain`, and its default is seeded from
+    // `session.domain`. Both `null` and `''` are falsy, so passing `domain: null` was NOT "no Domain" —
+    // it was "fall back to SESSION_DOMAIN". An app sharing a web session across subdomains therefore
+    // emitted `__Host-refresh` WITH `domain=.example.com`, which rfc6265bis §4.1.3.2 makes the browser
+    // ignore entirely: login answered 200, no cookie was stored, and the visitor was silently signed
+    // out when the access token lapsed. Testbench leaves `session.domain` null, so nothing exercised
+    // the fallback.
+    config(['lukk.cookie_mode' => true, 'session.domain' => '.example.com']);
+    app()->forgetInstance('cookie');
+
+    $set = emit(new TokenPair('access.jwt', 'opaque-refresh', 900))->headers->getCookies()[0];
+    $clear = app(LogoutResponse::class)->toResponse(request())->headers->getCookies()[0];
+
+    expect($set->getName())->toBe('__Host-refresh')
+        ->and($set->getDomain())->toBeNull()
+        ->and((string) $set)->not->toContain('domain=')
+        // The clear has to match the set, or the cookie it exists to remove stays put.
+        ->and($clear->getName())->toBe('__Host-refresh')
+        ->and($clear->getDomain())->toBeNull();
+});
+
 it('drops Secure and the __Host- prefix when lukk.cookie.secure is off (dev over http)', function () {
     config(['lukk.cookie_mode' => true, 'lukk.cookie.secure' => false]);
 
