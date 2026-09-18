@@ -654,9 +654,14 @@ class LukkServiceProvider extends ServiceProvider
     {
         $config = $this->app->make('config');
 
+        // `?? 'users'` — the shipped config's own value, and the default the other two readers of this key
+        // already use. Falling through to null does NOT mean "let Laravel decide": stock Laravel sets the
+        // provider under `auth.guards.web.provider`, not `auth.defaults.provider`, so
+        // `createUserProvider(null)` resolves to null and every auth route 500s. A per-guard mount still
+        // prefers its own `auth.guards.{guard}.provider` first, so this changes nothing for one.
         $provider = $guard === (string) ($this->config()['guard'] ?? 'api')
-            ? ($this->config()['user_provider'] ?? null)
-            : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? null);
+            ? ($this->config()['user_provider'] ?? 'users')
+            : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? 'users');
 
         $resolved = $this->app->make('auth')->createUserProvider($provider);
 
