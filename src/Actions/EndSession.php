@@ -111,10 +111,16 @@ class EndSession
      */
     private function endBearerSession(string $bearer): bool
     {
-        $claims = $bearer === '' ? null : $this->verifier->verify($bearer);
+        // The empty test is a short-circuit, not a decision: `verify('')` cannot return claims — an
+        // empty string is not a three-segment JWS, and the verifier turns every throw into null — so
+        // any other literal in its place reaches the same `null` by a slower route.
+        $claims = $bearer === '' ? null : $this->verifier->verify($bearer); // @pest-mutate-ignore: EmptyStringToNotEmpty
 
         if ($claims === null) {
-            return false;
+            // Likewise equivalent: falling through would read `$claims->fid` and `$claims->jti` under
+            // `??`, whose isset semantics answer '' for a property of null without erroring, so both
+            // branches below are skipped and the method returns false anyway.
+            return false; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         $familyId = (string) ($claims->fid ?? '');

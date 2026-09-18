@@ -3,11 +3,17 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
+use Lukk\Actions\RevokeSession;
+use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
+use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
+use Lukk\Refresh\DatabaseRefreshTokenRepository;
+use Lukk\Support\RefreshTokenRecord;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -218,4 +224,231 @@ it('stays quiet for the two or three siblings ordinary concurrency produces', fu
     rotate()($pair->refreshToken);
 
     Event::assertNotDispatched(RefreshFamilyForked::class);
+});
+
+it('honours a grace window that reaches the Action as a string', function () {
+    // `config/lukk.php` reads `LUKK_GRACE` through `env()`, which answers with a string, and no lukk
+    // key is guaranteed to have been through that file at all (`mergeConfigDeep` early-returns on a
+    // cached config). `$grace` is handed straight to two `int`-typed helpers under `strict_types`, so
+    // without the cast the FIRST refresh of every session is a TypeError instead of a rotation. And
+    // it has to be honoured as a number, not as a string: the boundary is 3 seconds either way.
+    config(['lukk.grace_seconds' => '3']);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+
+    $this->travel(3)->seconds();
+    expect(rotate()($pair->refreshToken)->refreshToken)->toBeString();
+
+    $this->travel(1)->seconds();
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class);
+});
+
+it('falls back to a 30-second grace window when the key is missing, measured from the first use', function () {
+    // An install that ran `config:cache` before a key existed reaches the Action without it, so the
+    // in-code default is what decides whether a multi-tab client keeps its session. Pinned at both
+    // edges — and from the FIRST consumption: `rotated_at` is stamped once and a sibling mint leaves
+    // it alone, so the window cannot slide forward one replay at a time.
+    config(['lukk.grace_seconds' => null]);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+
+    $this->travel(30)->seconds();
+    expect(rotate()($pair->refreshToken)->refreshToken)->toBeString();
+    expect(RefreshToken::where('family_id', familyId())->whereNotNull('revoked_at')->count())->toBe(0);
+
+    // One second later: 31 s after the first consumption, and only 1 s after the sibling.
+    $this->travel(1)->seconds();
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class);
+});
+
+it('still rotates a token whose expiry is exactly now, with the application claims intact', function () {
+    // Two `<` comparisons see this token and both must stay strict. The locked read's expiry check
+    // decides whether the client is logged out a second early; `rejectable()` decides whether
+    // `tokenClaimsUsing` is consulted at all, so `<=` there mints a successor that silently lost the
+    // application's claims — an outage that only shows up downstream, in whatever reads them.
+    Lukk::tokenClaimsUsing(fn () => ['tier' => 'gold']);
+    config(['lukk.refresh_ttl' => 3]);
+    $pair = start()(1);
+
+    // Exactly `expires_at`: 3 s of a 3 s lifetime. Kept inside the 5 s verification leeway, because
+    // firebase/php-jwt validates the successor's `nbf` against real `time()`, not the frozen clock.
+    $this->travel(3)->seconds();
+
+    expect(claims(rotate()($pair->refreshToken)->accessToken)->tier)->toBe('gold');
+});
+
+it('resolves the abilities of a token whose expiry is exactly now', function () {
+    // The same boundary, one comparison further in. `abilitiesFor()` returning null for a token the
+    // transaction is about to accept does not fail loudly: the issuer reads null as "abilities are
+    // not in use" and mints a token with no `scope` at all, which every gated route then 403s.
+    Lukk::abilitiesUsing(fn () => ['orders.read']);
+    config(['lukk.refresh_ttl' => 3]);
+    $pair = start()(1);
+    $this->travel(3)->seconds();
+
+    expect(claims(rotate()($pair->refreshToken)->accessToken)->scope)->toBe('orders.read');
+});
+
+it('gives a sibling minted at the exact grace boundary the application claims', function () {
+    // The grace branch is the multi-tab client's normal path, so everything the successor of a FRESH
+    // token gets, the sibling gets too. `rejectable()` is what stands between this token and
+    // `tokenClaimsUsing`, and at exactly `rotated_at + grace` it must still answer "not rejectable" —
+    // both an off-by-one (`<=`) and a sign flip (`-`) make it drop the claims silently.
+    config(['lukk.grace_seconds' => 3]);
+    Lukk::tokenClaimsUsing(fn () => ['tier' => 'gold']);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+
+    $this->travel(3)->seconds();
+
+    expect(claims(rotate()($pair->refreshToken)->accessToken)->tier)->toBe('gold');
+});
+
+it('gives a sibling minted at the exact grace boundary the same abilities', function () {
+    // And the same boundary in `abilitiesFor()`, where the failure is worse than a missing claim: a
+    // null grant is "abilities not in use", so the sibling comes back with no `scope` and the tab
+    // that minted it is locked out of every gated route until it logs in again.
+    config(['lukk.grace_seconds' => 3]);
+    Lukk::abilitiesUsing(fn () => ['orders.read']);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+
+    $this->travel(3)->seconds();
+
+    expect(claims(rotate()($pair->refreshToken)->accessToken)->scope)->toBe('orders.read');
+});
+
+it('never asks the application about a token it has already refused', function () {
+    // Consumer callbacks are resolved before the transaction opens, which also puts them ahead of
+    // every reject branch — so they are gated on `rejectable()` instead. A revoked token is not
+    // expired and not rotated, so only the first of its three clauses catches it: fold that `||` into
+    // an `&&` and lukk queries the application's permission store on behalf of a dead session, which
+    // is both a pointless round trip on an attacker-triggerable path and a callback that can throw
+    // where a throw pre-empts the refusal.
+    $pair = start()(1);
+    revokeSession()(familyId());
+
+    // Registered only now: login legitimately consults the hook, and counting that call would say
+    // nothing about the refresh.
+    $calls = 0;
+    Lukk::tokenClaimsUsing(function () use (&$calls) {
+        $calls++;
+
+        return [];
+    });
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class);
+    expect($calls)->toBe(0);
+});
+
+it('reports the fork once, and only past the default threshold of three', function () {
+    // The default matters on its own: `fork_threshold` is not guaranteed to be in the config either,
+    // and the signal is only useful if it is quiet at what ordinary concurrency produces. Three live
+    // siblings is a browser opening tabs; four is the fan-out worth looking at. Exactly once, and
+    // carrying the number of live tokens the family actually holds — an off-by-one here reports a
+    // fork that has not happened yet, which is the same alert fatigue as no threshold at all.
+    Event::fake([RefreshFamilyForked::class]);
+    config(['lukk.grace_seconds' => 60, 'lukk.fork_threshold' => null]);
+    $pair = User::factory()->create()->startSession();
+
+    foreach (range(1, 3) as $i) {
+        rotate()($pair->refreshToken);
+    }
+
+    Event::assertNotDispatched(RefreshFamilyForked::class);
+
+    rotate()($pair->refreshToken);
+
+    expect(RefreshToken::where('family_id', familyId())->whereNull('rotated_at')->whereNull('revoked_at')->count())->toBe(4);
+    Event::assertDispatchedTimes(RefreshFamilyForked::class, 1);
+    Event::assertDispatched(RefreshFamilyForked::class, fn (RefreshFamilyForked $e) => $e->liveTokens === 4);
+});
+
+it('honours a configured fork threshold, including one that arrives as a string', function () {
+    // `LUKK_FORK_THRESHOLD` comes from `env()` like every other tunable, so the configured value can
+    // be a string — and `forkThreshold()` is typed `int`, so without the cast a deployment that sets
+    // it cannot refresh at all. Above the threshold it must still fire, or raising it turns the
+    // signal off rather than turning it down.
+    Event::fake([RefreshFamilyForked::class]);
+    config(['lukk.grace_seconds' => 60, 'lukk.fork_threshold' => '5']);
+    $pair = User::factory()->create()->startSession();
+
+    foreach (range(1, 5) as $i) {
+        rotate()($pair->refreshToken);
+    }
+
+    Event::assertNotDispatched(RefreshFamilyForked::class);
+
+    rotate()($pair->refreshToken);
+
+    Event::assertDispatchedTimes(RefreshFamilyForked::class, 1);
+    Event::assertDispatched(RefreshFamilyForked::class, fn (RefreshFamilyForked $e) => $e->liveTokens === 6);
+});
+
+it('keeps the floor of two when the threshold is configured below it', function () {
+    // Two siblings is what a browser opening a second tab, or an SSR render racing the client,
+    // produces on its own. A configured 1 would report every one of them, so the floor holds — and it
+    // is a floor, not a replacement: the third sibling still fires.
+    Event::fake([RefreshFamilyForked::class]);
+    config(['lukk.grace_seconds' => 60, 'lukk.fork_threshold' => 1]);
+    $pair = User::factory()->create()->startSession();
+
+    rotate()($pair->refreshToken);
+    rotate()($pair->refreshToken);
+
+    Event::assertNotDispatched(RefreshFamilyForked::class);
+
+    rotate()($pair->refreshToken);
+
+    Event::assertDispatchedTimes(RefreshFamilyForked::class, 1);
+    Event::assertDispatched(RefreshFamilyForked::class, fn (RefreshFamilyForked $e) => $e->liveTokens === 3);
+});
+
+it('reports a throwing fork listener rather than swallowing it', function () {
+    // The rotation stands when an advisory listener blows up — but silently is the wrong kind of
+    // stands. The listener is usually the alerting hook itself, so if its failure is not reported the
+    // fork signal is off and nothing anywhere says so.
+    Exceptions::fake();
+    config(['lukk.grace_seconds' => 60]);
+    Event::listen(RefreshFamilyForked::class, function () {
+        throw new RuntimeException('consumer listener blew up');
+    });
+
+    $pair = User::factory()->create()->startSession();
+    foreach (range(1, 4) as $i) {
+        rotate()($pair->refreshToken);
+    }
+
+    Exceptions::assertReported(RuntimeException::class);
+});
+
+it('says what to do when the pre-read disagrees with the locked read', function () {
+    // The refusal is fail-closed and, by construction, something an operator will only ever see as an
+    // unexplained 500 in the middle of a refresh. The message has to carry both halves: WHICH two
+    // reads disagreed, and that nothing was consumed — because the instinctive response to a failed
+    // refresh is to revoke the family, and here that would log out a session that is perfectly fine
+    // and whose very next request succeeds.
+    $pair = User::factory()->create()->startSession();
+
+    $blind = new class extends DatabaseRefreshTokenRepository
+    {
+        public function findByHash(string $hash): ?RefreshTokenRecord
+        {
+            return null;   // a replica that has not caught up
+        }
+    };
+
+    $rotate = new RotateRefreshToken(
+        $blind,
+        issuer(),
+        app(RevokeSession::class),
+        app(Denylist::class),
+        Lukk::guardConfig(),
+        Lukk::currentGuard(),
+    );
+
+    expect(fn () => $rotate($pair->refreshToken))->toThrow(
+        RuntimeException::class,
+        'the pre-transaction read disagreed with the locked read. Nothing was consumed; retry.',
+    );
 });
