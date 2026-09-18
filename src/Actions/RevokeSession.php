@@ -29,7 +29,14 @@ class RevokeSession
     {
         // Denylist FIRST: if the second write fails, a leftover denylist entry is harmless, whereas a
         // DB revoke with no denylist entry would leave the family's access tokens live until expiry.
-        $this->denylist->revokeFamily($familyId, $this->config['access_ttl'] + $this->config['leeway']);
+        //
+        // Both defaults are load-bearing, not decoration: a config cached before these keys existed
+        // gets no backfill (`mergeConfigDeep` early-returns), the two missing reads add to 0, and
+        // `Cache::put()` with a non-positive TTL FORGETS the key instead of writing it — so every
+        // revoke, logout included, would silently denylist nothing at all.
+        $ttl = (int) ($this->config['access_ttl'] ?? 900) + (int) ($this->config['leeway'] ?? 5);
+
+        $this->denylist->revokeFamily($familyId, $ttl);
         $this->repository->revokeFamily($familyId);
 
         // Last: a revoked family's marker is harmless (the denylist and the rows already refuse it),

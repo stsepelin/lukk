@@ -26,8 +26,9 @@ use Lukk\Support\RefreshTokenRecord;
  * Which refresh tokens the REQUEST may present (the CSRF question) is decided by the HTTP layer; this
  * action trusts the list it is handed. It never throws for a credential that does not resolve, and
  * reports nothing about what it found: the response is the same 204 whether a token existed, was
- * already revoked, or was never real. The one exception is a caller whose MISSES have exhausted the
- * lookup budget, refused with a 429 BEFORE anything is looked up — see `refuseWhenExhausted()`.
+ * already revoked, or was never real. The one exception is a caller whose UNPRODUCTIVE lookups — a
+ * miss, or a family already revoked — have exhausted the lookup budget, refused with a 429 BEFORE
+ * anything is looked up; see `refuseWhenExhausted()`.
  */
 class EndSession
 {
@@ -49,9 +50,9 @@ class EndSession
      * @param  array<int, string>  $refreshTokens  the refresh tokens this request may present
      * @param  string  $caller  the caller's throttle identity ({@see Lukk::rateLimitKey()})
      *
-     * @throws ThrottleRequestsException when this caller's misses have exhausted the lookup budget —
-     *                                   nothing has been looked up, and the caller must retry rather
-     *                                   than believe it logged out
+     * @throws ThrottleRequestsException when this caller's unproductive lookups have exhausted the
+     *                                   budget — nothing has been looked up, and the caller must
+     *                                   retry rather than believe it logged out
      */
     public function __invoke(string $bearer, array $refreshTokens, string $caller): void
     {
@@ -144,10 +145,13 @@ class EndSession
      * Meter the refresh-token LOOKUP — the one part of logout an unauthenticated caller could use to
      * probe token hashes at volume.
      *
-     * Only MISSES count — and a token whose family is already revoked, which does no work. Probing
+     * Only MISSES count — and a token whose family is already REVOKED, which does no work. Probing
      * always misses; a token that resolves to a live family — valid, rotated, expired — is one the
-     * caller genuinely held, so a BFF logging many users out from one address
-     * never exhausts the bucket. Its own bucket, per guard and per caller, with the refresh route's
+     * caller genuinely held, so a BFF pays nothing for the logouts that actually end a session, however
+     * many users it ends them for from one address. It is not free of the bucket, though: a logout
+     * retried or replayed after the family is already revoked counts exactly like a miss.
+     *
+     * Its own bucket, per guard and per caller, with the refresh route's
      * limits: not the refresh route's bucket itself, whose junk traffic from a shared address would
      * then refuse a legitimate cookie logout, and keyed by guard so one guard cannot throttle another.
      *
@@ -178,6 +182,13 @@ class EndSession
      * revoked). That costs a whole budget per bit about a 256-bit random token, which is why it is
      * accepted rather than engineered away. A burst racing past the pre-check can also overshoot the
      * limit by its own concurrency before the counts land and the next request is refused.
+     *
+     * And the budget is EXHAUSTIBLE BY ANYONE SHARING THE CALLER IDENTITY. An unauthenticated logout
+     * is keyed by address ({@see Lukk::rateLimitKey()}), so junk misses from one client behind a NAT,
+     * a carrier or a proxy that does not forward the real address spend the bucket for everyone
+     * behind it, and their cookie-only logouts answer 429 until it decays. They are not logged out
+     * wrongly and they can retry — a 429 leaves the cookie in place — but the refusal is real, and it
+     * is the price of metering a lookup on a route that has no authenticated identity to meter by.
      */
     private function countMiss(string $caller): void
     {

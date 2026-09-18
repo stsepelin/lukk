@@ -22,6 +22,19 @@ use Throwable;
  */
 class ClaimSession
 {
+    /**
+     * How far apart the marker and the credential's mint time may be and still be the same sign-in.
+     *
+     * Deliberately a constant, and deliberately NOT `leeway`. Both timestamps are stamped by THIS
+     * server microseconds apart in one sign-in — the marker before the insert, the credential's `iat`
+     * / `created_at` at the mint — so the only skew to absorb is a write straddling a second boundary.
+     * `leeway` measures something else entirely (drift between the machine that SIGNS a token and the
+     * one that VERIFIES it) and is meant to be raised: at `leeway: 120` a successor minted by a
+     * refresh 40 s after sign-in passed as the original, so a resurrected marker could log out a
+     * session in active use — the one thing the "original credential only" rule exists to prevent.
+     */
+    private const ORIGINAL_WITHIN_SECONDS = 2;
+
     /** Per process: the missing-`createdAt` warning is a configuration problem, not a per-request event. */
     private static bool $warnedMissingCreatedAt = false;
 
@@ -30,7 +43,6 @@ class ClaimSession
         private readonly RevokeSession $revokeSession,
         /** The EFFECTIVE window ({@see UnclaimedSessions::window()}); 0 = off. */
         private readonly int $window,
-        private readonly int $leeway = 0,
         private readonly string $guard = 'api',
     ) {}
 
@@ -83,7 +95,7 @@ class ClaimSession
         // a claim, whatever the marker says. This is what keeps a lost marker delete harmless. A cache
         // restored from a snapshot, or a failover that drops the delete, resurrects the marker of a
         // session in active use, and without this rule that session's next request logged it out.
-        $original = $mintedAt !== null && abs($mintedAt - $issuedAt) <= max(1, $this->leeway);
+        $original = $mintedAt !== null && abs($mintedAt - $issuedAt) <= self::ORIGINAL_WITHIN_SECONDS;
 
         if (! $late || ! $original) {
             $this->sessions->forget($familyId);

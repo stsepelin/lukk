@@ -36,9 +36,11 @@ Logout accepts a valid access token **or** the refresh token the client holds. W
   POSTs to logout with no body from a sibling subdomain must now send `{}` as JSON (lukk-js does), or
   its cookie is neither revoked through logout nor cleared — the bearer still ends the session.
 - A body `refresh_token` is read from a **JSON** body only, never a form body or the query string.
-- The route has **no throttle**. Only refresh-token lookups that MISS are counted (`rate_limits.refresh`,
-  per guard and caller), and only when no valid bearer is presented; an exhausted bucket refuses the
-  lookup up front. When it is throttled the answer is
+- The route has **no throttle**. Only refresh-token lookups that come up empty are counted
+  (`rate_limits.refresh`, per guard and caller): a MISS, or a token whose family is **already
+  revoked** — so a logout retried or replayed after the session ended costs the budget, while one that
+  resolves to a live family costs nothing. Counted only when no valid bearer is presented; an
+  exhausted bucket refuses the lookup up front. When it is throttled the answer is
   **429 with `Retry-After`** and the cookie is not cleared — the session is still live, so the client
   must retry rather than treat it as logged out.
 - A consumed refresh token presented past the grace window dispatches `RefreshTokenReused` and

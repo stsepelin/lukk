@@ -373,6 +373,30 @@ it('never revokes a refreshed session whose marker came back, when it presents a
         ->and(isUnclaimed($family))->toBeFalse();
 });
 
+it('never treats a successor as the original, however large the configured leeway', function () {
+    // `leeway` is signer-to-verifier clock drift and an operator may legitimately raise it; the
+    // marker and the credential's mint time both come from THIS server in one sign-in, so the
+    // proximity test must not widen with it. While it did, `leeway: 120` made a successor minted 40 s
+    // after sign-in pass as the original — and a resurrected marker then logged out a live session,
+    // the exact outcome the "original credential only" rule exists to make impossible.
+    config(['lukk.claim_seconds' => 600, 'lukk.leeway' => 120]);
+    $tokens = signIn(User::factory()->create());
+    $family = familyFor($tokens['refresh_token']);
+    $issuedAt = Cache::get('lukk:unclaimed:'.$family);
+
+    $this->travel(40)->seconds();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $tokens['refresh_token']])->assertOk()->json();
+
+    // The claim's delete is lost: the cache is restored from a snapshot taken before it.
+    Cache::put('lukk:unclaimed:'.$family, $issuedAt, 3600);
+    $this->travel(700)->seconds();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $rotated['refresh_token']])->assertOk();
+
+    expect(RefreshToken::where('family_id', $family)->whereNull('revoked_at')->exists())->toBeTrue()
+        ->and(isUnclaimed($family))->toBeFalse();
+});
+
 it('clamps the window to at least access_ttl + leeway, so the original access token cannot outlive it', function () {
     // The clamp's whole guarantee: a refresh inside access_ttl + leeway is accepted, one past it is
     // revoked. A client that only refreshes after another service's 401 lands at the latter and must

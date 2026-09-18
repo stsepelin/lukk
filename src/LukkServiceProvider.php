@@ -295,7 +295,7 @@ class LukkServiceProvider extends ServiceProvider
             $this->unclaimedSessions($app)));
         $this->app->bind(ClaimSession::class, fn ($app) => new ClaimSession(
             $app->make(UnclaimedSessions::class), $app->make(RevokeSession::class),
-            UnclaimedSessions::window(Lukk::guardConfig()), (int) (Lukk::guardConfig()['leeway'] ?? 0), Lukk::currentGuard()));
+            UnclaimedSessions::window(Lukk::guardConfig()), Lukk::currentGuard()));
         $this->app->bind(EndSession::class, fn ($app) => new EndSession(
             $app->make(TokenVerifier::class), $app->make(TokenIssuer::class), $app->make(RefreshTokenRepository::class),
             $app->make(RevokeSession::class), $app->make(Denylist::class), $app->make(RateLimiter::class),
@@ -538,7 +538,10 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter->for($name, function ($request) use ($name, $guard) {
             $limits = (array) (Lukk::guardConfig($guard)['rate_limits']['refresh'] ?? []);
-            $user = $request->user($guard);
+
+            // `user()` THROWS for a guard `auth.guards` does not declare, and the limiter would then
+            // 500 the route instead of throttling it. Same guard as the confirm limiters above.
+            $user = isset(config('auth.guards')[$guard]) ? $request->user($guard) : null;
 
             return (new Limit(maxAttempts: (int) ($limits['max_attempts'] ?? 30), decaySeconds: (int) ($limits['decay_seconds'] ?? 60)))
                 ->by($user === null ? $name.'|'.Lukk::rateLimitKey($request) : $name.'|'.$guard.'|user|'.$user->getAuthIdentifier());

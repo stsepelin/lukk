@@ -53,7 +53,7 @@ class StartSession
     {
         $familyId = (string) Str::uuid();
         $secret = $this->issuer->newRefreshSecret();
-        $expiresAt = now()->getTimestamp() + $this->config['refresh_ttl'];
+        $expiresAt = now()->getTimestamp() + (int) ($this->config['refresh_ttl'] ?? 2592000);
         $granted = $abilities === null ? null : Abilities::fromArray($abilities);
 
         // `''`, not null, for a grant that is pinned to NOTHING — a capped impersonation session, a

@@ -58,7 +58,7 @@ class RotateRefreshToken
     public function __invoke(string $presentedSecret): TokenPair
     {
         $hash = $this->issuer->hash($presentedSecret);
-        $grace = $this->config['grace_seconds'];
+        $grace = (int) ($this->config['grace_seconds'] ?? 30);
 
         // Mint the successor secret + hash before the transaction, so no hashing under the row lock.
         $secret = $this->issuer->newRefreshSecret();
