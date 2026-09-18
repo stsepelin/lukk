@@ -10,7 +10,9 @@ services:
       POSTGRES_USER: lukk
       POSTGRES_PASSWORD: lukk
       POSTGRES_DB: lukk
-    ports: ['55432:5432']
+    # Loopback: one-word credentials, published in this repo, and Docker publishes on every interface
+    # by default — which on a shared network means the whole subnet.
+    ports: ['127.0.0.1:55432:5432']
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U lukk']
       interval: 2s
@@ -24,7 +26,7 @@ services:
       MYSQL_DATABASE: lukk
       MYSQL_USER: lukk
       MYSQL_PASSWORD: lukk
-    ports: ['33306:3306']
+    ports: ['127.0.0.1:33306:3306']
     command: --transaction-isolation=REPEATABLE-READ
     healthcheck:
       test: ['CMD', 'mysqladmin', 'ping', '-plukk']
