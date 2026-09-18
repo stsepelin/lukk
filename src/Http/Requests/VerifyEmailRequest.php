@@ -43,7 +43,7 @@ class VerifyEmailRequest extends FormRequest
     {
         if (! $this->lookedUp) {
             $this->lookedUp = true;
-            $this->resolved = Auth::createUserProvider(config('lukk.user_provider'))
+            $this->resolved = Auth::createUserProvider(config('lukk.user_provider') ?? 'users')
                 ?->retrieveById($this->route('id'));
         }
 

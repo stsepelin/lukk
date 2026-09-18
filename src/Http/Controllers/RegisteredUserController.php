@@ -35,7 +35,7 @@ class RegisteredUserController
 
         // Auto-login (default): issue a session like login, honoring the same 2FA branch. Skipped
         // when `registration.login` is off (register-only) or block_unverified_login withholds it.
-        if (config('lukk.registration.login', true) && ! $this->emailUnverified($user)) {
+        if ((config('lukk.registration.login') ?? true) && ! $this->emailUnverified($user)) {
             if ($this->twoFactorRequired($user)) {
                 return $this->twoFactorChallenge($user, $this->challengeTokens);
             }

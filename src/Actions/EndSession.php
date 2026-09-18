@@ -136,7 +136,7 @@ class EndSession
         }
 
         $remaining = (int) $claims->exp - now()->getTimestamp();
-        $this->denylist->revokeJti($jti, max(1, $remaining + (int) ($this->config['leeway'] ?? 0)));
+        $this->denylist->revokeJti($jti, max(1, $remaining + (int) ($this->config['leeway'] ?? 5)));
 
         return true;
     }

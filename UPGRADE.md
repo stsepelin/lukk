@@ -93,10 +93,13 @@ The clamp only guarantees the original *access* token cannot be used past the wi
 does not make an authenticated request to this app or refresh within it — including one that uses the
 token only on another service and refreshes after that service's 401 — must call the claim route.
 
-If you implement `RefreshTokenRepository` yourself, populate `RefreshTokenRecord::$createdAt` (the row's
-creation time); a `Lukk::useRefreshTokenModel` subclass must keep `$timestamps` on. Without it the
-original refresh token is never recognised, so nothing is revoked, and lukk logs a warning once per
-worker process.
+If you implement `RefreshTokenRepository` yourself, populate `RefreshTokenRecord::$original` — whether the
+row presented IS the family's own first, still-unrotated credential (for the shipped repository, exactly
+`previous_id === null`). That is the signal the rule wants, and a repository reporting it owes nothing
+else. Failing that, populate `RefreshTokenRecord::$createdAt` (the row's creation time), which lukk
+compares against the marker within a couple of seconds; a `Lukk::useRefreshTokenModel` subclass then has
+to keep `$timestamps` on. Report **neither** and no original is ever recognised, so nothing is revoked —
+the feature is inert rather than dangerous — and lukk logs a warning once per worker process.
 
 Markers live in the denylist cache store. Losing them fails open; restoring an old snapshot can at most
 revoke a session still presenting its original sign-in refresh token after the window. A published

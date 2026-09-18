@@ -148,7 +148,19 @@ class ChallengeToken
             return null;
         }
 
-        if (($claims->iss ?? null) !== ($this->config['issuer'] ?? null) || ($claims->aud ?? null) !== ($this->config['audience'] ?? [])) {
+        // Fails CLOSED when there is nothing to bind to, exactly as the access-token verifier does via its
+        // audience intersection. With `issuer` and `audience` both lost from a config cached before they
+        // existed, `null === null` and `[] === []` both hold and the challenge was bound to NOTHING — and
+        // in a multi-guard install sharing a secret, one guard's challenge then redeemed against another.
+        // An absent audience is a broken install, not a degraded one: refuse rather than invent identity.
+        $issuer = $this->config['issuer'] ?? null;
+        $audience = $this->config['audience'] ?? [];
+
+        if ($issuer === null || array_filter((array) $audience) === []) {
+            return null;
+        }
+
+        if (($claims->iss ?? null) !== $issuer || ($claims->aud ?? null) !== $audience) {
             return null;
         }
 
