@@ -216,7 +216,10 @@ class LukkServiceProvider extends ServiceProvider
         ));
 
         $this->app->singleton(PasskeyChallengeStore::class, fn () => new PasskeyChallengeStore(
-            $this->cacheStore(), (int) $this->config()['passkeys']['challenge_ttl'],
+            // Unguarded, a missing key is a TTL of 0 — and the cache FORGETS a key written with a
+            // non-positive TTL, so the ceremony's challenge is gone before the authenticator answers
+            // and every passkey login and registration fails.
+            $this->cacheStore(), (int) ($this->config()['passkeys']['challenge_ttl'] ?? 120),
         ));
 
         // Shares the revocation store: a marker has to be visible to every worker, exactly like the
@@ -226,12 +229,12 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->singleton(WebAuthnCeremony::class, function () {
             OptionalDependency::ensure(AuthenticatorAttestationResponseValidator::class, 'web-auth/webauthn-lib', 'passkeys');
 
-            $passkeys = $this->config()['passkeys'];
+            $passkeys = (array) ($this->config()['passkeys'] ?? []);
 
             return new SpomkyWebAuthnCeremony([
-                'rp_id' => $passkeys['rp_id'],
+                'rp_id' => $passkeys['rp_id'] ?? null,
                 'rp_name' => $passkeys['rp_name'] ?? $this->appName(),
-                'origins' => $passkeys['origins'],
+                'origins' => $passkeys['origins'] ?? [],
                 'user_verification' => $passkeys['user_verification'] ?? 'required',
             ]);
         });
@@ -245,11 +248,11 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->singleton(TwoFactorProvider::class, function () {
             OptionalDependency::ensure(Google2FA::class, 'pragmarx/google2fa', 'two_factor');
 
-            $twoFactor = $this->config()['two_factor'];
+            $twoFactor = (array) ($this->config()['two_factor'] ?? []);
 
             return new Google2FaTotpProvider(new Google2FA, $this->cacheStore(), [
                 'issuer' => $twoFactor['issuer'] ?? $this->appName(),
-                'window' => (int) $twoFactor['window'],
+                'window' => (int) ($twoFactor['window'] ?? 1),
             ]);
         });
     }
@@ -344,17 +347,21 @@ class LukkServiceProvider extends ServiceProvider
             $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
 
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
-            $app->make(TwoFactorProvider::class), (int) $this->config()['two_factor']['recovery_codes']));
+            // A missing key generates ZERO recovery codes: 2FA enables, the user is shown an empty
+            // list, and the only way back into a lost-authenticator account is gone.
+            $app->make(TwoFactorProvider::class), (int) ($this->config()['two_factor']['recovery_codes'] ?? 8)));
         $this->app->bind(ChallengeTwoFactor::class, fn ($app) => new ChallengeTwoFactor(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(TwoFactorProvider::class)));
         $this->app->bind(VerifyTwoFactorChallenge::class, fn ($app) => new VerifyTwoFactorChallenge(
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
-            (int) $this->config()['rate_limits']['two_factor']['max_attempts'],
-            (int) $this->config()['rate_limits']['two_factor']['decay_seconds'],
+            // Missing means 0 attempts — the "missing rate-limit key locks everyone out" shape, here
+            // on the second factor: no one holding a challenge could ever spend it.
+            (int) ($this->config()['rate_limits']['two_factor']['max_attempts'] ?? 5),
+            (int) ($this->config()['rate_limits']['two_factor']['decay_seconds'] ?? 60),
             $this->lockouts($app), Lukk::currentGuard(),
         ));
         $this->app->bind(RegenerateRecoveryCodes::class, fn () => new RegenerateRecoveryCodes(
-            (int) $this->config()['two_factor']['recovery_codes']));
+            (int) ($this->config()['two_factor']['recovery_codes'] ?? 8)));
     }
 
     /**

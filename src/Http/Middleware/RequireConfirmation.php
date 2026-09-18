@@ -30,7 +30,7 @@ class RequireConfirmation
 
     public function handle(Request $request, Closure $next): Response
     {
-        $token = (string) $request->header((string) config('lukk.confirm.header', 'X-Lukk-Confirmation'), '');
+        $token = (string) $request->header((string) (config('lukk.confirm.header') ?? 'X-Lukk-Confirmation'), '');
         $challenges = $this->challenges();
         $subject = $challenges->verify('reauth', $token);
 

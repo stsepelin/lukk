@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 use Firebase\JWT\JWT;
+use Illuminate\Support\Arr;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenIssuer;
@@ -185,3 +186,23 @@ it('rejects an access token whose sub is missing, empty, or not a string', funct
         ->and(verifier()->verify($emptySub))->toBeNull()
         ->and(verifier()->verify($arraySub))->toBeNull();
 });
+
+// No `lukk` config key is guaranteed at runtime. `mergeConfigDeep` early-returns when the
+// application's config is CACHED (the production norm), so a key added in a later release is never
+// backfilled; and the merge that does run backfills on `array_key_exists`, so a per-guard
+// `'access_ttl' => env('LUKK_ADMIN_ACCESS_TTL')` with the variable unset survives it as an explicit
+// null. Unguarded, `exp` is `$now + null` — EQUAL to `iat`, so every token that guard mints is
+// already expired when it is handed out (login answers 200 and nothing it returns works), and
+// `expires_in` serialises as null, which a client scheduling its refresh off it never recovers from.
+it('mints a full-lifetime access token when access_ttl is unusable', function (Closure $break) {
+    $break();
+
+    $access = app(TokenIssuer::class)->accessToken(ctx(1, 'fam'));
+    $claims = claims($access['token']);
+
+    expect($access['expires_in'])->toBe(900)
+        ->and((int) $claims->exp - (int) $claims->iat)->toBe(900);
+})->with([
+    'null (a per-guard env that is not set)' => [fn () => config()->set('lukk.access_ttl', null)],
+    'absent (a config cached before the key existed)' => [fn () => config()->set('lukk', Arr::except(config('lukk'), ['access_ttl']))],
+]);

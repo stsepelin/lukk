@@ -33,14 +33,17 @@ class FirebaseTokenIssuer implements TokenIssuer
         $jti = (string) Str::uuid();
 
         $standard = [
-            'iss' => $this->config['issuer'],
+            'iss' => $this->config['issuer'] ?? null,
             'aud' => $this->audience(),
             'sub' => (string) $context->userId,
             'fid' => $context->familyId,
             'jti' => $jti,
             'iat' => $now,
             'nbf' => $now,
-            'exp' => $now + $this->config['access_ttl'],
+            // Defaulted, like every `lukk` read: a missing `access_ttl` makes this `$now + null` —
+            // `exp === iat`, so every token the guard mints is already expired when it is handed
+            // out, and the account is locked out of its own API while login keeps answering 200.
+            'exp' => $now + ($this->config['access_ttl'] ?? 900),
         ];
 
         // Standard claims always win. `$claims` arrives already ordered by the calling Action —
@@ -92,12 +95,14 @@ class FirebaseTokenIssuer implements TokenIssuer
         $token = JWT::encode(
             $payload,
             $signing['key'],
-            $this->config['algorithm'],
+            $this->config['algorithm'] ?? 'HS256',
             keyId: $signing['kid'],
             head: ['typ' => 'at+jwt'],
         );
 
-        return ['token' => $token, 'jti' => $jti, 'expires_in' => $this->config['access_ttl']];
+        // Same default as `exp` above — unguarded this serialises as `"expires_in": null`, and a
+        // client scheduling its refresh off it never refreshes.
+        return ['token' => $token, 'jti' => $jti, 'expires_in' => $this->config['access_ttl'] ?? 900];
     }
 
     /**
@@ -109,7 +114,11 @@ class FirebaseTokenIssuer implements TokenIssuer
      */
     private function audience(): string|array
     {
-        $audiences = array_values(array_filter((array) $this->config['audience']));
+        // No `?? ['https://api.example.com']` — config's placeholder default is exactly the wrong
+        // fallback here. A per-guard `'audience' => env('LUKK_ADMIN_AUDIENCE')` with the variable
+        // unset would then collapse onto the SAME audience as the default guard, which is the
+        // isolation boundary between them. Absent stays empty, and the verifier rejects.
+        $audiences = array_values(array_filter((array) ($this->config['audience'] ?? [])));
 
         return count($audiences) === 1 ? $audiences[0] : $audiences;
     }
