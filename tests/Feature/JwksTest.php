@@ -58,6 +58,24 @@ it('left-pads EC JWK coordinates to the curve field size (RFC 7518 §6.2.1.2)', 
         ->and(strlen($decode($jwk['y'])))->toBe(32); // padded up from 31
 });
 
+it('omits an EC key on a curve whose field length it does not know', function () {
+    // RFC 7518 §6.2.1.2 requires each coordinate to be "the full size of a coordinate for the curve".
+    // For an unmapped curve there is no known size, and the padding quietly became the identity
+    // function — publishing the very short coordinate the rule forbids, on roughly 1 key in 200.
+    // `ES256K` reaches here: php-jwt supports it and nothing validates `lukk.algorithm` against an
+    // allowlist. A JWK we cannot state correctly is one we do not publish.
+    $res = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'secp256k1']);
+    assert($res !== false);
+    openssl_pkey_export($res, $private);
+    $details = openssl_pkey_get_details($res);
+    assert($details !== false);
+
+    useAsymmetric(['private' => (string) $private, 'public' => (string) $details['key']], 'k1');
+    config(['lukk.algorithm' => 'ES256K']);
+
+    $this->getJson('/auth/jwks')->assertOk()->assertExactJson(['keys' => []]);
+});
+
 it('omits a key whose type does not match the configured algorithm', function () {
     // `kty` used to be chosen from the ALGORITHM, so an RSA key under ES256 indexed the EC details
     // of an RSA key and published `{"kty":"EC","crv":"","x":"","y":""}` — a structurally invalid JWK

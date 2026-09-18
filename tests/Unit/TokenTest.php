@@ -194,6 +194,54 @@ it('rejects an access token whose sub is missing, empty, or not a string', funct
 // null. Unguarded, `exp` is `$now + null` — EQUAL to `iat`, so every token that guard mints is
 // already expired when it is handed out (login answers 200 and nothing it returns works), and
 // `expires_in` serialises as null, which a client scheduling its refresh off it never recovers from.
+it('rejects a token declaring critical headers it does not understand', function () {
+    // RFC 7515 §4.1.11 / RFC 7519 §7.2 step 10: a JWS whose `crit` names extensions the recipient does
+    // not support MUST be rejected. lukk emits none, so anything carrying `crit` is a co-issuer
+    // expressing a RESTRICTION — silently ignoring it is the inversion the parameter exists to prevent.
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'jti' => 'crit-token',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt', 'crit' => ['exp-nonsense']]);
+
+    expect(verifier()->verify($token))->toBeNull();
+});
+
+it('accepts both spellings RFC 9068 permits for the access-token type', function () {
+    // §4 step 1: "Verify the `typ` header equals `at+jwt` or `application/at+jwt`." Only the short form
+    // was accepted, so a co-issuer stamping the registered long form in a verify-only topology had
+    // every token refused with no diagnostic. Media types compare case-insensitively (RFC 2045 §5.1).
+    $cfg = Lukk::guardConfig();
+    $mint = fn (string $typ) => JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'jti' => 'typ-'.md5($typ),
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => $typ]);
+
+    expect(verifier()->verify($mint('at+jwt')))->not->toBeNull()
+        ->and(verifier()->verify($mint('application/at+jwt')))->not->toBeNull()
+        ->and(verifier()->verify($mint('AT+JWT')))->not->toBeNull()
+        // Still not a free-for-all: a challenge type is refused as a bearer.
+        ->and(verifier()->verify($mint('2fa+challenge')))->toBeNull()
+        ->and(verifier()->verify($mint('JWT')))->toBeNull();
+});
+
+it('stops validating nothing when the issuer is absent — it refuses instead', function (Closure $break) {
+    // `null !== null` is false, so with no configured issuer this check silently stopped being one.
+    // `ChallengeToken` already failed closed here; this is the half that did not.
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'aud' => $cfg['audience'], 'sub' => '1', 'jti' => 'no-iss',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $break();
+
+    expect(verifier()->verify($token))->toBeNull();
+})->with([
+    'null (a per-guard env that is not set)' => [fn () => config()->set('lukk.issuer', null)],
+    'absent (a config cached before the key existed)' => [fn () => config()->set('lukk', Arr::except(config('lukk'), ['issuer']))],
+]);
+
 it('mints a full-lifetime access token when access_ttl is unusable', function (Closure $break) {
     $break();
 

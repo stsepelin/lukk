@@ -148,6 +148,11 @@ class ChallengeToken
             return null;
         }
 
+        // RFC 7515 §4.1.11: critical headers we do not understand MUST be rejected. lukk emits none.
+        if ($this->headerCrit($token)) {
+            return null;
+        }
+
         // Fails CLOSED when there is nothing to bind to, exactly as the access-token verifier does via its
         // audience intersection. With `issuer` and `audience` both lost from a config cached before they
         // existed, `null === null` and `[] === []` both hold and the challenge was bound to NOTHING — and
@@ -183,8 +188,20 @@ class ChallengeToken
 
     private function headerType(string $token): ?string
     {
-        $header = json_decode(base64_decode(strtr(explode('.', $token)[0], '-_', '+/')) ?: '{}');
+        return $this->header($token)->typ ?? null;
+    }
 
-        return $header->typ ?? null;
+    /** Does the token declare critical headers? We understand none, so any is a refusal. */
+    private function headerCrit(string $token): bool
+    {
+        return isset($this->header($token)->crit);
+    }
+
+    /** The JOSE header, read from the signature-covered segment. */
+    private function header(string $token): object
+    {
+        $decoded = json_decode(base64_decode(strtr(explode('.', $token)[0], '-_', '+/')) ?: '{}');
+
+        return is_object($decoded) ? $decoded : new \stdClass;
     }
 }

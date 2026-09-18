@@ -2,8 +2,10 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\Denylist;
+use Lukk\Lukk;
 
 function challenge(): ChallengeToken
 {
@@ -20,6 +22,20 @@ it('is single-use', function () {
     $token = challenge()->issue('2fa', 42, 300);
 
     expect(challenge()->consume('2fa', $token))->toBe('42');
+    expect(challenge()->consume('2fa', $token))->toBeNull();
+});
+
+it('rejects a challenge declaring critical headers it does not understand', function () {
+    // RFC 7515 §4.1.11: a JWS whose `crit` names extensions the recipient does not support MUST be
+    // rejected. lukk emits none, so anything carrying `crit` came from a co-issuer expressing a
+    // restriction — and silently ignoring a restriction is the inversion `crit` exists to prevent.
+    $cfg = Lukk::guardConfig();
+    $now = time();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '42', 'jti' => 'crit-challenge',
+        'iat' => $now, 'nbf' => $now, 'exp' => $now + 300,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => '2fa+challenge', 'crit' => ['exp-nonsense']]);
+
     expect(challenge()->consume('2fa', $token))->toBeNull();
 });
 

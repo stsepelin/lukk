@@ -197,8 +197,18 @@ class KeyRing
             }
             // @codeCoverageIgnoreEnd
 
-            [$crv, $size] = $curves[$ec['curve_name']] ?? [(string) $ec['curve_name'], null];
-            $pad = fn (string $coord): string => $size === null ? $coord : str_pad($coord, $size, "\0", STR_PAD_LEFT);
+            // An UNMAPPED curve has no known field length, so there is nothing to pad to — and the
+            // padding silently became the identity function, publishing the very short coordinate
+            // §6.2.1.2 forbids. `ES256K` reaches here (php-jwt supports it and nothing validates
+            // `lukk.algorithm` against an allowlist) on the same 32-byte field, so roughly 1 key in 200
+            // would publish a short `x` or `y`. Omit it instead, exactly as a mismatched key type is
+            // omitted above: a JWK we cannot state correctly is one we do not publish.
+            if (! isset($curves[$ec['curve_name']])) {
+                return null;
+            }
+
+            [$crv, $size] = $curves[$ec['curve_name']];
+            $pad = fn (string $coord): string => str_pad($coord, $size, "\0", STR_PAD_LEFT);
 
             return [
                 'kty' => 'EC',

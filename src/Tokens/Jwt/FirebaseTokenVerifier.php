@@ -49,11 +49,25 @@ class FirebaseTokenVerifier implements TokenVerifier
         }
 
         // Reject non-access tokens: a 2FA/step-up challenge shares key/iss/aud, so `typ` is the only distinguisher.
-        if (($headers->typ ?? null) !== 'at+jwt') {
+        // Both spellings RFC 9068 §4 step 1 permits, case-insensitively: a co-issuer in a verify-only
+        // topology that stamps the registered long form had 100% of its tokens refused with no diagnostic.
+        if (isset($headers->crit)) {
             return null;
         }
 
-        if (($claims->iss ?? null) !== ($this->config['issuer'] ?? null)) {
+        $declared = $headers->typ ?? null;
+        $typ = is_string($declared) ? strtolower($declared) : null;
+
+        if ($typ !== 'at+jwt' && $typ !== 'application/at+jwt') {
+            return null;
+        }
+
+        // Fails CLOSED with no configured issuer, matching `ChallengeToken::decode`. Compared as
+        // `null !== null` this passed, so under a per-guard `env()` that is unset — or a config cached
+        // before the key existed — `iss` stopped being validated at all.
+        $issuer = $this->config['issuer'] ?? null;
+
+        if ($issuer === null || ($claims->iss ?? null) !== $issuer) {
             return null;
         }
 
