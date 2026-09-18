@@ -181,6 +181,34 @@ it('reports a family carrying more live tokens than concurrency explains', funct
     Event::assertDispatched(RefreshFamilyForked::class, fn ($e) => $e->liveTokens > 3);
 });
 
+it('does not let a throwing fork listener cost the client its whole family', function () {
+    // The event is ADVISORY. Dispatched between the commit and the return, a listener that threw — an
+    // alerting hook answering 500 is the realistic one — left the successor committed while the caller
+    // got an exception. Past the grace window that is indistinguishable from a replay, so the retry
+    // tripped reuse detection and revoked everything. That is exactly the hole the mint was moved
+    // inside the transaction to close.
+    config(['lukk.grace_seconds' => 60]);
+    Event::listen(RefreshFamilyForked::class, function () {
+        throw new RuntimeException('consumer listener blew up');
+    });
+
+    $pair = User::factory()->create()->startSession();
+    // Exactly the shape of the test above: re-consume the same parent inside grace, four times, which
+    // takes the family past the default `fork_threshold` and fires the event on the last pass.
+    $forked = null;
+    foreach (range(1, 4) as $i) {
+        $forked = rotate()($pair->refreshToken);
+    }
+
+    // The caller got its successor rather than the listener's exception.
+    expect($forked->refreshToken)->not->toBe('');
+
+    // And the family is intact: that successor still rotates past the grace window, with no reuse
+    // revoke — the outcome a lost successor produced.
+    test()->travel(61)->seconds();
+    expect(fn () => rotate()($forked->refreshToken))->not->toThrow(Throwable::class);
+});
+
 it('stays quiet for the two or three siblings ordinary concurrency produces', function () {
     Event::fake([RefreshFamilyForked::class]);
     config(['lukk.grace_seconds' => 60]);

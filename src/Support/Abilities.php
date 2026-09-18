@@ -121,7 +121,11 @@ class Abilities
                 continue;
             }
 
-            if (preg_match('/^[\x21\x23-\x5B\x5D-\x7E]+$/', $ability) !== 1) {
+            // `\z`, not `$`: PCRE's `$` matches before a FINAL newline, so `admin\n` satisfied a check whose
+            // whole job is that the mint grammar is never wider than the gate grammar. A verifier that
+            // splits `scope` on `\s+` — the common implementation, and the audience this claim exists for —
+            // then reads it as the bare `admin`.
+            if (preg_match('/^[\x21\x23-\x5B\x5D-\x7E]+\z/', $ability) !== 1) {
                 throw new InvalidArgumentException(sprintf(
                     'lukk ability %s is not a valid scope token (RFC 6749 §3.3): it may not contain a space, '
                     .'a double quote, a backslash, a control character or a non-ASCII byte. The scope claim is '

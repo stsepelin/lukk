@@ -205,6 +205,28 @@ it('keeps the caller\'s refresh cookie when revoking other sessions in cookie mo
         ->postJson('/auth/refresh')->assertOk();
 });
 
+it('answers a 401 with the WWW-Authenticate challenge RFC 6750 §3 requires', function () {
+    // "The resource server MUST include the HTTP `WWW-Authenticate` response header field." lukk
+    // emitted it on 403 (`insufficient_scope`, with the scope that would have sufficed) and on nothing
+    // else — so a generic OAuth client was told why it was refused at 403 and nothing at 401, unable to
+    // tell "expired, refresh and retry" from "wrong audience, give up".
+    $user = User::factory()->create();
+    $expired = $this->travel(-3600)->seconds(fn () => $user->startSession()->accessToken);
+
+    // No credential at all: there is no token to call invalid, so the bare challenge is right.
+    $this->postJson('/auth/session/claim')->assertUnauthorized()
+        ->assertHeader('WWW-Authenticate', 'Bearer');
+
+    app('auth')->forgetGuards();
+    foreach ([$expired, 'not-a-jwt'] as $bad) {
+        app('auth')->forgetGuards();
+        $header = $this->withToken($bad)->postJson('/auth/session/claim')
+            ->assertUnauthorized()->headers->get('WWW-Authenticate');
+
+        expect($header)->toContain('error="invalid_token"');
+    }
+});
+
 it('revokes nothing for a bearer that names no session — it would otherwise mean "every one"', function () {
     // A co-issuer sharing the secret mints tokens with no `fid`. "Others" is defined relative to THIS
     // session, and with no family to except, the call has no way to spare the caller's own: forcing the
