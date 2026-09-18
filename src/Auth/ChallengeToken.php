@@ -66,7 +66,7 @@ class ChallengeToken
 
         $signing = $this->keys->signingKey();
 
-        return JWT::encode($payload, $signing['key'], $this->config['algorithm'] ?? 'HS256', keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
+        return JWT::encode($payload, $signing['key'], (string) ($this->config['algorithm'] ?? 'HS256'), keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
     }
 
     /**

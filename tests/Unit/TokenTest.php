@@ -194,6 +194,38 @@ it('rejects an access token whose sub is missing, empty, or not a string', funct
 // null. Unguarded, `exp` is `$now + null` — EQUAL to `iat`, so every token that guard mints is
 // already expired when it is handed out (login answers 200 and nothing it returns works), and
 // `expires_in` serialises as null, which a client scheduling its refresh off it never recovers from.
+it('takes an algorithm and a secret that arrive as non-strings, as a published config can hand them over', function () {
+    // The three `(string)` casts in `KeyRing` are load-bearing, not hygiene: `firebase/php-jwt` types
+    // both the algorithm and the key material as `string`, so an int or a `Stringable` reaching them
+    // under `strict_types` is a TypeError — a 500 on every mint AND every verify, from a config that
+    // merely round-tripped through something that lost its types. CLAUDE.md's rule is that no `lukk`
+    // key is guaranteed to be what you expect at runtime.
+    //
+    // Pinned by hand because the mutation score cannot see it: these lines are covered by nearly every
+    // test, so a mutant there runs the whole suite serially and is scored "detected" on a TIMEOUT
+    // rather than on a failure — which is not detection at all.
+    $secret = new class
+    {
+        public function __toString(): string
+        {
+            return str_repeat('k', 40);
+        }
+    };
+
+    config(['lukk.secret' => $secret, 'lukk.algorithm' => new class
+    {
+        public function __toString(): string
+        {
+            return 'HS256';
+        }
+    }]);
+
+    $access = app(TokenIssuer::class)->accessToken(ctx(1, 'fam'));
+
+    expect(claims($access['token'])->sub)->toBe('1')
+        ->and(verifier()->verify($access['token']))->not->toBeNull();
+});
+
 it('rejects a token declaring critical headers it does not understand', function () {
     // RFC 7515 §4.1.11 / RFC 7519 §7.2 step 10: a JWS whose `crit` names extensions the recipient does
     // not support MUST be rejected. lukk emits none, so anything carrying `crit` is a co-issuer

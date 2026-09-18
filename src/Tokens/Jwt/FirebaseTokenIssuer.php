@@ -95,7 +95,10 @@ class FirebaseTokenIssuer implements TokenIssuer
         $token = JWT::encode(
             $payload,
             $signing['key'],
-            $this->config['algorithm'] ?? 'HS256',
+            // Cast like `KeyRing::algorithm()` does, and for the same reason: `JWT::encode()` types
+            // `$alg` as `string`, so a config that lost its types hands it a TypeError under
+            // `strict_types` — a 500 on every mint. Three readers of this key; they should agree.
+            (string) ($this->config['algorithm'] ?? 'HS256'),
             keyId: $signing['kid'],
             head: ['typ' => 'at+jwt'],
         );

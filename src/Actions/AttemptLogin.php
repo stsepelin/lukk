@@ -154,8 +154,11 @@ class AttemptLogin
 
         $seconds = $this->limiter->availableIn($request);
 
+        // The `(int)` is type hygiene, not behaviour: `ceil()` is always integral, and the value's
+        // only consumer is a translation replacement, where `(string) 32.0` and `(string) 32` are
+        // the same characters.
         throw ValidationException::withMessages([
-            $this->field() => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+            $this->field() => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
         ])->status(429);
     }
 
@@ -177,7 +180,8 @@ class AttemptLogin
     private function lockoutSubject(Request $request): string
     {
         if ($this->lockouts === null) {
-            return '';
+            // The value is never read: every consumer of the subject short-circuits on this same check.
+            return ''; // @pest-mutate-ignore: EmptyStringToNotEmpty
         }
 
         $identifier = (string) $request->input($this->field());
