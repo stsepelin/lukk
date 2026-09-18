@@ -35,6 +35,21 @@ it('stores a login challenge under an opaque ceremony id (single-use)', function
     expect(challengeStore()->pullForCeremony($id))->toBeNull();
 });
 
+it('deletes the challenge itself, not only the single-use marker', function () {
+    // Single-use is carried by an atomic claim marker, so dropping this `forget()` still refuses a
+    // second read — and every test here stayed green. But the challenge then sits in the cache for its
+    // whole TTL after the ceremony that consumed it, which is a one-time value outliving its one time.
+    $store = challengeStore();
+    $store->putForUser(7, 'CHALLENGE');
+    $id = $store->putForCeremony('CEREMONY');
+
+    expect(cache()->has('lukk:pk:reg:api:7'))->toBeTrue();
+    $store->pullForUser(7);
+    $store->pullForCeremony($id);
+
+    expect(cache()->has('lukk:pk:reg:api:7'))->toBeFalse();
+});
+
 it('returns null pulling an empty or unknown ceremony id', function () {
     expect(challengeStore()->pullForCeremony(''))->toBeNull();
     expect(challengeStore()->pullForCeremony('unknown'))->toBeNull();

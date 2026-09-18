@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\ExportAccount;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Contracts\PasskeyRepository;
+use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('account-deletion');
@@ -135,4 +137,19 @@ it('exports no lockouts when the lockout table was never published', function ()
     Schema::drop('lukk_lockouts');
 
     expect(app(ExportAccount::class)(User::factory()->create())['lockouts'])->toBe([]);
+});
+
+it('exports no lockouts for a construction that passes none, with the table published', function () {
+    // The OTHER half of that guard. The provider always supplies the repository, so this half is only
+    // reachable through a direct construction written against 0.6 — which the nullable parameter exists
+    // to keep working. Unreached, turning the `||` into an `&&` is invisible, and that one character
+    // puts a method call on null: a 500 on a GDPR export route for exactly those consumers.
+    $export = new ExportAccount(
+        app(RefreshTokenRepository::class),
+        app(PasskeyRepository::class),
+        'email',
+    );
+
+    expect(Schema::hasTable('lukk_lockouts'))->toBeTrue()
+        ->and($export(User::factory()->create())['lockouts'])->toBe([]);
 });

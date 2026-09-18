@@ -126,10 +126,10 @@ it('survives an abilities callback that poisons its own transaction', function (
     // Invisible on sqlite (no such state) and on MySQL (statement-level rollback), which is why it
     // lives here. The fix is structural: the callback is resolved BEFORE the transaction opens, so
     // nothing but lukk's statements and pure crypto run inside it.
+    // 25P02 is PostgreSQL-specific. An honest skip, now that CI asserts the suite RAN rather than
+    // banning the word — this used to be `expect(true)->toBeTrue()`, a passing test asserting nothing.
     if ($engine !== 'pgsql') {
-        expect(true)->toBeTrue();   // 25P02 is PostgreSQL-specific
-
-        return;
+        test()->markTestSkipped('25P02 is PostgreSQL-specific');
     }
 
     $pair = User::factory()->create()->startSession();
