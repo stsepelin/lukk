@@ -6,12 +6,15 @@ use Firebase\JWT\JWT;
 use Illuminate\Cache\Events\ForgettingKey;
 use Illuminate\Cache\Events\RetrievingKey;
 use Illuminate\Cache\Events\WritingKey;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\ClaimSession;
+use Lukk\Actions\RevokeSession;
 use Lukk\Actions\StartSession;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\RefreshTokenRepository;
@@ -321,6 +324,32 @@ it('treats a non-numeric or negative window as off', function (mixed $window) {
     expect(isUnclaimed(familyFor($tokens['refresh_token'])))->toBeFalse();
 })->with(['not-a-number', -5, null]);
 
+it('re-checks its own off switch, which is `window <= 0` and not one second more', function () {
+    // Neither caller reaches the action with a window it should ignore — `JwtGuard` compares an integer
+    // first and `RotateRefreshToken` is handed null — and `UnclaimedSessions::window()` only ever
+    // answers 0 or a value clamped to at least 60. So this switch is only reachable by constructing the
+    // action, which is what a consumer rebinding `ClaimSession` does. Off must cost nothing at all, and
+    // must not quietly swallow a window that was asked for.
+    config(['lukk.claim_seconds' => 600]);
+    $tokens = signIn(User::factory()->create());
+    $family = familyFor($tokens['refresh_token']);
+    $issuedAt = Cache::get('lukk:unclaimed:'.$family);
+
+    $claim = fn (int $window) => new ClaimSession(app(UnclaimedSessions::class), app(RevokeSession::class), $window);
+
+    $ops = claimCacheOps();
+
+    expect($claim(0)($family, $issuedAt))->toBeTrue()
+        ->and($claim(-1)($family, $issuedAt))->toBeTrue()
+        ->and($ops->getArrayCopy())->toBe([]);   // not even the one cache read
+
+    // On, at the smallest window there is: a first use two seconds after a one-second window is late.
+    $this->travel(2)->seconds();
+
+    expect($claim(1)($family, $issuedAt, original: true))->toBeFalse()
+        ->and(RefreshToken::where('family_id', $family)->whereNull('revoked_at')->exists())->toBeFalse();
+});
+
 it('throttles the claim route per user, not per address', function () {
     config(['lukk.rate_limits.refresh.max_attempts' => 1]);
     $first = User::factory()->create()->startSession();
@@ -442,6 +471,29 @@ it('falls back to the mint-time comparison for a repository that does not report
     Log::shouldNotHaveReceived('warning');
 });
 
+it('spends the whole mint-time tolerance on the original, and revokes it late all the same', function () {
+    // `StartSession` writes the marker and then inserts the row, so the two timestamps are stamped
+    // microseconds apart by this one server and can still land on either side of a second boundary.
+    // `ORIGINAL_WITHIN_SECONDS` is the budget for exactly that, and spending all of it must still leave
+    // the sign-in's own refresh token recognisable — a tolerance that stops one short of its own
+    // constant turns a never-used session into one that is never revoked.
+    //
+    // The proximity test is the FALLBACK, so the repository has to be one that cannot answer
+    // `original`; the shipped one answers it exactly and would ignore the tolerance altogether.
+    config(['lukk.claim_seconds' => 600]);
+    bindRepositoryReporting(original: false, createdAt: true);
+    $tokens = signIn(User::factory()->create());
+    $family = familyFor($tokens['refresh_token']);
+
+    // The marker landed a full tolerance ahead of the row it belongs to.
+    Cache::put('lukk:unclaimed:'.$family, Cache::get('lukk:unclaimed:'.$family) - 2, 3600);
+    $this->travel(601)->seconds();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $tokens['refresh_token']])->assertUnauthorized();
+
+    expect(RefreshToken::where('family_id', $family)->whereNull('revoked_at')->exists())->toBeFalse();
+});
+
 it('recognises the original from `original` alone, without a createdAt and without warning', function () {
     // The inverse: `original` is the signal the rule actually wants, so a repository reporting it owes
     // nothing else. It used to be `createdAt` or nothing, which made a `$timestamps = false` model
@@ -527,12 +579,17 @@ it('rejects a late first use with 401, not a 500, on a verify-only service with 
     $family = familyFor($tokens['refresh_token']);
 
     Schema::drop('refresh_tokens');
+    Exceptions::fake();
     $this->travel(601)->seconds();
 
     freshRequest();
     $this->withToken($tokens['access_token'])->postJson('/auth/session/claim')->assertUnauthorized();
 
     expect(app(Denylist::class)->has('fid', $family))->toBeTrue();
+
+    // Swallowed, not hidden. The rows were NOT revoked here, and only the report says so — on a
+    // service that does own the table this is a real database failure wearing a 401.
+    Exceptions::assertReported(fn (QueryException $e) => str_contains($e->getMessage(), 'refresh_tokens'));
 });
 
 it('never revokes the original refresh row once it has been rotated, even replayed inside grace with its marker back', function () {
@@ -586,11 +643,20 @@ it('warns once per process when a replacement repository reports neither signal,
     $this->postJson('/auth/refresh', ['refresh_token' => $first['refresh_token']])->assertOk();
     $this->postJson('/auth/refresh', ['refresh_token' => $second['refresh_token']])->assertOk();
 
+    // The whole sentence, not a few substrings in it: the warning IS the feature here — it is the only
+    // thing that tells an operator which of their own classes to change, and half a sentence, or one
+    // assembled in the wrong order, says nothing actionable while still mentioning every keyword.
+    $expected = 'lukk: claim_seconds is on for guard [api], but its refresh token '
+        .'records report neither original nor createdAt, so an unclaimed session\'s original '
+        .'refresh token can never be recognised and is never revoked. A replacement '
+        .'RefreshTokenRepository must populate RefreshTokenRecord::$original, or failing that '
+        .'$createdAt.';
+
     Log::shouldHaveReceived('warning')
         ->once()
-        ->withArgs(fn (string $message) => str_contains($message, 'createdAt')
-            && str_contains($message, 'guard [api]')
-            && str_contains($message, '$original')
+        ->withArgs(fn (string $message) => $message === $expected
+            // Kept explicit: a future rewording is copied into `$expected`, and this is what stops one
+            // that interpolates the session it was noticed on from being copied in with it.
             && ! str_contains($message, $first['refresh_token'])
             && ! str_contains($message, familyFor($first['refresh_token'])));
 });
