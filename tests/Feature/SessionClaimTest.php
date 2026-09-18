@@ -36,29 +36,39 @@ beforeEach(function () {
     // access TTL keeps a `claim_seconds` of 600 meaning 600 in the tests that are not about the clamp.
     config(['lukk.access_ttl' => 300]);
 
-    resetMissingCreatedAtWarning();
+    resetMissingOriginWarning();
 });
 
-// The missing-`createdAt` warning is once per process, so its flag is static: reset it around EVERY test,
+// The unrecognisable-original warning is once per process, so its flag is static: reset it around EVERY test,
 // so a failed assertion in one cannot leak a set flag into the next.
-afterEach(fn () => resetMissingCreatedAtWarning());
+afterEach(fn () => resetMissingOriginWarning());
 
-function resetMissingCreatedAtWarning(): void
+function resetMissingOriginWarning(): void
 {
-    (new ReflectionProperty(ClaimSession::class, 'warnedMissingCreatedAt'))->setValue(null, false);
+    (new ReflectionProperty(ClaimSession::class, 'warnedMissingOrigin'))->setValue(null, false);
 }
 
-/** Replace the repository with one that hides `createdAt`, as a careless replacement would. */
-function bindRepositoryHidingCreatedAt(): void
+/**
+ * Replace the repository with one that reports only the signals asked for — a replacement written
+ * against an older version of the contract, or a careless one.
+ */
+function bindRepositoryReporting(bool $original, bool $createdAt): void
 {
-    app()->bind(RefreshTokenRepository::class, fn () => new class extends DatabaseRefreshTokenRepository
+    app()->bind(RefreshTokenRepository::class, fn () => new class($original, $createdAt) extends DatabaseRefreshTokenRepository
     {
+        public function __construct(private readonly bool $reportsOriginal, private readonly bool $reportsCreatedAt)
+        {
+            parent::__construct();
+        }
+
         public function findByHash(string $hash): ?RefreshTokenRecord
         {
             $r = parent::findByHash($hash);
 
             return $r === null ? null : new RefreshTokenRecord(
-                $r->id, $r->userId, $r->familyId, $r->rotatedAt, $r->revokedAt, $r->expiresAt, $r->scope, createdAt: null,
+                $r->id, $r->userId, $r->familyId, $r->rotatedAt, $r->revokedAt, $r->expiresAt, $r->scope,
+                createdAt: $this->reportsCreatedAt ? $r->createdAt : null,
+                original: $this->reportsOriginal ? $r->original : null,
             );
         }
     });
@@ -373,6 +383,83 @@ it('never revokes a refreshed session whose marker came back, when it presents a
         ->and(isUnclaimed($family))->toBeFalse();
 });
 
+it('never treats a successor minted moments after sign-in as the original', function () {
+    // The rule is "is this the credential the sign-in handed out", and comparing mint times only
+    // ANSWERS that in one direction: a client that refreshes a second after signing in gets a
+    // successor whose own creation is inside the tolerance, so a resurrected marker revoked a session
+    // in active use — exactly what the rule exists to prevent, and no configuration avoided it. The
+    // family's original row is the one with no predecessor, which is exact.
+    config(['lukk.claim_seconds' => 600]);
+    $tokens = signIn(User::factory()->create());
+    $family = familyFor($tokens['refresh_token']);
+    $issuedAt = Cache::get('lukk:unclaimed:'.$family);
+
+    $this->travel(1)->seconds();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $tokens['refresh_token']])->assertOk()->json();
+
+    // The claim's delete is lost: the cache is restored from a snapshot taken before it.
+    Cache::put('lukk:unclaimed:'.$family, $issuedAt, 3600);
+    $this->travel(700)->seconds();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $rotated['refresh_token']])->assertOk();
+
+    expect(RefreshToken::where('family_id', $family)->whereNull('revoked_at')->exists())->toBeTrue()
+        ->and(isUnclaimed($family))->toBeFalse();
+});
+
+it('falls back to the mint-time comparison for a repository that does not report `original`', function () {
+    // `RefreshTokenRecord::$original` is newer than the documented storage seam, so unknown must mean
+    // "compare the mint times" — exactly what such a repository already did, no better and no worse.
+    // Defaulting it to "this is the original" instead would hand every successor to the revocation
+    // path, and the repository would have gone from working to logging people out by upgrading lukk.
+    config(['lukk.claim_seconds' => 600]);
+    bindRepositoryReporting(original: false, createdAt: true);
+    Log::spy();
+    $user = User::factory()->create();
+
+    // Refreshed 10 s in, then its marker came back: a successor, and still not revoked.
+    $refreshed = signIn($user);
+    $refreshedFamily = familyFor($refreshed['refresh_token']);
+    $issuedAt = Cache::get('lukk:unclaimed:'.$refreshedFamily);
+
+    $this->travel(10)->seconds();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $refreshed['refresh_token']])->assertOk()->json();
+    Cache::put('lukk:unclaimed:'.$refreshedFamily, $issuedAt, 3600);
+
+    // Never used at all: its original, presented late, is still revoked.
+    $unclaimed = signIn($user);
+    $unclaimedFamily = familyFor($unclaimed['refresh_token']);
+
+    $this->travel(700)->seconds();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $rotated['refresh_token']])->assertOk();
+    $this->postJson('/auth/refresh', ['refresh_token' => $unclaimed['refresh_token']])->assertUnauthorized();
+
+    expect(RefreshToken::where('family_id', $refreshedFamily)->whereNull('revoked_at')->exists())->toBeTrue()
+        ->and(RefreshToken::where('family_id', $unclaimedFamily)->whereNull('revoked_at')->exists())->toBeFalse();
+
+    // Working as documented, so nothing to warn about.
+    Log::shouldNotHaveReceived('warning');
+});
+
+it('recognises the original from `original` alone, without a createdAt and without warning', function () {
+    // The inverse: `original` is the signal the rule actually wants, so a repository reporting it owes
+    // nothing else. It used to be `createdAt` or nothing, which made a `$timestamps = false` model
+    // silently disable the feature.
+    config(['lukk.claim_seconds' => 600]);
+    bindRepositoryReporting(original: true, createdAt: false);
+    Log::spy();
+    $tokens = signIn(User::factory()->create());
+    $family = familyFor($tokens['refresh_token']);
+
+    $this->travel(601)->seconds();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $tokens['refresh_token']])->assertUnauthorized();
+
+    expect(RefreshToken::where('family_id', $family)->whereNull('revoked_at')->exists())->toBeFalse();
+    Log::shouldNotHaveReceived('warning');
+});
+
 it('never treats a successor as the original, however large the configured leeway', function () {
     // `leeway` is signer-to-verifier clock drift and an operator may legitimately raise it; the
     // marker and the credential's mint time both come from THIS server in one sign-in, so the
@@ -477,11 +564,11 @@ it('authenticates a co-issuer token with no family as before, when the feature i
     expect($ops->getArrayCopy())->toBe([]);
 });
 
-it('warns once per process when a replacement repository hides created_at, which silently disables revocation', function () {
-    // Without `createdAt` no refresh row can be recognised as the sign-in's original, so no late first
-    // use is ever revoked — the feature fails open, invisibly. Say so, once per process.
+it('warns once per process when a replacement repository reports neither signal, which silently disables revocation', function () {
+    // With neither `original` nor `createdAt` no refresh row can be recognised as the sign-in's own, so
+    // no late first use is ever revoked — the feature fails open, invisibly. Say so, once per process.
     config(['lukk.claim_seconds' => 600]);
-    bindRepositoryHidingCreatedAt();
+    bindRepositoryReporting(original: false, createdAt: false);
 
     Log::spy();
     $user = User::factory()->create();
@@ -498,16 +585,16 @@ it('warns once per process when a replacement repository hides created_at, which
         ->once()
         ->withArgs(fn (string $message) => str_contains($message, 'createdAt')
             && str_contains($message, 'guard [api]')
-            && str_contains($message, '$timestamps')
+            && str_contains($message, '$original')
             && ! str_contains($message, $first['refresh_token'])
             && ! str_contains($message, familyFor($first['refresh_token'])));
 });
 
-it('never fails a refresh because logging the missing created_at warning throws', function () {
+it('never fails a refresh because logging the unrecognisable-original warning throws', function () {
     // The warning is a diagnostic riding on an authentication request. A broken log channel must not
     // turn it into a 500, on the first refresh or any later one.
     config(['lukk.claim_seconds' => 600]);
-    bindRepositoryHidingCreatedAt();
+    bindRepositoryReporting(original: false, createdAt: false);
 
     Log::spy();
     Log::shouldReceive('warning')->once()->andThrow(new RuntimeException('log channel down'));

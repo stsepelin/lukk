@@ -24,9 +24,12 @@ interface RefreshTokenRepository
      * held. A token hash's subject and family are written once and never updated, so reading them
      * outside the lock is safe.
      *
-     * The record must carry `createdAt` (the row's creation time, unix seconds) for `claim_seconds`
-     * to work — it is how the sign-in's original refresh row is recognised. Left null, a late original
-     * is never revoked, and lukk logs a warning once per worker process.
+     * For `claim_seconds` to work, the record must say whether the row is the sign-in's ORIGINAL —
+     * `RefreshTokenRecord::$original`, true only for the row persisted with a null `$previousId`. A
+     * repository that leaves it null (every repository written before the field existed) falls back to
+     * `createdAt`, which only compares mint times and therefore reads a successor minted moments after
+     * sign-in as the original. Report `$original`. Leave BOTH unset and no late original is ever
+     * revoked — the feature is silently off, and lukk logs a warning once per worker process.
      */
     public function findByHash(string $hash): ?RefreshTokenRecord;
 

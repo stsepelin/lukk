@@ -77,7 +77,8 @@ class JwtGuard
     private function claimed(string $familyId, ?int $issuedAt): bool
     {
         // Resolved on THIS guard, so the revocation it may perform hits this guard's repository. The
-        // token's `iat` decides whether it is the sign-in's original; with the window clamped past
+        // token's `iat` decides whether it is the sign-in's original — an access token carries no
+        // lineage, so this half stays the mint-time comparison; with the window clamped past
         // `access_ttl + leeway`, the original access token has normally expired before it could be
         // late, so in practice this path claims and the refresh path is the one that revokes.
         return (bool) Lukk::onGuard($this->guard, fn () => app(ClaimSession::class)($familyId, $issuedAt));

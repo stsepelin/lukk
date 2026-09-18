@@ -89,6 +89,10 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
             createdAt: $row->created_at?->getTimestamp(),
+            // The family's original is the row `StartSession` inserted with no predecessor. Unlike
+            // `scope`, this column needs no "is it there" guard: `persist()` writes `previous_id` on
+            // every insert, so a schema lacking it could not have stored this row in the first place.
+            original: $row->previous_id === null,
         );
     }
 

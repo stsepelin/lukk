@@ -86,11 +86,13 @@ class RotateRefreshToken
         // `unclaimed`, not `reuse`: nothing was replayed, so `RefreshTokenReused` does not fire.
         if ($this->claim !== null && $preRead !== null && ! $this->rejectable($preRead, $grace)
             // The family's ORIGINAL row is the never-rotated one created with it; a successor row was
-            // created by a refresh, so presenting it proves the session was used.
+            // created by a refresh, so presenting it proves the session was used. `rotatedAt` is asked
+            // here rather than in `ClaimSession` because rotation is a use of ANY row, original or not.
             && ! ($this->claim)(
                 $preRead->familyId,
                 $preRead->rotatedAt === null ? $preRead->createdAt : null,
-                $preRead->rotatedAt === null && $preRead->createdAt === null,
+                $preRead->rotatedAt === null ? $preRead->original : false,
+                $preRead->rotatedAt === null && $preRead->original === null && $preRead->createdAt === null,
             )) {
             throw new InvalidRefreshToken('unclaimed');
         }
