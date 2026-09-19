@@ -94,7 +94,8 @@ class DatabasePasskeyRepository implements PasskeyRepository
             credentialId: $row->credential_id,
             userId: $row->user_id,
             publicKey: Crypt::decryptString($row->public_key),
-            signCount: (int) $row->sign_count,
+            // The model already casts `sign_count` to an integer; this only states it.
+            signCount: (int) $row->sign_count, // @pest-mutate-ignore: RemoveIntegerCast
             transports: $row->transports ?? [],
             aaguid: $row->aaguid,
             name: $row->name,
@@ -194,9 +195,11 @@ class DatabasePasskeyRepository implements PasskeyRepository
      * @param  bool  $scopable  Whether the `guard` column exists.
      * @return array<string, string>
      */
-    private function guardProviders(bool $scopable = true): array
+    private function guardProviders(bool $scopable): array
     {
-        $fallback = (string) (config('lukk.user_provider') ?? 'users');
+        // A provider name only ever reaches the `auth.providers.{…}.model` key, where the cast
+        // changes nothing; it states the type.
+        $fallback = (string) (config('lukk.user_provider') ?? 'users'); // @pest-mutate-ignore: RemoveStringCast
 
         // No column on a MULTI-GUARD install: sweep NOTHING. Treating it as single-guard would run
         // one unscoped pass against only the DEFAULT provider's table, which reads every other
@@ -204,8 +207,9 @@ class DatabasePasskeyRepository implements PasskeyRepository
         // in the pre-column path, on a daily irreversible command. Such an install is mid-upgrade
         // and has not run the ALTER yet; the same "skip rather than guess" rule as the non-Eloquent
         // and cross-connection cases applies.
+        // (The key here is never read: without the column the sweep applies no guard filter.)
         if (! $scopable) {
-            return Lukk::isMultiGuard() ? [] : ['' => $fallback];
+            return Lukk::isMultiGuard() ? [] : ['' => $fallback]; // @pest-mutate-ignore: EmptyStringToNotEmpty
         }
 
         if (! Lukk::isMultiGuard()) {
@@ -214,10 +218,12 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
         // Under multi-guard the default guard stamps its own name, so nothing legitimate carries a
         // null `guard` — anything that does predates the column and is not ours to delete.
-        $providers = [(string) config('lukk.guard', 'api') => $fallback];
+        // The default guard is resolved from `lukk.user_provider`, never from its own auth.guards
+        // entry, and `guardNames()` lists it first, so `??=` leaves it that way.
+        $providers = [Lukk::guardNames()[0] => $fallback];
 
-        foreach (array_keys((array) config('lukk.guards', [])) as $name) {
-            $providers[(string) $name] ??= (string) (config("auth.guards.{$name}.provider") ?? $fallback);
+        foreach (Lukk::guardNames() as $name) {
+            $providers[$name] ??= (string) (config("auth.guards.{$name}.provider") ?? $fallback); // @pest-mutate-ignore: RemoveStringCast
         }
 
         return $providers;

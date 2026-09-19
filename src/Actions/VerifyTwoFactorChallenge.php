@@ -47,7 +47,8 @@ class VerifyTwoFactorChallenge
         // providers hazard the multi-guard work exists to remove, and it would go live silently the
         // moment the feature surfaces extend to another guard.
         $key = 'lukk:2fa-challenge:'.($this->guard ?? 'api').':'.$userId;
-        $subject = (string) $userId;
+        // `verify()` returns `?string` and the null branch threw above, so this is already a string.
+        $subject = (string) $userId; // @pest-mutate-ignore: RemoveStringCast
 
         // A recovery code is the way OUT of a lock, so it must not be gated by one: it's ~119 bits
         // of entropy, single-use and salted+hashed, so a consecutive cap protects nothing there —
@@ -66,8 +67,9 @@ class VerifyTwoFactorChallenge
         if ($this->limiter->tooManyAttempts($key, $this->maxAttempts)) {
             $seconds = $this->limiter->availableIn($key);
 
+            // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
             throw ValidationException::withMessages([
-                'code' => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+                'code' => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
             ])->status(429);
         }
 

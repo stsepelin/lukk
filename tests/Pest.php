@@ -160,3 +160,19 @@ function ctx(int|string $userId, string $familyId = 'fam'): TokenContext
 {
     return new TokenContext(Lukk\Lukk::currentGuard(), $userId, $familyId);
 }
+
+/**
+ * Run `$callback`; anything it throws fails the test.
+ *
+ * Pest 4's negated `toThrow` cannot say this. It tests the argument with `class_exists()`, which is
+ * false for an interface, so `Throwable::class` is read as an expected MESSAGE:
+ * `->not->toThrow(Throwable::class)` stayed green over a RuntimeException (and the positive form
+ * fails over one). With no argument it fails even when nothing is thrown. A concrete class works,
+ * but misses the other half of Throwable (`Exception` lets a TypeError through). So call it, and
+ * count the call as the assertion.
+ */
+function expectNoThrow(Closure $callback): void
+{
+    $callback();
+    test()->addToAssertionCount(1);
+}

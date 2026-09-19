@@ -59,7 +59,8 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             throw new InvalidArgumentException('Passkeys require lukk.passkeys.origins — the allowed front-end origin(s), e.g. "https://app.example.com" (set LUKK_PASSKEY_ORIGINS).');
         }
 
-        $support = new AttestationStatementSupportManager([new NoneAttestationStatementSupport]);
+        // The manager registers `none` itself as well; listed so the supported set is stated here.
+        $support = new AttestationStatementSupportManager([new NoneAttestationStatementSupport]); // @pest-mutate-ignore: RemoveArrayItem
         $this->serializer = (new WebauthnSerializerFactory($support))->create();
 
         $factory = new CeremonyStepManagerFactory;
@@ -67,7 +68,8 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         $factory->setAllowedOrigins($this->config['origins']);
         // Pin the COSE signature allow-list to exactly what we advertise in pubKeyCredParams (ES256/RS256)
         // rather than inherit the library's transitive default — so a future lib change can't silently widen it.
-        $factory->setAlgorithmManager(CoseAlgorithmManager::create()->add(new ES256, new RS256));
+        // (Equivalent today — the library's own default is also ES256 + RS256 — which is the point.)
+        $factory->setAlgorithmManager(CoseAlgorithmManager::create()->add(new ES256, new RS256)); // @pest-mutate-ignore: RemoveMethodCall
 
         $this->attestation = AuthenticatorAttestationResponseValidator::create($factory->creationCeremony());
         $this->assertion = AuthenticatorAssertionResponseValidator::create($factory->requestCeremony());
@@ -112,14 +114,18 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             // could lock themselves out by trusting that listing and pruning their other factors.
             $options = PublicKeyCredentialCreationOptions::create(
                 rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
-                user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''),
+                // The attestation check never reads the user's names, only the options' challenge, RP
+                // and user-verification requirement.
+                user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
                 challenge: $this->decode($challenge),
                 authenticatorSelection: AuthenticatorSelectionCriteria::create(
-                    userVerification: (string) ($this->config['user_verification'] ?? 'required'),
+                    // A string from env either way; the cast only states it.
+                    userVerification: (string) ($this->config['user_verification'] ?? 'required'), // @pest-mutate-ignore: RemoveStringCast
                 ),
             );
 
-            $record = $this->attestation->check($authenticatorResponse, $options, (string) $this->config['rp_id']);
+            // `rp_id` is a non-empty string (the constructor refuses anything else); the cast states it.
+            $record = $this->attestation->check($authenticatorResponse, $options, (string) $this->config['rp_id']); // @pest-mutate-ignore: RemoveStringCast
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {
@@ -167,7 +173,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             );
 
             // Usernameless: the user is resolved from our credential_id→userId mapping, so pass null here.
-            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null);
+            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null); // @pest-mutate-ignore: RemoveStringCast
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {

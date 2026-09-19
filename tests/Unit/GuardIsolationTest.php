@@ -33,7 +33,7 @@ it('accepts a lukk-jwt guard that carries its own isolated identity', function (
         ]],
     ]);
 
-    expect(fn () => Lukk::assertGuardsIsolated())->not->toThrow(Exception::class);
+    expectNoThrow(fn () => Lukk::assertGuardsIsolated());
 });
 
 it('ignores guards that are not lukk\'s, and the default guard itself', function () {
@@ -44,6 +44,6 @@ it('ignores guards that are not lukk\'s, and the default guard itself', function
         'lukk.guards' => [],
     ]);
 
-    expect(Lukk::driverGuardNames())->toBe(['api'])
-        ->and(fn () => Lukk::assertGuardsIsolated())->not->toThrow(Exception::class);
+    expect(Lukk::driverGuardNames())->toBe(['api']);
+    expectNoThrow(fn () => Lukk::assertGuardsIsolated());
 });

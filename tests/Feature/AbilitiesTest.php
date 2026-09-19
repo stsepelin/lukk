@@ -220,7 +220,7 @@ it('does not revoke the family when the abilities callback fails during refresh'
 
     // Well past the grace window, so a consumed parent would be classed as reuse.
     $this->travel(45)->seconds(function () use ($pair) {
-        expect(fn () => rotate()($pair->refreshToken))->not->toThrow(Exception::class);
+        expectNoThrow(fn () => rotate()($pair->refreshToken));
     });
 
     expect(RefreshToken::whereNull('revoked_at')->count())->toBeGreaterThan(0);

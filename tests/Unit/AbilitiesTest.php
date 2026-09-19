@@ -164,6 +164,27 @@ it('does not echo an unbounded value into the exception message', function () {
     }
 });
 
+it('hands a Collection\'s items over as they are, without recursing into Arrayable ones', function () {
+    // `Collection::toArray()` recurses into Arrayable items, so a relation of permission models
+    // with a `__toString()` would arrive as a list of arrays and fail every login.
+    $permission = new class implements Arrayable, Stringable
+    {
+        public function toArray(): array
+        {
+            return ['name' => 'orders.read'];
+        }
+
+        public function __toString(): string
+        {
+            return 'orders.read';
+        }
+    };
+
+    Lukk::abilitiesUsing(fn () => collect([$permission]));
+
+    expect(notNull(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.read']);
+});
+
 it('reads a Collection with all() but any other Arrayable with toArray()', function () {
     // `all()` is an ENUMERABLE method; `Arrayable` declares only `toArray()`. Calling `all()` on the
     // contract resolved to the STATIC `Model::all()` for an Eloquent model — an unbounded table

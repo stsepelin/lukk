@@ -54,7 +54,9 @@ class Lukk
     /** @var class-string|null */
     public static ?string $refreshTokenModel = null;
 
-    public static bool $runsScheduledPruning = true;
+    // Not equivalent, and tested: ScheduleTest's "schedules lukk:prune daily by default" fails with
+    // `false` here. Pest reports it uncovered only because a property default runs no coverable line.
+    public static bool $runsScheduledPruning = true; // @pest-mutate-ignore: TrueToFalse
 
     /**
      * Fully customize how login credentials are authenticated.
@@ -116,8 +118,10 @@ class Lukk
 
     private static function normalizeIp(string $ip): string
     {
-        if ($ip === '' || ! str_contains($ip, ':')) {
-            return $ip; // IPv4, or nothing to normalize
+        // A fast path, not a decision: an IPv4 address or '' would also come back verbatim from the
+        // `strlen !== 16` guard below.
+        if ($ip === '' || ! str_contains($ip, ':')) { // @pest-mutate-ignore: BooleanOrToBooleanAnd,EmptyStringToNotEmpty
+            return $ip; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         $packed = @inet_pton($ip);
@@ -131,7 +135,8 @@ class Lukk
         // client population sharing a single counter, i.e. a self-inflicted 429 storm.
         foreach ([str_repeat("\0", 10)."\xff\xff", "\x00\x64\xff\x9b".str_repeat("\0", 8)] as $embedded) {
             if (str_starts_with($packed, $embedded)) {
-                return (string) inet_ntop(substr($packed, 12));
+                // Four bytes always form a valid IPv4 address, so `inet_ntop()` cannot return false here.
+                return (string) inet_ntop(substr($packed, 12)); // @pest-mutate-ignore: RemoveStringCast
             }
         }
 
@@ -148,7 +153,8 @@ class Lukk
         $masked = substr($packed, 0, $whole);
 
         if ($bits > 0) {
-            $masked .= chr(ord($packed[$whole]) & (0xFF << (8 - $bits)) & 0xFF);
+            // `ord()` is at most 255, so the mask needs no trailing `& 0xFF` to keep `chr()` in range.
+            $masked .= chr(ord($packed[$whole]) & (0xFF << (8 - $bits)));
         }
 
         return inet_ntop(str_pad($masked, 16, "\0")).'/'.$prefix;
@@ -310,6 +316,9 @@ class Lukk
         // run inside the rotate transaction's row lock, whose result then landed in a logged
         // exception message; and any other `Arrayable` without an `all()` was a hard fatal on every
         // login and refresh, the exact outage this branch exists to prevent.
+        // Every Enumerable is also Arrayable, but the two differ on items: `toArray()` recurses into
+        // any that are Arrayable, so a Collection of permission models with a `__toString()` would
+        // become a list of arrays. `all()` hands the items over as they are.
         if ($granted instanceof Enumerable) {
             $granted = $granted->all();
         } elseif ($granted instanceof Arrayable) {
@@ -414,11 +423,15 @@ class Lukk
      */
     public static function guardNames(): array
     {
-        $lukk = (array) config('lukk');
+        // `??` already reads a missing or null block, so these casts only state the types.
+        $lukk = (array) config('lukk'); // @pest-mutate-ignore: RemoveArrayCast
+        // Not `(array)`: `guards => false` is a working single-guard config, and `(array) false` is
+        // `[0 => false]`, which listed a phantom guard named 0.
+        $guards = is_array($lukk['guards'] ?? null) ? $lukk['guards'] : [];
 
         return array_values(array_unique([
-            (string) ($lukk['guard'] ?? 'api'),
-            ...array_keys((array) ($lukk['guards'] ?? [])),
+            (string) ($lukk['guard'] ?? 'api'), // @pest-mutate-ignore: RemoveStringCast
+            ...array_keys($guards),
         ]));
     }
 
@@ -476,13 +489,37 @@ class Lukk
     {
         $default = (string) (config('lukk.guard') ?? 'api');
 
+        // PHP turns a numeric array key into an int, so a guard named "2" reaches every `string`
+        // parameter downstream as 2 — under strict_types a TypeError while the routes register, with
+        // nothing naming the cause. Refuse it here, where the other guard-config checks say why. The
+        // default guard's name is refused too, since `auth.guards` keys it the same way; PHP turns a
+        // string key into an int exactly when it round-trips through `(int)` unchanged.
+        if ((string) (int) $default === $default) {
+            throw new RuntimeException(self::numericGuardName($default));
+        }
+
+        // A falsy scalar (`false`, `''`) is "no extra guards", which `isMultiGuard()` reads the same way.
+        $guards = config('lukk.guards');
+
+        if (! empty($guards) && ! is_array($guards)) {
+            throw new RuntimeException('lukk.guards must map each guard name to its config block, e.g. [\'admin\' => [...]]; got '.get_debug_type($guards).'.');
+        }
+
+        foreach (is_array($guards) ? $guards : [] as $name => $block) {
+            if (is_int($name)) {
+                throw new RuntimeException(is_string($block)
+                    ? "lukk.guards maps guard names to config blocks, not a list of names: write ['{$block}' => [...]] rather than ['{$block}']."
+                    : self::numericGuardName((string) $name));
+            }
+        }
+
         // A second `lukk-jwt` guard with no `lukk.guards` block gets the default guard's config
         // deep-merged wholesale — same secret, same issuer, same AUDIENCE. Audience is the control
         // that stops one guard's token verifying on another, so cloning it means a customer's token
         // authenticates as whatever the other guard's provider returns for that id: a different user,
         // in a different table, with no boot error and nothing in the log. Refuse to boot.
         foreach (self::driverGuardNames() as $name) {
-            if ($name === $default || isset(((array) config('lukk.guards', []))[$name])) {
+            if ($name === $default || (is_array($guards) && isset($guards[$name]))) {
                 continue;
             }
 
@@ -499,7 +536,8 @@ class Lukk
             return;
         }
 
-        $authGuards = (array) config('auth.guards', []);
+        // Only ever indexed through `??` below, which reads a null or scalar config as "no guard".
+        $authGuards = (array) config('auth.guards', []); // @pest-mutate-ignore: RemoveArrayCast
         $audienceOwners = [];
         $pathMounts = [];
 
@@ -508,7 +546,8 @@ class Lukk
         // flipping `isMultiGuard()` on, which turns on refresh-token guard scoping (mass logout on
         // existing `guard IS NULL` rows) and mounts a duplicate route group. `guardNames()`
         // de-duplicates, so nothing downstream can notice. Refuse instead.
-        if (isset(((array) config('lukk.guards', []))[$default])) {
+        // `lukk.guards` is a non-empty array by now: the checks above refused anything else.
+        if (isset(((array) config('lukk.guards', []))[$default])) { // @pest-mutate-ignore: RemoveArrayCast
             throw new RuntimeException("lukk guard [{$default}] is the default guard; configure it in the top level of config/lukk.php, not under 'guards' — an entry there is ignored while still enabling multi-guard mode.");
         }
 
@@ -519,7 +558,8 @@ class Lukk
 
             $cfg = self::guardConfig($name);
 
-            $audiences = array_values(array_filter((array) ($cfg['audience'] ?? [])));
+            // `array_values` only tidies the keys; nothing below reads them.
+            $audiences = array_values(array_filter((array) ($cfg['audience'] ?? []))); // @pest-mutate-ignore: UnwrapArrayValues
             if ($audiences === []) {
                 throw new RuntimeException("lukk guard [{$name}] must declare a non-empty audience — it is what isolates its tokens from other guards.");
             }
@@ -534,7 +574,9 @@ class Lukk
             // A null domain is a wildcard (`Route::domain(null)` matches every host), so two guards
             // collide on the same path when they share a domain OR either omits one — the wildcard
             // group (mounted first) would shadow the other's routes.
-            $path = (string) ($cfg['path'] ?? 'auth');
+            // The path is only used as an array key, where PHP reads '5' and 5 alike. The domain is
+            // compared with `===`, so its cast is what makes 5 and '5' the same host.
+            $path = (string) ($cfg['path'] ?? 'auth'); // @pest-mutate-ignore: RemoveStringCast
             $domain = in_array($cfg['domain'] ?? null, [null, ''], true) ? null : (string) $cfg['domain'];
 
             foreach ($pathMounts[$path] ?? [] as [$otherName, $otherDomain]) {
@@ -545,6 +587,11 @@ class Lukk
 
             $pathMounts[$path][] = [$name, $domain];
         }
+    }
+
+    private static function numericGuardName(string $name): string
+    {
+        return "lukk guard [{$name}] has a numeric name; PHP stores it as an integer key, which lukk cannot address by name. Give the guard a non-numeric name in config/auth.php and config/lukk.php.";
     }
 
     /**

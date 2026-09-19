@@ -52,6 +52,15 @@ it('points the reset link at the SPA frontend with the token + email', function 
     // Joins with `&` when the configured URL already carries a query string.
     config(['lukk.password_reset.frontend_url' => 'https://app.test/reset?ref=x']);
     expect($notification->toMail($user)->actionUrl)->toBe('https://app.test/reset?ref=x&token=the-token&email=a%40b.c');
+
+    // Unset (an unset env, or a config cached before the key): a relative link, not a TypeError from
+    // `str_contains(null, …)` under strict_types.
+    config(['lukk.password_reset.frontend_url' => null]);
+    expect($notification->toMail($user)->actionUrl)->toBe('?token=the-token&email=a%40b.c');
+
+    // `env()` turns the literal "false" into a boolean — the same relative link, not a TypeError.
+    config(['lukk.password_reset.frontend_url' => false]);
+    expect($notification->toMail($user)->actionUrl)->toBe('?token=the-token&email=a%40b.c');
 });
 
 it('resets the password with a valid token and fires PasswordReset', function () {

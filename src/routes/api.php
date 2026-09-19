@@ -88,7 +88,8 @@ $sessionRoutes = function (string $guardName, string $throttle = ''): void {
 // Additional guards (multi-audience). Mounted FIRST so a subdomain-scoped guard takes precedence
 // over the host-agnostic default guard sharing the same path. Each gets the CORE session routes
 // wired to its own `auth:{name}` + crypto identity (features stay on the default guard for now).
-foreach ((array) config('lukk.guards', []) as $guardName => $override) {
+// Not `(array)`: `guards => false` means "no extra guards", and `(array) false` mounted a guard named 0.
+foreach (is_array($extraGuards = config('lukk.guards')) ? $extraGuards : [] as $guardName => $override) {
     $cfg = Lukk::guardConfig($guardName);
 
     Route::domain($cfg['domain'] ?? null)

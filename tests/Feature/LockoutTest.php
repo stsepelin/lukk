@@ -326,6 +326,22 @@ it('locks step-up confirmation after a run of consecutive failures', function ()
     expect(Lockout::where('purpose', 'confirm')->where('subject', (string) $user->getKey())->exists())->toBeTrue();
 });
 
+it('returns the reserved slot when a step-up confirmation succeeds', function () {
+    // Every attempt reserves a failure before the password is checked. Without the release on
+    // success, each ordinary confirmation left one behind, and the user was locked out of step-up
+    // after `max_attempts` correct passwords.
+    config(['lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+
+    foreach (range(1, 4) as $ignored) {
+        app('auth')->forgetGuards();
+        $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])->assertSuccessful();
+    }
+
+    expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
+});
+
 it('keeps the confirm and login counters separate, so burning one does not spend the other', function () {
     config(['lukk.rate_limits.confirm.max_attempts' => 500]);
     $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
