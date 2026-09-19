@@ -61,18 +61,18 @@ jobs:
           fi
           echo "Mutating: $classes"
           # The SAME floor the nightly run uses, not 100. A demand for 100 here would fail nearly every
-          # pull request — the package sits in the low eighties — and a gate that is always red gets
+          # pull request — even at 99 a few equivalents stay unannotated — and a gate that is always red gets
           # switched off, which is worse than no gate. This one fires when a change makes the classes it
           # touches measurably worse. Paying the debt down is done by raising the floor, deliberately.
-          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=81 \
+          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=98 \
             --class="$classes"
 
   full:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Measured at 26.5 minutes on 10 local processes; a 4-vCPU runner takes roughly two and a half times
+    # Measured at 37 minutes on 10 local processes; a 4-vCPU runner takes roughly two and a half times
     # that. A job killed by its timeout prints no score at all, so the margin is deliberate.
-    timeout-minutes: 120
+    timeout-minutes: 150
     name: Mutation score (whole package)
     steps:
       - name: Checkout
@@ -89,8 +89,8 @@ jobs:
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
 
-      # The measured floor: 81.49% on 2026-09-19, with exactly these flags (3,345 mutants; timeouts
-      # count as caught here, as they do in Pest's own score). Raise it as the score rises — never
-      # lower it to turn a build green. The PR job above uses the same number.
+      # The measured floor: 99.05% on 2026-09-19, with exactly these flags (3,278 mutants; timeouts
+      # count as caught here, as they do in Pest's own score), set a point below for noise. Raise it
+      # as the score rises — never lower it to turn a build green. The PR job above uses the same number.
       - name: Mutation score
-        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=81
+        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=98
