@@ -1123,6 +1123,61 @@ it('fails a parameterless pinned gate loudly, for everyone', function () {
         ->toThrow(InvalidArgumentException::class, 'needs at least one ability');
 });
 
+it('reads a pinned gate declared with a space after the comma', function () {
+    // The router splits middleware parameters on the comma and trims nothing, so `a, b` arrives as
+    // ` b` — which is not a legal scope token, and would turn a harmless formatting habit in the
+    // routes file into a 500 for every caller of the route.
+    Route::middleware(['auth:api', RequirePinnedAbility::class.':'.Abilities::SESSIONS.', '.Abilities::ACCOUNT])
+        ->get('/_test/spaced-pinned', fn () => response()->json(['ok' => true]));
+
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy', Abilities::ACCOUNT]);
+
+    $this->withToken($pat->accessToken)->getJson('/_test/spaced-pinned')->assertOk();
+});
+
+it('keeps the pinned gate closed when a cached config predates the flag', function () {
+    // `config:cache` skips the deep merge, so an install cached before `gate_auth_routes` existed
+    // has no such key at all. The flag is an opt-OUT: reading its absence as "off" would hand every
+    // pinned token session management back on upgrade, with nothing in the config saying so.
+    config(['lukk.features' => array_diff_key(config('lukk.features'), ['gate_auth_routes' => true])]);
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $this->withToken($pat->accessToken)->deleteJson('/auth/sessions')->assertStatus(403);
+});
+
+it('tells a refused pinned token which ability would have sufficed', function () {
+    // The RFC 6750 challenge is what a generic client acts on, and the message is what the developer
+    // reads — both name the route's requirement, since that is the one thing to add to the pin.
+    Route::middleware(['auth:api', RequirePinnedAbility::class.':'.Abilities::SESSIONS.','.Abilities::ACCOUNT])
+        ->get('/_test/refused-pinned', fn () => response()->json(['ok' => true]));
+
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $response = $this->withToken($pat->accessToken)->getJson('/_test/refused-pinned')
+        ->assertStatus(403)
+        ->assertJsonPath('message', 'This token was issued with a fixed set of abilities, and none of them is lukk.sessions or lukk.account.');
+
+    expect($response->headers->get('WWW-Authenticate'))
+        ->toContain('error="insufficient_scope"')
+        ->toContain('scope="lukk.sessions lukk.account"');
+});
+
+it('announces a pinned token refused one of lukk\'s own routes', function () {
+    // A machine token reaching for logout-all or step-up is the same probing signal the application
+    // gates report — arguably a stronger one, since these are the routes that take an account over.
+    Event::fake([TokenAbilityDenied::class]);
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $this->withToken($pat->accessToken)->deleteJson('/auth/sessions')->assertStatus(403);
+
+    Event::assertDispatched(TokenAbilityDenied::class, function (TokenAbilityDenied $e) use ($pat) {
+        // ANY-of, like `lukk.ability` — the pinned gate never requires all of its list.
+        return $e->required === [Abilities::SESSIONS]
+            && $e->requiresAll === false
+            && $e->familyId === claims($pat->accessToken)->fid;
+    });
+});
+
 it('refuses to mint a pinned session whose pin did not reach storage', function () {
     // The escalation this closes, reproduced end to end before the fix: a `useRefreshTokenModel`
     // subclass declaring `$fillable` silently dropped `scope` from the mass-assigned insert, so a
