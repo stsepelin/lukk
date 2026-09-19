@@ -61,9 +61,10 @@ trait ReadsLogoutCredentials
 
     private function hasJsonBody(Request $request): bool
     {
-        // Neither the cast nor the limit changes the essence: `explode` reads a missing header (null) as '' — the
-        // cast only spares PHP 8.4's deprecation notice — and element [0] is the same at any limit above 1.
-        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0]; // @pest-mutate-ignore: RemoveStringCast,IncrementInteger
+        // The cast is load-bearing: under `strict_types` a missing header (null) makes `explode` throw a TypeError,
+        // so a body-less logout — a BFF's, a `sendBeacon` — would answer 500. The limit is not: element [0] is the
+        // same at any limit above 1.
+        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0]; // @pest-mutate-ignore: IncrementInteger
 
         return strtolower(trim($essence)) === 'application/json';
     }

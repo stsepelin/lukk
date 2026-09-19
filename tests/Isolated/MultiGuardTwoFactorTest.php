@@ -156,3 +156,13 @@ it('honours a per-guard block_unverified_login override on the two-factor path',
         ->assertOk()
         ->assertJsonPath('two_factor', true);
 });
+
+it('never gates an account model that has no email verification at all', function () {
+    // The admin model does not implement MustVerifyEmail. With the gate on, it must sign in — not be asked
+    // `hasVerifiedEmail()`, which it does not have.
+    config(['lukk.features.email_verification' => true, 'lukk.email_verification.block_unverified_login' => true]);
+    $admin = Admin::factory()->create(['email' => 'nomve@example.test']);
+
+    $this->postJson('/admin/auth/login', ['email' => $admin->email, 'password' => 'password'])
+        ->assertOk()->assertJsonStructure(['access_token']);
+});
