@@ -218,6 +218,38 @@ it('skips a public key that stats as a file but cannot be read', function () {
     expect(array_keys($ring->publicKeys()))->toBe(['k1']);
 });
 
+it('names an unreadable PRIVATE key, instead of skipping it like a verification key', function (?string $passphrase) {
+    // The skip above is for one bad kid among many. The signing key is not one of many: skipped, it
+    // surfaced as OpenSSL's "unable to validate key" — or, with a passphrase set, as a passphrase error —
+    // sending the operator after the wrong cause.
+    if (! in_array('lukk-unreadable', stream_get_wrappers(), true)) {
+        stream_wrapper_register('lukk-unreadable', UnreadableKeyFile::class);
+    }
+
+    $kp = rsaKeypair();
+    $config = asymConfig('RS256', ['k1' => $kp['public']], '@lukk-unreadable://private.pem', 'k1');
+    $config['keys']['passphrase'] = $passphrase;
+
+    expect(fn () => (new KeyRing($config))->signingKey())
+        ->toThrow(InvalidArgumentException::class, 'Could not read the private key from "@lukk-unreadable://private.pem"');
+})->with([null, 'secret']);
+
+it('reports no unreadable file when no private key is configured at all', function (?string $private) {
+    // Nothing configured is a different fault from a file that cannot be read, and must not be named as one.
+    $kp = rsaKeypair();
+    $config = asymConfig('RS256', ['k1' => $kp['public']], 'placeholder', 'k1');
+    $config['keys']['private'] = $private;
+
+    $message = '';
+    try {
+        (new KeyRing($config))->signingKey();
+    } catch (Throwable $e) {
+        $message = $e->getMessage();
+    }
+
+    expect($message)->not->toContain('Could not read the private key');
+})->with([null, '']);
+
 it('tolerates a keys.public written as a bare PEM instead of a kid map', function () {
     // `'public' => $pem`, the kid map forgotten. It is a misconfiguration either way, but iterating a
     // string is a PHP warning — an ErrorException under Laravel's handler, so a 500 on every verify —

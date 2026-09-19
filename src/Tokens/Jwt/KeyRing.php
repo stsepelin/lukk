@@ -85,7 +85,9 @@ class KeyRing
         }
 
         if ($this->isSymmetric()) {
-            return $this->verificationKeys = new Key((string) ($this->config['secret'] ?? ''), $this->algorithm());
+            // With no secret, `new Key('')` throws and any other fallback is a key firebase/php-jwt ^7 rejects as too short:
+            // both throw, and both verifiers catch every Throwable as "not verified". There is no working default to pin.
+            return $this->verificationKeys = new Key((string) ($this->config['secret'] ?? ''), $this->algorithm()); // @pest-mutate-ignore: EmptyStringToNotEmpty
         }
 
         $keys = [];
@@ -267,7 +269,19 @@ class KeyRing
 
         // Any default that is neither a PEM nor an existing path comes back from `load()` as '', so
         // nothing but '' can be written here without changing what this reads.
-        $pem = $this->load($this->config['keys']['private'] ?? ''); // @pest-mutate-ignore: EmptyStringToNotEmpty
+        // `?? ''` already turns null into ''; for any other value the cast changes neither `!== ''` below nor the
+        // message, so it states the type rather than deciding anything.
+        $configured = (string) ($this->config['keys']['private'] ?? ''); // @pest-mutate-ignore: EmptyStringToNotEmpty,RemoveStringCast
+        $pem = $this->load($configured);
+
+        // `load()` skips an unreadable file so one bad VERIFICATION key cannot take the rest down. The
+        // signing key is not one of many: configured and unreadable, say so — otherwise the failure
+        // surfaces as OpenSSL "unable to validate key", or as a passphrase error when one is set,
+        // pointing the operator at the wrong cause.
+        if ($pem === '' && $configured !== '') {
+            throw new InvalidArgumentException("Could not read the private key from \"{$configured}\" — check that the file exists and this process can read it.");
+        }
+
         $passphrase = $this->config['keys']['passphrase'] ?? null;
 
         if ($passphrase !== null && $passphrase !== '') {
@@ -308,8 +322,8 @@ class KeyRing
         // cannot OPEN — a secrets mount with the wrong ownership is the realistic case — and the warning
         // `file_get_contents` then raises becomes an `ErrorException` under Laravel's handler: a 500 on
         // every verify, rather than one kid quietly missing from the set. Skipping is the right answer
-        // here because the ACTIVE signing kid is checked separately and fails loudly (`signingKey()`);
-        // what reaches this line is a verification key, and the others must keep working.
+        // here for VERIFICATION keys — the others must keep working. The private key reads through here
+        // too, and `privateKey()` refuses an empty result for a configured value, naming it.
         return is_file($path) ? (string) @file_get_contents($path) : '';
     }
 }
