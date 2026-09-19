@@ -260,9 +260,10 @@ it('answers revoke-other-sessions with a bare 204 in body mode too', function ()
 });
 
 it('revokes a family in two statements, closing the PostgreSQL snapshot window', function () {
-    // The race itself only reproduces on a real PostgreSQL (tests/Concurrency). The bulk path cannot be
-    // replayed there — its family ids come from a SELECT — so its second pass is pinned structurally:
-    // one UPDATE per statement snapshot, the second limited to the families already denylisted.
+    // The race itself only reproduces on a real PostgreSQL (tests/Concurrency), which replays both paths'
+    // own statements. Pinned structurally here too, so the sqlite suite sees it: one UPDATE per statement
+    // snapshot, BOTH limited to the families already read and denylisted — an UPDATE by the user's query
+    // would also revoke a session committed after that read, which nothing denylisted or returned.
     $user = User::factory()->create();
     $user->startSession();
     $user->startSession();
@@ -276,7 +277,7 @@ it('revokes a family in two statements, closing the PostgreSQL snapshot window',
 
     revokeAll()($user->getKey());
     expect($updates)->toHaveCount(2)
-        ->and($updates[1])->toContain('"family_id" in');
+        ->each->toContain('"family_id" in');
 
     $updates = [];
     revokeSession()((string) RefreshToken::value('family_id'));

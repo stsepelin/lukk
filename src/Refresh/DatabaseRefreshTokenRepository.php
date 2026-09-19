@@ -183,7 +183,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->when($exceptFamilyId !== null, fn (Builder $query) => $query->where('family_id', '!=', $exceptFamilyId))
             ->whereNull('revoked_at');
 
-        // Atomic: a family created between the read and update would be revoked but never returned (so never denylisted).
+        // Every write below is limited to the family ids this SELECT read — the ids `$before` denylists and the
+        // caller is handed back. The transaction does NOT keep the set still: PostgreSQL's READ COMMITTED gives
+        // each statement a fresh snapshot, and InnoDB's UPDATE is a current read, so a session committed
+        // between the SELECT and an UPDATE by the user's query is visible to it. Revoked that way, it was never
+        // denylisted and never returned: signed out on its next refresh, with nothing recorded as to why.
         return DB::transaction(function () use ($constrain, $before) {
             $ids = $constrain($this->scoped())->distinct()->pluck('family_id')->all();
 
@@ -196,18 +200,18 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
                 $before($ids);
             }
 
-            $constrain($this->scoped())->update(['revoked_at' => now()]);
-
-            // A second pass for the same PostgreSQL window as `revokeFamily()`: a successor committed
-            // by a rotation this UPDATE was blocked behind is invisible to its snapshot. READ
-            // COMMITTED gives the next statement a fresh one even inside this transaction. Limited
-            // to the families already denylisted above, so a session started in between is never
-            // revoked in the table without a matching denylist entry.
-            if ($ids !== []) {
-                // Invisible to the sqlite suite; on PostgreSQL, emptying this update fails "never leaves a live token
-                // behind when a logout-all lands after rotation checked the denylist" (tests/Concurrency).
-                $constrain($this->scoped())->whereIn('family_id', $ids)->update(['revoked_at' => now()]); // @pest-mutate-ignore: RemoveArrayItem
+            if ($ids === []) {
+                return [];
             }
+
+            $revoke = fn (): int => $constrain($this->scoped())->whereIn('family_id', $ids)->update(['revoked_at' => now()]);
+
+            // TWICE, for the reason `revokeFamily()` gives: on PostgreSQL the first UPDATE can block behind a
+            // rotation of one of these families and, once unblocked, re-check only the row it waited on — the
+            // successor that rotation committed is outside its snapshot. The second statement takes a fresh
+            // one. A no-op on InnoDB. Pinned in tests/Concurrency.
+            $revoke();
+            $revoke();
 
             return $ids;
         });
