@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Firebase\JWT\JWT;
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
 use Illuminate\Http\Exceptions\ThrottleRequestsException;
 use Illuminate\Routing\Route as RoutingRoute;
 use Illuminate\Support\Facades\Event;
@@ -1045,4 +1046,34 @@ it('does not call a token presented at exactly the end of grace reuse (pins < no
 
     Event::assertNotDispatched(RefreshTokenReused::class);
     expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('does not spend the lookup budget on an empty token, in the body or the cookie', function () {
+    // Nothing to look up: an empty value names no session, and counting it as a miss would let a client
+    // that always sends the field (empty when it has none) lock its own address out of logging out.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+    $pair = expiredSession(User::factory()->create());
+    // An app without Laravel's ConvertEmptyStringsToNull (removed, or skipped for an API) sees the '' itself.
+    ConvertEmptyStringsToNull::skipWhen(fn () => true);
+
+    $this->postJson('/auth/logout', ['refresh_token' => ''])->assertNoContent();
+    $this->withCredentials()->withUnencryptedCookie('__Host-refresh', '')->postJson('/auth/logout')->assertNoContent();
+    $this->flushHeaders();
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('looks a token up once when the body and the cookie carry the same one', function () {
+    // The second lookup would find the family this request just revoked, and a revoked family counts
+    // against the budget — so one ordinary logout would spend it.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->withCredentials()->withUnencryptedCookie('__Host-refresh', $pair->refreshToken)
+        ->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+    $this->flushHeaders();
+
+    // The budget of one is still unspent, so a miss is looked up and answered, not refused.
+    $this->postJson('/auth/logout', ['refresh_token' => 'a-miss'])->assertNoContent();
 });

@@ -54,12 +54,16 @@ trait ReadsLogoutCredentials
             $tokens[] = $cookie;
         }
 
-        return ['tokens' => array_values(array_unique($tokens)), 'cookie' => $cookieUsable];
+        // `array_values` cannot change the keys here: there are at most two tokens, and `array_unique` keeps the
+        // first of a pair, so no gap is ever left. It states the list shape the return type promises.
+        return ['tokens' => array_values(array_unique($tokens)), 'cookie' => $cookieUsable]; // @pest-mutate-ignore: UnwrapArrayValues
     }
 
     private function hasJsonBody(Request $request): bool
     {
-        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0];
+        // Neither the cast nor the limit changes the essence: `explode` reads a missing header (null) as '' — the
+        // cast only spares PHP 8.4's deprecation notice — and element [0] is the same at any limit above 1.
+        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0]; // @pest-mutate-ignore: RemoveStringCast,IncrementInteger
 
         return strtolower(trim($essence)) === 'application/json';
     }

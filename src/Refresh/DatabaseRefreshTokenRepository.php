@@ -204,7 +204,9 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             // to the families already denylisted above, so a session started in between is never
             // revoked in the table without a matching denylist entry.
             if ($ids !== []) {
-                $constrain($this->scoped())->whereIn('family_id', $ids)->update(['revoked_at' => now()]);
+                // Invisible to the sqlite suite; on PostgreSQL, emptying this update fails "never leaves a live token
+                // behind when a logout-all lands after rotation checked the denylist" (tests/Concurrency).
+                $constrain($this->scoped())->whereIn('family_id', $ids)->update(['revoked_at' => now()]); // @pest-mutate-ignore: RemoveArrayItem
             }
 
             return $ids;
@@ -226,7 +228,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     {
         // `hydrate()` is nullable only because it also serves the "row not found" reads; a row
         // that came back from `get()` always hydrates, and `array_values` keeps the list shape.
-        return array_values(array_filter(
+        return array_values(array_filter( // @pest-mutate-ignore: UnwrapArrayFilter,UnwrapArrayValues
             $this->scoped()->where('user_id', $userId)->orderBy('created_at')
                 ->get()->map(fn ($row) => $this->hydrate($row))->all()
         ));
