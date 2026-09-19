@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Testing\PendingCommand;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeSession;
@@ -175,4 +176,23 @@ function expectNoThrow(Closure $callback): void
 {
     $callback();
     test()->addToAssertionCount(1);
+}
+
+/**
+ * The rules that failed for `$field` when `$data` is validated against `$rules`, keyed by rule name
+ * (`Required`, `Max`, or a rule object's class).
+ *
+ * Asserting on the failed RULE rather than on a 422 pins each rule on its own: most bad inputs trip
+ * two rules, so dropping either one still answers 422.
+ *
+ * @param  array<string, mixed>  $rules
+ * @param  array<string, mixed>  $data
+ * @return array<string, mixed>
+ */
+function failedRulesFor(array $rules, array $data, string $field): array
+{
+    $validator = Validator::make($data, $rules);
+    $validator->fails();
+
+    return $validator->failed()[$field] ?? [];
 }

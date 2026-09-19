@@ -289,7 +289,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeAllSessions::class),
             $app->make(PasskeyRepository::class),
             $app->make(LockoutRepository::class),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             Lukk::currentGuard(),
             $this->config()['password_reset']['broker'] ?? null,
         ));
@@ -297,7 +297,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(ExportAccount::class, fn ($app) => new ExportAccount(
             $app->make(RefreshTokenRepository::class),
             $app->make(PasskeyRepository::class),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             // Unconditional, like `DeleteAccount` above: export must reach every row erasure reaches.
             $app->make(LockoutRepository::class),
             Lukk::currentGuard(),
@@ -330,7 +330,7 @@ class LukkServiceProvider extends ServiceProvider
             (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
             (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
             (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             Lukk::currentGuard(),
         ));
         // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
@@ -364,7 +364,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
             $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(
-            $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
+            $this->userModelClass(), Lukk::usernameField()));
 
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             // A missing key generates ZERO recovery codes: 2FA enables, the user is shown an empty
@@ -498,7 +498,7 @@ class LukkServiceProvider extends ServiceProvider
             });
         }
 
-        $this->registerClaimLimiter($limiter, 'lukk-claim', (string) ($this->config()['guard'] ?? 'api'));
+        $this->registerClaimLimiter($limiter, 'lukk-claim', Lukk::defaultGuard());
 
         $limiter->for('lukk-login', function ($request) {
             // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
@@ -683,19 +683,7 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function userProviderFor(string $guard): UserProvider
     {
-        $config = $this->app->make('config');
-
-        // `?? 'users'` — the shipped config's own value, and the default the other two readers of this key
-        // already use. Falling through to null does NOT mean "let Laravel decide": stock Laravel sets the
-        // provider under `auth.guards.web.provider`, not `auth.defaults.provider`, so
-        // `createUserProvider(null)` resolves to null and every auth route 500s. A per-guard mount still
-        // prefers its own `auth.guards.{guard}.provider` first, so this changes nothing for one.
-        // A guard name from config is a string (a numeric one is refused at boot), so the cast only fixes the type.
-        $provider = $guard === (string) ($this->config()['guard'] ?? 'api') // @pest-mutate-ignore: RemoveStringCast
-            ? ($this->config()['user_provider'] ?? 'users')
-            : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? 'users');
-
-        $resolved = $this->app->make('auth')->createUserProvider($provider);
+        $resolved = $this->app->make('auth')->createUserProvider(Lukk::userProviderName($guard));
 
         // Null only when the named provider is not configured at all — a typo in `auth.providers`.
         // Nothing validates that at boot (`assertGuardsIsolated` checks driver/audience/path/domain,

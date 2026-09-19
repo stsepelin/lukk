@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Schema;
@@ -10,6 +11,7 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('account-deletion');
@@ -152,4 +154,44 @@ it('exports no lockouts for a construction that passes none, with the table publ
 
     expect(Schema::hasTable('lukk_lockouts'))->toBeTrue()
         ->and($export(User::factory()->create())['lockouts'])->toBe([]);
+});
+
+function exporter(string $identifierColumn = 'email', ?LockoutRepository $lockouts = null): ExportAccount
+{
+    return new ExportAccount(app(RefreshTokenRepository::class), app(PasskeyRepository::class), $identifierColumn, $lockouts, 'api');
+}
+
+it('exports every session field and the account id', function () {
+    $user = User::factory()->create();
+    $user->startSession();
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['account']['id'])->toBe($user->getKey())
+        ->and(array_keys($export['sessions'][0]))->toBe(['session', 'created_at', 'last_rotated_at', 'revoked_at', 'expires_at']);
+});
+
+it('formats a raw string timestamp from a model that does not cast it, and reads an empty one as none', function () {
+    // The fixture model casts the column, so a string set on it arrives as a Carbon. A model that
+    // does not cast hands over the raw value.
+    $export = exporter()(new GenericUser(['id' => 5, 'two_factor_confirmed_at' => '2026-03-04 05:06:07']));
+    expect($export['two_factor']['confirmed_at'])->toBe('2026-03-04T05:06:07+00:00');
+
+    expect(exporter()(new GenericUser(['id' => 5, 'two_factor_confirmed_at' => '']))['two_factor']['confirmed_at'])->toBeNull();
+});
+
+it('exports a numeric identifier as a string', function () {
+    expect(exporter('phone')(new GenericUser(['id' => 5, 'phone' => 5551234]))['account']['identifier'])->toBe('5551234');
+});
+
+it('asks the lockout store about all three key spaces, as strings', function () {
+    // The contract hands a replacement repository `array<int, string>`; an int id there is a
+    // strict comparison waiting to miss.
+    $spy = new RecordingLockoutRepository;
+    exporter('email', $spy)(new GenericUser(['id' => 5, 'email' => 'Ada@Example.test']));
+    expect($spy->summarised)->toBe(['id:5', '5', 'idn:ada@example.test']);
+
+    // No identifier: the third key space is empty, which the repository skips.
+    exporter('email', $spy)(new GenericUser(['id' => 5]));
+    expect($spy->summarised)->toBe(['id:5', '5', '']);
 });

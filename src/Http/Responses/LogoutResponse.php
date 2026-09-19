@@ -25,7 +25,8 @@ class LogoutResponse implements LogoutResponseContract
 
         // Per guard, exactly as `EmitsTokens` decides whether to SET the cookie. Read globally, a
         // guard that opted into cookie mode was never sent the clear for the cookie its login set.
-        if ($this->clearRefreshCookie && (bool) (Lukk::guardConfig()['cookie_mode'] ?? false)) {
+        // (The cast only states the type: `&&` reads the value's truthiness either way.)
+        if ($this->clearRefreshCookie && (bool) (Lukk::guardConfig()['cookie_mode'] ?? false)) { // @pest-mutate-ignore: RemoveBooleanCast
             // Delete with the same name + attributes (Secure + Path=/) the cookie was
             // set with, so strict browsers actually honor the removal.
             // `->withDomain(null)`: `CookieJar` resolves the domain as `$domain ?: $this->domain` and
@@ -35,12 +36,14 @@ class LogoutResponse implements LogoutResponseContract
             $response->withCookie((cookie()->make(
                 name: RefreshCookie::name(),
                 value: '',
-                minutes: -2628000,
+                // Any past expiry deletes the cookie; five years back is simply unambiguous.
+                minutes: -2628000, // @pest-mutate-ignore: DecrementInteger,IncrementInteger
                 path: '/',
                 domain: null,
                 secure: RefreshCookie::secure(),
                 httpOnly: true,
-                raw: false,
+                // An empty value and a plain name encode the same raw or not.
+                raw: false, // @pest-mutate-ignore: FalseToTrue
                 sameSite: 'Strict',
             ))->withDomain(null));
         }

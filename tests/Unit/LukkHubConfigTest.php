@@ -105,3 +105,37 @@ it('acts as the user on the named guard, with a pinned token naming them', funct
         ->and($token?->claims)->toEqual((object) ['sub' => (string) $user->getKey(), 'scope' => 'orders.read', 'pin' => true])
         ->and($token?->claims->sub)->toBeString();
 });
+
+it('names the default guard api when lukk.guard is unset, null, empty or not a value', function (mixed $guard) {
+    config(['lukk.guard' => $guard]);
+
+    expect(Lukk::defaultGuard())->toBe('api');
+})->with([
+    'null' => [null],
+    'an empty env line' => [''],
+    'false' => [false],
+    'an array' => [['admin']],
+]);
+
+it('keeps a numeric default guard name as a string, so boot can refuse it by name', function () {
+    config(['lukk.guard' => 2]);
+
+    expect(Lukk::defaultGuard())->toBe('2');
+});
+
+it('reads the identifier column as email when lukk.username is unset, null, empty or not a string', function (mixed $field) {
+    config(['lukk.username' => $field]);
+
+    expect(Lukk::usernameField())->toBe('email');
+})->with([
+    'null' => [null],
+    'an empty env line' => [''],
+    'a number' => [5],
+    'an array' => [['email']],
+]);
+
+it('reads a configured identifier column as it is', function () {
+    config(['lukk.username' => 'username']);
+
+    expect(Lukk::usernameField())->toBe('username');
+});

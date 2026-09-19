@@ -311,6 +311,8 @@ it('leaves no guarded config read unexercised', function () {
         'password_reset.frontend_url' => 'optional feature; PasswordResetTest',
         'password_reset.revoke_sessions' => 'optional feature; PasswordResetTest',
         'registration.login' => 'optional feature; RegistrationTest',
+        // Read while the routes register, before any test body can strip it.
+        'path' => 'read at boot; pinned pre-boot by Isolated/DegradedIdentityTest',
     ];
 
     $unexercised = array_values(array_filter(guardedConfigKeys(), function (string $key) use ($covered, $exempt) {

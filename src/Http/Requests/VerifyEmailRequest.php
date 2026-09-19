@@ -27,7 +27,8 @@ class VerifyEmailRequest extends FormRequest
         $user = $this->verifiable();
 
         return $user instanceof MustVerifyEmail
-            && hash_equals((string) $this->route('hash'), sha1($user->getEmailForVerification()));
+            // `{hash}` is a required route segment, so the cast only states its type.
+            && hash_equals((string) $this->route('hash'), sha1($user->getEmailForVerification())); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**

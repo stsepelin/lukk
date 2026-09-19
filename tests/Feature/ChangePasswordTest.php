@@ -294,3 +294,20 @@ it('rejects a NUL byte in the new password instead of 500ing', function () {
         'password_confirmation' => "new-password\0evil",
     ])->assertStatus(422)->assertJsonValidationErrors(['password']);
 });
+
+it('answers a held confirm lock with its auto-release wait, and counts nothing more', function () {
+    // Checked before a failure is reserved, so a request refused by the lock does not extend the run;
+    // and read on the guard the lock was recorded under, or the wait reads as "contact support".
+    $this->freezeSecond();
+    app('translator')->addLines(['auth.throttle' => 'Wait :seconds s.'], 'en');
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.lockout.release_after' => 600,
+        'lukk.rate_limits.confirm.max_attempts' => 500]);
+    [$user, $pair] = signedIn();
+    Lockout::create(['purpose' => 'confirm', 'subject' => (string) $user->getKey(), 'guard' => 'api', 'attempts' => 3, 'locked_at' => now()]);
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertStatus(423)->assertJsonValidationErrors(['current_password' => 'Wait 600 s.']);
+
+    expect(Lockout::query()->value('attempts'))->toBe(3);
+});

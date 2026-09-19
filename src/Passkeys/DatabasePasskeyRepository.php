@@ -197,9 +197,8 @@ class DatabasePasskeyRepository implements PasskeyRepository
      */
     private function guardProviders(bool $scopable): array
     {
-        // A provider name only ever reaches the `auth.providers.{…}.model` key, where the cast
-        // changes nothing; it states the type.
-        $fallback = (string) (config('lukk.user_provider') ?? 'users'); // @pest-mutate-ignore: RemoveStringCast
+        // Resolved as sign-in resolves it, so the sweep judges each guard against the same table.
+        $fallback = Lukk::userProviderName(Lukk::defaultGuard());
 
         // No column on a MULTI-GUARD install: sweep NOTHING. Treating it as single-guard would run
         // one unscoped pass against only the DEFAULT provider's table, which reads every other
@@ -218,12 +217,10 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
         // Under multi-guard the default guard stamps its own name, so nothing legitimate carries a
         // null `guard` — anything that does predates the column and is not ours to delete.
-        // The default guard is resolved from `lukk.user_provider`, never from its own auth.guards
-        // entry, and `guardNames()` lists it first, so `??=` leaves it that way.
-        $providers = [Lukk::guardNames()[0] => $fallback];
+        $providers = [];
 
         foreach (Lukk::guardNames() as $name) {
-            $providers[$name] ??= (string) (config("auth.guards.{$name}.provider") ?? $fallback); // @pest-mutate-ignore: RemoveStringCast
+            $providers[$name] = Lukk::userProviderName($name);
         }
 
         return $providers;

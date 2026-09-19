@@ -104,6 +104,16 @@ it('clears the refresh cookie on logout in cookie mode', function () {
     // A forget cookie carries no value and an expiry in the past.
     expect((string) $cookies[0]->getValue())->toBe('');
     expect($cookies[0]->getExpiresTime())->toBeLessThan(time());
+    // Same attributes as the cookie it removes, HttpOnly included.
+    expect($cookies[0]->isHttpOnly())->toBeTrue();
+});
+
+it('emits no cookie on logout when cookie_mode is unset — body mode is the default', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['cookie_mode']);
+    config()->set('lukk', $lukk);
+
+    expect((new LogoutResponse)->toResponse(Request::create('/auth/logout', 'POST'))->headers->getCookies())->toBeEmpty();
 });
 
 it('emits no cookie on logout in BFF mode', function () {

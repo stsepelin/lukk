@@ -35,9 +35,7 @@ class RegisterRequest extends FormRequest
             return (array) (Lukk::$registerValidation)($this); // @pest-mutate-ignore: RemoveArrayCast
         }
 
-        // `??`, not config()'s default: that one applies only to a MISSING key, and a null value
-        // would become '' — a rule set keyed on an empty field name.
-        $field = (string) (config('lukk.username') ?? 'email'); // @pest-mutate-ignore: RemoveStringCast
+        $field = Lukk::usernameField();
 
         return [
             'name' => ['required', 'string', 'max:255'],

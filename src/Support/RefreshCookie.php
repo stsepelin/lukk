@@ -36,19 +36,21 @@ class RefreshCookie
     public static function name(): string
     {
         $cfg = Lukk::guardConfig();
-        $name = (string) ($cfg['cookie']['refresh_name'] ?? '__Host-refresh');
+        $name = (string) ($cfg['cookie']['refresh_name'] ?? '__Host-refresh'); // @pest-mutate-ignore: RemoveStringCast
         $guard = Lukk::currentGuard();
 
-        if ($guard !== (string) config('lukk.guard', 'api')) {
+        if ($guard !== Lukk::defaultGuard()) {
             $name .= '-'.$guard;
         }
 
-        return self::secure() ? $name : (string) preg_replace('/^__(Host|Secure)-/', '', $name);
+        // `preg_replace` returns null only on a regex error, which this constant pattern cannot raise.
+        return self::secure() ? $name : (string) preg_replace('/^__(Host|Secure)-/', '', $name); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /** The refresh TTL in minutes for the CURRENT guard — a per-guard `refresh_ttl` was ignored. */
     public static function ttlMinutes(): int
     {
-        return (int) ((int) (Lukk::guardConfig()['refresh_ttl'] ?? 2592000) / 60);
+        // One second more on the default is still 43,200 whole minutes.
+        return (int) ((int) (Lukk::guardConfig()['refresh_ttl'] ?? 2592000) / 60); // @pest-mutate-ignore: IncrementInteger
     }
 }

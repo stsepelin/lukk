@@ -440,8 +440,13 @@ it('refuses to assume a token outside the test environment', function () {
     // first, and this test is about the environment check in `assume()`.
     app()->detectEnvironment(fn () => 'local');
 
+    // Whole, because the way to do it properly is the part the reader needs.
     expect(fn () => Lukk::actingAs(User::factory()->create(), config('lukk.guard'), ['*']))
-        ->toThrow(RuntimeException::class, 'refuses to run outside the test environment');
+        ->toThrow(RuntimeException::class, 'Lukk::actingAs() with an explicit ability list is a TEST helper and refuses to run '
+            .'outside the test environment: the assumed token would outlive the request on a '
+            .'long-lived worker and authorize the next visitor. To grant abilities in '
+            .'production, mint a token that carries them — pass them to StartSession, or return '
+            .'them from Lukk::abilitiesUsing().');
 });
 
 it('pins WHY that refusal is necessary: a scoped binding outlives request teardown', function () {
@@ -1197,7 +1202,11 @@ it('refuses to mint a pinned session whose pin did not reach storage', function 
     Lukk::abilitiesUsing(fn () => ['admin.everything']);
 
     expect(fn () => start()(User::factory()->create()->getKey(), [], ['ci.deploy']))
-        ->toThrow(RuntimeException::class, 'could not store this session\'s pinned abilities');
+        // Whole, because the remedy is the part an operator acts on.
+        ->toThrow(RuntimeException::class, 'lukk could not store this session\'s pinned abilities, so the token would widen to '
+            .'the user\'s full grant on its first refresh. Publish the `scope` column '
+            .'(`vendor:publish --tag=lukk-migrations`), or make your RefreshTokenRepository '
+            .'persist the $scope argument.');
 });
 
 it('persists a pinned grant through a model that filters mass assignment', function () {
@@ -1348,3 +1357,14 @@ class FillableRefreshToken extends RefreshToken
 
     protected $fillable = ['user_id', 'family_id', 'previous_id', 'token_hash', 'expires_at', 'guard'];
 }
+
+it('reads a gate written with spaces after the commas', function () {
+    // `lukk.ability:orders.read, orders.write` is the natural way to type it; untrimmed, the space
+    // makes an invalid scope token and every request through the gate is a 500.
+    Route::middleware(['auth:api', 'lukk.ability:orders.read, orders.write'])
+        ->get('/_test/spaced', fn () => response()->json(['ok' => true]));
+    Lukk::abilitiesUsing(fn () => ['orders.write']);
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    $this->withToken($access)->getJson('/_test/spaced')->assertOk();
+});

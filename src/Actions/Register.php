@@ -77,7 +77,9 @@ class Register
         return $this->model::create([
             'name' => $payload['name'],
             $this->username => $payload[$this->username],
-            'password' => Hash::make((string) $payload['password']),
+            // `Hash::make` goes through the facade's untyped `__callStatic`, so a non-string is coerced
+            // either way; the cast states the type.
+            'password' => Hash::make((string) $payload['password']), // @pest-mutate-ignore: RemoveStringCast
         ]);
     }
 }

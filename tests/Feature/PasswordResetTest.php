@@ -252,3 +252,29 @@ it('spends equivalent work on an unknown address, so timing cannot enumerate', f
 
     expect($onHit)->toBeGreaterThan(0)->and($hasher->made)->toBe($onHit);
 });
+
+it('revokes existing sessions when revoke_sessions is unset — the default is on', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['password_reset']['revoke_sessions']);
+    config()->set('lukk', $lukk);
+    $user = User::factory()->create(['email' => 'a@b.c']);
+    $pair = $user->startSession();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => Password::createToken($user),
+        'email' => 'a@b.c',
+        'password' => 'new-password-123',
+        'password_confirmation' => 'new-password-123',
+    ])->assertOk();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertStatus(401);
+});
+
+it('answers every failed reset with the one generic token message', function () {
+    User::factory()->create(['email' => 'a@b.c']);
+
+    $this->postJson('/auth/reset-password', [
+        'token' => 'not-a-token', 'email' => 'a@b.c',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422)->assertJsonValidationErrors(['email' => __('passwords.token')]);
+});

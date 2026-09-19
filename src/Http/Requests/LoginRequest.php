@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Lukk\Lukk;
 
 /**
  * Password login input. Type-only (`sometimes`, not `required`) so a custom
@@ -26,7 +27,7 @@ class LoginRequest extends FormRequest
     public function rules(): array
     {
         return [
-            (string) config('lukk.username', 'email') => ['sometimes', 'string', 'max:255'],
+            Lukk::usernameField() => ['sometimes', 'string', 'max:255'],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1);
             // the length check is identifier-independent, so it leaks no account existence.
             'password' => ['sometimes', 'string', 'max:255'],

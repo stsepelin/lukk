@@ -406,7 +406,7 @@ class Lukk
         $lukk = (array) config('lukk');
         $name ??= self::currentGuard();
 
-        if ($name === (string) ($lukk['guard'] ?? 'api')) {
+        if ($name === self::defaultGuard()) {
             return $lukk;
         }
 
@@ -430,7 +430,7 @@ class Lukk
         $guards = is_array($lukk['guards'] ?? null) ? $lukk['guards'] : [];
 
         return array_values(array_unique([
-            (string) ($lukk['guard'] ?? 'api'), // @pest-mutate-ignore: RemoveStringCast
+            self::defaultGuard(),
             ...array_keys($guards),
         ]));
     }
@@ -460,6 +460,59 @@ class Lukk
         ));
     }
 
+    /**
+     * The default guard's name: `lukk.guard`, or `api` when it is unset, null or empty.
+     *
+     * The one place it is read. `config('lukk.guard', 'api')` applies its default only to a MISSING
+     * key, so a null value (an unset env variable) became `''` — a guard nobody declared, which
+     * some readers treated as the default guard and others did not. A numeric name is kept as a
+     * string so `assertGuardsIsolated()` can refuse it by name.
+     */
+    public static function defaultGuard(): string
+    {
+        $name = config('lukk.guard');
+
+        return is_scalar($name) && (string) $name !== '' ? (string) $name : 'api';
+    }
+
+    /**
+     * The identifier column sign-in reads: `lukk.username`, or `email` when it is unset, null or empty.
+     *
+     * The one place it is read, for the same reason as `defaultGuard()` — and here an empty column is
+     * worse than inconsistent. `where('', $identifier)` on SQLite compiles to `"" = ?`, a comparison
+     * of two string LITERALS that is true for every row: the first account matched any identifier,
+     * so its password signed in whoever typed it. (MySQL and PostgreSQL refuse the query instead.)
+     * An empty `LUKK_USERNAME=` line in `.env` produces exactly that, so null alone is not enough.
+     */
+    public static function usernameField(): string
+    {
+        $field = config('lukk.username');
+
+        return is_string($field) && $field !== '' ? $field : 'email';
+    }
+
+    /**
+     * The `auth.providers` entry a lukk guard resolves its users from.
+     *
+     * The default guard reads `lukk.user_provider`, never its own `auth.guards` entry; an extra guard
+     * prefers `auth.guards.{guard}.provider` and falls back to the same. `?? 'users'` is the shipped
+     * value: falling through to null does NOT mean "let Laravel decide", since stock Laravel sets the
+     * provider under `auth.guards.web.provider`, not `auth.defaults.provider`, so
+     * `createUserProvider(null)` resolves to null and every auth route 500s.
+     *
+     * Shared by the guard driver and `lukk:release`, which once read `auth.guards` for every guard
+     * and so looked the account up in a different table from the one sign-in used.
+     */
+    public static function userProviderName(string $guard): string
+    {
+        $fallback = config('lukk.user_provider') ?? 'users';
+
+        // Provider names from config are strings; the casts only state the return type.
+        return $guard === self::guardNames()[0]
+            ? (string) $fallback // @pest-mutate-ignore: RemoveStringCast
+            : (string) (config("auth.guards.{$guard}.provider") ?? $fallback); // @pest-mutate-ignore: RemoveStringCast
+    }
+
     /** The lukk guard active for the current request (default: `config('lukk.guard')`). */
     public static function currentGuard(): string
     {
@@ -487,7 +540,7 @@ class Lukk
      */
     public static function assertGuardsIsolated(): void
     {
-        $default = (string) (config('lukk.guard') ?? 'api');
+        $default = self::defaultGuard();
 
         // PHP turns a numeric array key into an int, so a guard named "2" reaches every `string`
         // parameter downstream as 2 — under strict_types a TypeError while the routes register, with

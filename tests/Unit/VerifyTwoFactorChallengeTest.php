@@ -207,3 +207,19 @@ it('returns the reserved slot on success, so correct codes never add up to a loc
 
     expect(DB::table('lukk_lockouts')->where('purpose', 'two_factor')->exists())->toBeFalse();
 });
+
+it('states a lock\'s auto-release wait rounded UP to whole minutes', function (int $releaseAfter, string $expected) {
+    // 60 s is one minute and 61 s two: the boundary both ways, as for the throttle message.
+    app('translator')->addLines(['auth.throttle' => 'Wait :seconds s (:minutes min).'], 'en');
+    [$user] = v2faUser();
+    $lockouts = new DatabaseLockoutRepository(3, $releaseAfter);
+    v2faLock($lockouts, $user);
+
+    $e = v2faRefusal(fn () => v2faAction(lockouts: $lockouts)(v2faChallenge($user), '000000', null));
+
+    expect($e->status)->toBe(423)
+        ->and($e->errors())->toBe(['code' => [$expected]]);
+})->with([
+    'exactly a minute' => [60, 'Wait 60 s (1 min).'],
+    'one second over' => [61, 'Wait 61 s (2 min).'],
+]);

@@ -258,3 +258,14 @@ it('bounds the signup identifier length on this unauthenticated endpoint', funct
         ->assertStatus(422)
         ->assertJsonValidationErrors('email');
 });
+
+it('signs the new user in when registration.login is unset — the default is on', function () {
+    Notification::fake();
+    $lukk = (array) config('lukk');
+    unset($lukk['registration']['login']);
+    config()->set('lukk', $lukk);
+
+    $access = $this->postJson('/auth/register', registerPayload())->assertOk()->json('access_token');
+
+    expect(claims($access)->amr)->toBe(['pwd']);
+});

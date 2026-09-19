@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\RegisterRequest;
 use Lukk\Tests\Fixtures\Admin;
@@ -12,27 +11,15 @@ use Lukk\Tests\Fixtures\User;
 
 uses()->group('registration');
 
-/**
- * The rules that failed for `$field` when registering with `$overrides`.
- *
- * Asserting on the failed RULE rather than on a 422 is what pins each rule on its own: most bad
- * inputs trip two rules, so dropping either one still answers 422.
- *
- * @return array<string, mixed>
- */
+/** The rules that failed for `$field` when registering with `$overrides`. */
 function failedRules(string $field, array $overrides): array
 {
-    $data = array_merge([
+    return failedRulesFor((new RegisterRequest)->rules(), array_merge([
         'name' => 'New User',
         'email' => 'new@user.com',
         'password' => 'new-password-123',
         'password_confirmation' => 'new-password-123',
-    ], $overrides);
-
-    $validator = Validator::make($data, (new RegisterRequest)->rules());
-    $validator->fails();
-
-    return $validator->failed()[$field] ?? [];
+    ], $overrides), $field);
 }
 
 it('applies each default rule on its own', function (string $field, array $overrides, string $rule) {

@@ -194,7 +194,7 @@ class AttemptLogin
 
     private function field(): string
     {
-        return (string) config('lukk.username', 'email');
+        return Lukk::usernameField();
     }
 
     private function timingHash(): string

@@ -98,7 +98,8 @@ class DeleteAccount
             // age, so anything missed here is permanent.
             if ($this->tableExists('lukk_lockouts')) {
                 $this->lockouts->forget([
-                    LoginRateLimiter::lockoutSubject($user, ''),              // id:<userId>   — login
+                    // id:<userId> — login. (The identifier argument is unused when a user is passed.)
+                    LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
                     (string) $userId,                                         // <userId>      — confirm / two-factor
                     $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:<normalized>
                 ], $this->guard);
@@ -151,9 +152,11 @@ class DeleteAccount
      */
     private function passwordResetTable(): string
     {
-        $broker = $this->passwordBroker ?? (string) config('auth.defaults.passwords');
+        // The casts only state types: a broker name only reaches a config key, where null and '' read
+        // the same, and a table name from config is a string.
+        $broker = $this->passwordBroker ?? (string) config('auth.defaults.passwords'); // @pest-mutate-ignore: RemoveStringCast
 
-        return (string) (config("auth.passwords.{$broker}.table") ?? 'password_reset_tokens');
+        return (string) (config("auth.passwords.{$broker}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**

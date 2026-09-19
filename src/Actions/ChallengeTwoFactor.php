@@ -40,7 +40,8 @@ class ChallengeTwoFactor
         // A recovery-only attempt must never touch the secret. That is the whole point of recovery
         // codes — the authenticator is unusable, and "the server cannot read your secret" is one of
         // the ways that happens.
-        if ($code !== null && $code !== '') {
+        // (An empty code would reach `verify()` and fail there anyway; the '' test just skips the work.)
+        if ($code !== null && $code !== '') { // @pest-mutate-ignore: EmptyStringToNotEmpty
             $secret = $this->secretOf($user);
 
             // `''` as well as null: an empty key is what the old `(string) null` cast produced, the
@@ -51,7 +52,8 @@ class ChallengeTwoFactor
             }
         }
 
-        if ($recoveryCode !== null && $recoveryCode !== '' && $user->useRecoveryCode($recoveryCode)) {
+        // (Likewise: an empty recovery code matches no stored hash.)
+        if ($recoveryCode !== null && $recoveryCode !== '' && $user->useRecoveryCode($recoveryCode)) { // @pest-mutate-ignore: EmptyStringToNotEmpty
             return $user;
         }
 

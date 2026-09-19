@@ -46,6 +46,6 @@ trait HasRefreshTokens
      */
     public function lukkGuard(): string
     {
-        return (string) config('lukk.guard', 'api');
+        return Lukk::defaultGuard();
     }
 }

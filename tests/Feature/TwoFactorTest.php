@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmTwoFactor;
+use Lukk\Actions\EnableTwoFactor;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
@@ -675,4 +676,45 @@ it('regenerates the documented number of recovery codes when the count is null',
 
     expect($response->json('recovery_codes'))->toHaveCount(8);
     expect($this->withToken($token)->getJson('/auth/two-factor/recovery-codes')->json('total'))->toBe(8);
+});
+
+it('names the conflict when enrolling over confirmed two-factor', function () {
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $access = $user->startSession()->accessToken;
+
+    $this->withToken($access)->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')
+        ->assertStatus(409)
+        ->assertJsonValidationErrors(['two_factor' => 'Two-factor authentication is already enabled. Disable it first to enrol again.']);
+});
+
+it('clears a stale confirmation when enrolling, so the new secret starts unconfirmed', function () {
+    // A confirmation left behind without a secret (a half-disabled row) must not carry over to a
+    // secret nobody has proved they hold.
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => null, 'two_factor_confirmed_at' => now()])->save();
+
+    app(EnableTwoFactor::class)($user);
+
+    expect($user->refresh()->two_factor_confirmed_at)->toBeNull()
+        ->and($user->hasEnabledTwoFactor())->toBeFalse();
+});
+
+it('labels the authenticator entry with the email, or the id when there is none', function () {
+    $user = User::factory()->create(['email' => 'ada@example.test']);
+    expect(app(EnableTwoFactor::class)($user)['otpauth_uri'])->toContain(rawurlencode('ada@example.test'));
+
+    $anonymous = new class extends User
+    {
+        protected $table = 'users';
+
+        public function getEmailAttribute(): ?string
+        {
+            return null;
+        }
+    };
+    $id = User::factory()->create()->getKey();
+    $model = $anonymous::query()->findOrFail($id);
+
+    expect(app(EnableTwoFactor::class)($model)['otpauth_uri'])->toContain(':'.$id.'?');
 });

@@ -71,7 +71,8 @@ class ChangePassword
         // way out was the reset email this endpoint exists to avoid. Safe to do here: reaching this
         // line required proving the current password.
         $this->lockouts?->release('confirm', $subject, $this->guard);
-        $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard);
+        // (The identifier argument is unused when a user is passed.)
+        $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard); // @pest-mutate-ignore: EmptyStringToNotEmpty
 
         // Every OTHER session dies; this one survives. Changing a password is what a user does when
         // they think someone else is in the account, so leaving those sessions alive would defeat

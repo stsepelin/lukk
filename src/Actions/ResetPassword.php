@@ -48,7 +48,8 @@ class ResetPassword
             // releases exactly this account's lock and no one else's. Releasing on the normalized
             // identifier instead meant a look-alike account (`аdmin@` with a Cyrillic а) shared the
             // row, and resetting either password cleared the other's lock.
-            $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard);
+            // (The identifier argument is unused when a user is passed.)
+            $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard); // @pest-mutate-ignore: EmptyStringToNotEmpty
             // The step-up lock counts failures against the password that just changed, so those
             // failures are now meaningless. Keyed on the id, which is how the confirm lock records.
             $this->lockouts?->release('confirm', (string) $user->getAuthIdentifier(), $this->guard);

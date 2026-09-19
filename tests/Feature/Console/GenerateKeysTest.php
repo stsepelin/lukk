@@ -94,3 +94,7 @@ it('rejects an unsupported algorithm', function () {
         ->expectsOutputToContain('Unsupported algorithm [HS256]. Use RS256 or ES256.')
         ->assertFailed();
 });
+
+it('reads a numeric kid', function () {
+    expect(keygen(['--kid' => 123])['kid'])->toBe('123');
+});
