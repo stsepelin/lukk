@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers;
 
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\StartSession;
 use Lukk\Actions\VerifyTwoFactorChallenge;
+use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LoginResponse;
 use Lukk\Http\Controllers\Concerns\DeterminesSessionOutcome;
 use Lukk\Http\Requests\TwoFactorChallengeRequest;
@@ -21,12 +23,19 @@ class TwoFactorChallengedSessionController
     public function __construct(
         private readonly VerifyTwoFactorChallenge $verifyChallenge,
         private readonly StartSession $start,
+        private readonly ChallengeToken $challengeTokens,
+        private readonly ConfirmPasswordUnchanged $passwordUnchanged,
     ) {}
 
     public function store(TwoFactorChallengeRequest $request): LoginResponse
     {
+        // `TwoFactorChallengeRequest` validates it `required|string`, so the cast is the declared type, not a conversion.
+        $challenge = (string) $request->input('challenge_token'); // @pest-mutate-ignore: RemoveStringCast
+        // Read before the challenge is spent — a consumed one no longer decodes.
+        $checked = $this->challengeTokens->passwordFingerprintOf('2fa', $challenge);
+
         $user = ($this->verifyChallenge)(
-            (string) $request->input('challenge_token'),
+            $challenge,
             $request->input('code'),
             $request->input('recovery_code'),
         );
@@ -39,6 +48,15 @@ class TwoFactorChallengedSessionController
         // session for an account the policy says must not have one.
         abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
 
-        return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp']])]);
+        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp']]);
+
+        // The first factor was a password checked up to `challenge_ttl` ago. Changed or reset since, the
+        // challenge stood in for a credential the account no longer has — see `ConfirmPasswordUnchanged`.
+        ($this->passwordUnchanged)(
+            $user->getAuthIdentifier(), $checked, $pair,
+            'challenge_token', __('The two-factor challenge is invalid or has expired.'),
+        );
+
+        return app(LoginResponse::class, ['pair' => $pair]);
     }
 }

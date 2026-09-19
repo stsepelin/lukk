@@ -34,7 +34,7 @@ class ChallengeToken
         $this->keys = new KeyRing($config);
     }
 
-    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null): string
+    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null): string
     {
         $now = now()->getTimestamp();
 
@@ -65,6 +65,13 @@ class ChallengeToken
         // so a refresh mid-window does not invalidate it.
         if ($familyId !== null && $familyId !== '') {
             $payload['fid'] = $familyId;
+        }
+
+        // The PASSWORD the first factor was checked against (see `PasswordFingerprint`), for a challenge
+        // that stands in for a password sign-in. Redeeming it after that password was changed or reset
+        // would start a session on a credential the account no longer has.
+        if ($passwordFingerprint !== null) {
+            $payload['pwf'] = $passwordFingerprint;
         }
 
         $signing = $this->keys->signingKey();
@@ -101,6 +108,18 @@ class ChallengeToken
     }
 
     /**
+     * The password fingerprint a challenge was minted with, or null when it carries none (a co-issuer's,
+     * or one from before the claim existed) — which `ConfirmPasswordUnchanged` refuses.
+     */
+    public function passwordFingerprintOf(string $kind, string $token): ?string
+    {
+        $claims = $this->decode($kind, $token);
+
+        // `decode()` admits only a string `pwf`, so the cast is the declared type, not a conversion.
+        return $claims === null ? null : (isset($claims->pwf) ? (string) $claims->pwf : null); // @pest-mutate-ignore: RemoveStringCast
+    }
+
+    /**
      * Verify and consume (single-use). Returns the subject or null on any failure
      * — bad signature, wrong kind, wrong iss/aud, expired, or already spent.
      */
@@ -127,7 +146,7 @@ class ChallengeToken
         return (string) $claims->sub; // @pest-mutate-ignore: RemoveStringCast
     }
 
-    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
+    /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, pwf?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
     private function decode(string $kind, string $token): ?object
     {
         JWT::$leeway = $this->config['leeway'] ?? 5;
@@ -139,7 +158,8 @@ class ChallengeToken
             // co-issuer, a topology this class exists to support — turned `(string)` into an
             // uncaught `Error` and a 500, contradicting this method's own "null on any failure"
             // contract. RFC 8725 §3.11: validate claim types before use.
-            if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))) {
+            if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))
+                || (isset($claims->pwf) && ! is_string($claims->pwf))) {
                 return null;
             }
 

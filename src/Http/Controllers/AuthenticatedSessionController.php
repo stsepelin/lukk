@@ -7,6 +7,7 @@ namespace Lukk\Http\Controllers;
 use Illuminate\Contracts\Support\Responsable;
 use Illuminate\Http\Request;
 use Lukk\Actions\AttemptLogin;
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\EndSession;
 use Lukk\Actions\StartSession;
 use Lukk\Auth\ChallengeToken;
@@ -33,11 +34,14 @@ class AuthenticatedSessionController
         private readonly StartSession $start,
         private readonly EndSession $end,
         private readonly ChallengeToken $challengeTokens,
+        private readonly ConfirmPasswordUnchanged $passwordUnchanged,
     ) {}
 
     public function store(LoginRequest $request): Responsable
     {
         $user = ($this->attempt)($request);
+        // Taken now: the password the session is about to be granted on.
+        $checked = $this->passwordUnchanged->baseline($user);
 
         // Opt-in: refuse login for an unverified email. Runs only after a successful credential
         // check, so it never touches the constant-time unknown-user / wrong-password path.
@@ -54,7 +58,17 @@ class AuthenticatedSessionController
             return $this->twoFactorChallenge($user, $this->challengeTokens);
         }
 
-        return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']])]);
+        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']]);
+
+        // A password change or reset that landed since the check takes the session back — see
+        // `ConfirmPasswordUnchanged`. Answered exactly like a wrong password: to this caller, it now is one.
+        ($this->passwordUnchanged)(
+            $user->getAuthIdentifier(), $checked, $pair,
+            // A column name: a string whenever it is set, so the cast states the type rather than converting.
+            (string) (config('lukk.username') ?? 'email'), __('These credentials do not match our records.'), // @pest-mutate-ignore: RemoveStringCast
+        );
+
+        return app(LoginResponse::class, ['pair' => $pair]);
     }
 
     public function destroy(Request $request): LogoutResponse
@@ -85,7 +99,8 @@ class AuthenticatedSessionController
     {
         $guard = Lukk::currentGuard();
 
-        if ($bearer !== '' && app('auth')->guard($guard)->check()) {
+        // An empty bearer never checks as authenticated, so the first test only skips a guard lookup.
+        if ($bearer !== '' && app('auth')->guard($guard)->check()) { // @pest-mutate-ignore: EmptyStringToNotEmpty
             app('auth')->shouldUse($guard);
         }
     }
