@@ -61,6 +61,25 @@ it('honours a per-guard features.two_factor override at login', function () {
         ->assertJsonStructure(['access_token']);
 });
 
+it('still challenges an enrolled account on a guard whose two_factor is unset', function () {
+    // An unset per-guard `env()` resolves to null, and `guardConfig()` keeps a null override over the
+    // global `true`. Read as `?? false`, that admin — who had enrolled — got a session on the password
+    // alone. Unset is not a decision to drop a factor the account opted into.
+    config(['lukk.features.two_factor' => true, 'lukk.guards.admin.features' => ['two_factor' => null]]);
+    $admin = Admin::factory()->create(['email' => 'unset@example.test']);
+    $secret = enrolTwoFactor($admin);
+
+    $challenge = $this->postJson('/admin/auth/login', ['email' => $admin->email, 'password' => 'password'])
+        ->assertOk()->assertJsonMissingPath('access_token')->assertJsonPath('two_factor', true)->json('challenge_token');
+
+    app('auth')->forgetGuards();
+
+    $this->postJson('/admin/auth/two-factor-challenge', [
+        'challenge_token' => $challenge,
+        'code' => app(Google2FA::class)->getCurrentOtp($secret),
+    ])->assertOk()->assertJsonStructure(['access_token']);
+});
+
 it('refuses a challenge minted by another guard', function () {
     // Isolation used to rest entirely on the consumer giving each guard a distinct crypto identity.
     // Under the minimal shape — only `provider` and `path` differ — a challenge asserting "admins.1

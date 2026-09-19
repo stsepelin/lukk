@@ -105,7 +105,8 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
             // a challenge it had no endpoint to complete: enrolled, challenged, and bricked. The
             // MANAGEMENT routes (enrol, confirm, disable, recovery codes) stay on the default guard;
             // they need step-up, which is a separate mount, and their absence locks nobody out.
-            if (Lukk::guardConfig($guardName)['features']['two_factor'] ?? false) {
+            // The SAME predicate login enforces on, so an unset flag that challenges also redeems.
+            if (Lukk::enforcesTwoFactor((string) $guardName)) {
                 Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])
                     ->middleware('throttle:lukk-'.$guardName.'-2fa');
             }
@@ -184,8 +185,14 @@ Route::domain(config('lukk.domain'))
                 ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT, 'throttle:lukk-confirm']);
         }
 
-        if (config('lukk.features.two_factor')) {
+        // Redemption follows the login predicate — an unset flag still challenges an enrolled account,
+        // so it must still be able to answer. Management needs the feature switched ON: enrolling a
+        // new factor on a flag nobody set is a decision the install never made.
+        if (Lukk::enforcesTwoFactor((string) config('lukk.guard', 'api'))) {
             Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');
+        }
+
+        if (config('lukk.features.two_factor')) {
             Route::post('two-factor', [TwoFactorAuthenticationController::class, 'store'])->middleware($confirmed);
             Route::delete('two-factor', [TwoFactorAuthenticationController::class, 'destroy'])->middleware($confirmed);
             Route::post('two-factor/confirm', [ConfirmedTwoFactorAuthenticationController::class, 'store'])

@@ -30,6 +30,8 @@ uses()->group('config');
 function twoFactorKeys(): array
 {
     return [
+        // Fails CLOSED: an unset flag is not a decision to stop challenging an account that enrolled.
+        'features.two_factor',
         'two_factor.challenge_ttl',
         'two_factor.window',
         'rate_limits.two_factor.max_attempts',
@@ -218,6 +220,20 @@ it('refuses tokens rather than inventing an identity, when the binding claims ar
     ])->assertStatus(422);
 })->with('missing')->with(['issuer', 'audience']);
 
+it('keeps the refresh cookie Secure and __Host- prefixed without it', function (Closure $break) {
+    // Fails OPEN if it flips: a missing key would strip Secure and the `__Host-` prefix, and the refresh
+    // token would ride plain http in production.
+    config(['lukk.cookie_mode' => true]);
+    $break('cookie.secure');
+
+    $response = test()->postJson('/auth/login', ['email' => User::factory()->create()->email, 'password' => 'password'])
+        ->assertOk();
+    $cookie = collect($response->headers->getCookies())->first();
+
+    expect($cookie?->getName())->toBe('__Host-refresh')
+        ->and($cookie?->isSecure())->toBeTrue();
+})->with('missing');
+
 /**
  * Every guarded read in `src/` is either exercised above, or named here with a reason.
  *
@@ -234,7 +250,7 @@ function guardedConfigKeys(): array
         }
 
         preg_match_all(
-            "/config(?:\(\))?(?:\('lukk\.([a-z_.]+)'\))?((?:\['[a-z_]+'\])*)\s*\?\?/",
+            "/(?:guardConfig\([^)]*\)|config(?:\(\))?(?:\('lukk\.([a-z_.]+)'\))?)((?:\['[a-z_]+'\])*)\s*\?\?/",
             (string) file_get_contents($file->getPathname()),
             $matches,
             PREG_SET_ORDER,
@@ -242,7 +258,7 @@ function guardedConfigKeys(): array
 
         foreach ($matches as $match) {
             preg_match_all("/'([a-z_]+)'/", $match[2] ?? '', $brackets);
-            $path = $match[1] !== '' ? $match[1] : implode('.', $brackets[1]);
+            $path = ($match[1] ?? '') !== '' ? $match[1] : implode('.', $brackets[1]);
 
             if ($path !== '') {
                 $keys[$path] = true;
@@ -258,7 +274,7 @@ it('leaves no guarded config read unexercised', function () {
     // an already-sliced variable (`$twoFactor['window']`) by the full path it belongs to.
     $covered = [
         ...coreKeys(), ...twoFactorKeys(), ...confirmKeys(), ...passkeyKeys(),
-        'two_factor.recovery_codes', 'issuer', 'audience',
+        'two_factor.recovery_codes', 'issuer', 'audience', 'cookie.secure',
     ];
 
     $exempt = [
@@ -280,6 +296,12 @@ it('leaves no guarded config read unexercised', function () {
         'features.change_password' => 'defaults true; route mount pinned by ChangePasswordTest',
         'features.email_verification' => 'defaults false; absent disables an optional feature',
         'features.lockout' => 'defaults false; absent disables an optional feature',
+        'features.abilities' => 'defaults false; absent disables an optional feature',
+        'features.logout_all' => 'defaults true; route mount pinned by LogoutAllDisabledTest',
+        // Fails CLOSED if it flips: the gate stays on for a pinned token.
+        'features.gate_auth_routes' => 'defaults true; pinned by AbilitiesTest (cached config predates the flag)',
+        // Opt-in transport: an install that never set it was never in cookie mode.
+        'cookie_mode' => 'defaults false; absent keeps the body transport the install already used',
         'features.password_reset' => 'defaults false; absent disables an optional feature',
         // Optional-feature settings, exercised by those features' own suites.
         'lockout' => 'optional feature; LockoutTest',

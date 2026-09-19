@@ -27,8 +27,8 @@ trait DeterminesSessionOutcome
     {
         // `Lukk::guardConfig()`, never the global block — the same rule CLAUDE.md records for
         // `features.abilities` and `gate_auth_routes`. Read globally, a guard that switches two-factor
-        // OFF was still challenged, and one that switches it ON was not.
-        return (bool) (Lukk::guardConfig()['features']['two_factor'] ?? false)
+        // OFF was still challenged, and one that switches it ON was not. Unset fails closed — see there.
+        return Lukk::enforcesTwoFactor()
             && method_exists($user, 'hasEnabledTwoFactor')
             && $user->hasEnabledTwoFactor();
     }
