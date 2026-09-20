@@ -20,10 +20,12 @@ use Lukk\Contracts\Denylist;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Events\SessionUnclaimed;
+use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Support\RefreshTokenRecord;
 use Lukk\Support\UnclaimedSessions;
+use Lukk\Support\VerifiedToken;
 use Lukk\Tests\Fixtures\User;
 
 // Unclaimed sessions (opt-in, `claim_seconds`). A session whose sign-in response never reached the
@@ -614,7 +616,7 @@ it('authenticates a co-issuer token with no family as before, when the feature i
     // Nothing to claim or revoke without a `fid`; the verify-only topology must keep working.
     config(['lukk.claim_seconds' => 600]);
     $user = User::factory()->create();
-    $cfg = Lukk\Lukk::guardConfig();
+    $cfg = Lukk::guardConfig();
     $token = JWT::encode([
         'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getKey(), 'jti' => 'co',
         'iat' => time(), 'nbf' => time(), 'exp' => time() + 300,
@@ -678,4 +680,42 @@ it('never fails a refresh because logging the unrecognisable-original warning th
 
     $this->postJson('/auth/refresh', ['refresh_token' => $first['refresh_token']])->assertOk();
     $this->postJson('/auth/refresh', ['refresh_token' => $second['refresh_token']])->assertOk();
+});
+
+it('claims a session whose family id and issue time another issuer encoded as numbers', function () {
+    // Both reach `ClaimSession` typed; a JSON number there was a 500 on every authenticated request
+    // while the feature is on.
+    config(['lukk.claim_seconds' => 600]);
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getKey(),
+        // `iat` as a numeric string too: both reach `ClaimSession` typed.
+        'jti' => 'numeric-claim', 'fid' => 42, 'iat' => (string) time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    Route::middleware('auth:api')->get('/_test/whoami', fn () => response()->json([
+        'family' => VerifiedToken::current(request())?->familyId,
+        'legacy_sub' => request()->attributes->get('lukk.claims')?->sub,
+    ]));
+
+    $this->withToken($token)->getJson('/_test/whoami')
+        ->assertOk()
+        ->assertJson(['family' => '42', 'legacy_sub' => (string) $user->getKey()]);
+});
+
+it('leaves the family id empty for a token that names no session', function () {
+    // A co-issuer's token carries no `fid`; nothing downstream may read a placeholder as a family.
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getKey(),
+        'jti' => 'no-family', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    Route::middleware('auth:api')->get('/_test/family', fn () => response()->json([
+        'family' => VerifiedToken::current(request())?->familyId,
+    ]));
+
+    $this->withToken($token)->getJson('/_test/family')->assertOk()->assertJson(['family' => '']);
 });

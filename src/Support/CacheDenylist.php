@@ -39,7 +39,9 @@ class CacheDenylist implements DenylistContract
 
     public function has(string $type, string $id): bool
     {
-        return $id !== '' && (bool) $this->store->get($this->key($type, $id));
+        // (An empty id is never a stored key, so the placeholder reads the same; and `&&` already
+        // yields a bool, so the cast only states the stored marker's own type.)
+        return $id !== '' && (bool) $this->store->get($this->key($type, $id)); // @pest-mutate-ignore: EmptyStringToNotEmpty,RemoveBooleanCast
     }
 
     public function hasAny(array $types): bool
@@ -48,7 +50,8 @@ class CacheDenylist implements DenylistContract
 
         foreach ($types as $type => $id) {
             if ($id !== '') {
-                $keys[] = $this->key($type, (string) $id);
+                // A denylist id is a string; the cast only states it.
+                $keys[] = $this->key($type, (string) $id); // @pest-mutate-ignore: RemoveStringCast
             }
         }
 

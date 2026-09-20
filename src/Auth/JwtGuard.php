@@ -32,7 +32,8 @@ class JwtGuard
     {
         $token = $request->bearerToken();
 
-        if ($token === null || $token === '') {
+        // (An empty bearer fails verification too; the test only skips the work.)
+        if ($token === null || $token === '') { // @pest-mutate-ignore: EmptyStringToNotEmpty
             return null;
         }
 
@@ -45,7 +46,9 @@ class JwtGuard
         // Unclaimed sessions. An integer compare when the feature is off — the action, its cache
         // store and the cache itself are never touched. When on, one cache read per request, before
         // the user lookup, so a session revoked here costs no query.
-        if ($this->claimWindow > 0 && ! $this->claimed((string) ($claims->fid ?? ''), is_numeric($claims->iat ?? null) ? (int) $claims->iat : null)) {
+        // `> 1` would read the same: `UnclaimedSessions::window()` clamps an enabled window to at
+        // least 60 seconds, so 1 is not a value this can hold.
+        if ($this->claimWindow > 0 && ! $this->claimed((string) ($claims->fid ?? ''), is_numeric($claims->iat ?? null) ? (int) $claims->iat : null)) { // @pest-mutate-ignore: IncrementInteger
             return null;
         }
 

@@ -592,6 +592,10 @@ return [
     | reads this field from the request, throttles per this identifier, and looks
     | the user up by it; registration validates + writes it.
     |
+    | The column must EXIST on your users table. A typo is not loud on its own: SQLite reads a
+    | double-quoted identifier matching no column as a string literal, so the lookup compares two
+    | literals and the wrong account can match. lukk refuses a missing column while `app.debug` is on.
+    |
     */
 
     'username' => env('LUKK_USERNAME', 'email'),

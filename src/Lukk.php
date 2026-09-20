@@ -222,7 +222,8 @@ class Lukk
         // deep-merges `lukk.guards.{name}` over the top level, so a deployment that switched the
         // feature on for its admin guard alone had that setting silently dropped — and the flag
         // fails OPEN, so the claims hook became the authorization layer on that guard.
-        return self::$abilitiesUsing !== null || (bool) (self::guardConfig($guard)['features']['abilities'] ?? false);
+        // (`||` already yields a bool, so the cast only states the flag's own type.)
+        return self::$abilitiesUsing !== null || (bool) (self::guardConfig($guard)['features']['abilities'] ?? false); // @pest-mutate-ignore: RemoveBooleanCast
     }
 
     /**

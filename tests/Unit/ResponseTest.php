@@ -30,11 +30,15 @@ it('returns both tokens in the JSON body in BFF mode (default)', function () {
 });
 
 it('marks token responses as non-cacheable (no-store) in both modes', function () {
+    // `Pragma` as well: an HTTP/1.0 cache — or a proxy behaving like one — ignores Cache-Control,
+    // and a cached token response hands the next caller someone else's session.
     config(['lukk.cookie_mode' => false]);
     expect(emit(new TokenPair('a', 'b', 900))->headers->get('Cache-Control'))->toContain('no-store');
+    expect(emit(new TokenPair('a', 'b', 900))->headers->get('Pragma'))->toBe('no-cache');
 
     config(['lukk.cookie_mode' => true]);
     expect(emit(new TokenPair('a', 'b', 900))->headers->get('Cache-Control'))->toContain('no-store');
+    expect(emit(new TokenPair('a', 'b', 900))->headers->get('Pragma'))->toBe('no-cache');
 });
 
 it('puts the refresh token in a __Host- cookie and omits it from the body in cookie mode', function () {

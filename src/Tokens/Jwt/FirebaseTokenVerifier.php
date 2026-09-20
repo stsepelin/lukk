@@ -72,8 +72,11 @@ class FirebaseTokenVerifier implements TokenVerifier
         }
 
         // Accept when this service is one of the token's audiences (string or array).
-        $accepted = array_filter((array) ($this->config['audience'] ?? []));
-        $presented = array_filter((array) ($claims->aud ?? []));
+        // The two filters are a PAIR: each alone changes no outcome, because whichever side keeps a
+        // blank entry finds the other side's already removed. Together they stop a blank
+        // `LUKK_AUDIENCE=` on both sides from intersecting on '' and admitting a token minted for nobody.
+        $accepted = array_filter((array) ($this->config['audience'] ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
+        $presented = array_filter((array) ($claims->aud ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
 
         if (! array_intersect($presented, $accepted)) {
             return null;
@@ -89,7 +92,11 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        if ($this->denylist->hasAny(['jti' => (string) ($claims->jti ?? ''), 'fid' => (string) ($claims->fid ?? '')])) {
+        // The casts state the contract's `array<string, string>`; `CacheDenylist::hasAny()` casts as
+        // well, so a claim another issuer sent as a number reaches the same key either way. The ''
+        // is what keeps an absent claim out of the lookup — a placeholder would be MGET'd and miss,
+        // same answer, one key more.
+        if ($this->denylist->hasAny(['jti' => (string) ($claims->jti ?? ''), 'fid' => (string) ($claims->fid ?? '')])) { // @pest-mutate-ignore: RemoveStringCast,EmptyStringToNotEmpty
             return null;
         }
 

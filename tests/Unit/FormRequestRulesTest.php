@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\ChangePasswordRequest;
 use Lukk\Http\Requests\ForgotPasswordRequest;
+use Lukk\Http\Requests\LoginRequest;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
 use Lukk\Http\Requests\PasskeyRegistrationRequest;
 use Lukk\Http\Requests\TwoFactorChallengeRequest;
@@ -83,3 +84,18 @@ it('applies each forgot-password rule on its own', function (array $data, string
     'well-formed' => [['email' => 'not-an-email'], 'Email'],
     'bounded' => [['email' => str_repeat('a', 250).'@x.com'], 'Max'],
 ]);
+
+it('applies each sign-in rule on its own', function (array $data, string $field, string $rule) {
+    expect(failedRulesFor((new LoginRequest)->rules(), $data, $field))->toHaveKey($rule);
+})->with([
+    'identifier a string' => [['email' => ['x'], 'password' => 'secret-123456'], 'email', 'String'],
+    'identifier bounded' => [['email' => str_repeat('a', 256), 'password' => 'secret-123456'], 'email', 'Max'],
+    'password a string' => [['email' => 'ada@example.test', 'password' => ['x']], 'password', 'String'],
+    'password bounded' => [['email' => 'ada@example.test', 'password' => str_repeat('a', 256)], 'password', 'Max'],
+]);
+
+it('leaves a missing sign-in field to the credential check, not to validation', function (string $field) {
+    // `sometimes`: an absent field is refused as a wrong credential — 422 with the same body as any
+    // other failed sign-in — rather than telling a prober which half they got wrong.
+    expect(failedRulesFor((new LoginRequest)->rules(), [], $field))->toBe([]);
+})->with(['email', 'password']);

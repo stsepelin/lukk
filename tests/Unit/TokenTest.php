@@ -286,3 +286,49 @@ it('mints a full-lifetime access token when access_ttl is unusable', function (C
     'null (a per-guard env that is not set)' => [fn () => config()->set('lukk.access_ttl', null)],
     'absent (a config cached before the key existed)' => [fn () => config()->set('lukk', Arr::except(config('lukk'), ['access_ttl']))],
 ]);
+
+/** Mint a token with exactly these claims, signed by this guard's key. */
+function signedClaims(array $claims): string
+{
+    $cfg = Lukk::guardConfig();
+
+    return JWT::encode(array_merge([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $claims), $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('never matches an empty audience entry against an empty one the token presents', function () {
+    // A blank `LUKK_AUDIENCE=` line on both sides would otherwise intersect on '' and admit a token
+    // minted for nobody — the audience check is what isolates one guard's tokens from another's.
+    config(['lukk.audience' => ['https://api.example.com', '']]);
+
+    expect(verifier()->verify(signedClaims(['aud' => ['']])))->toBeNull()
+        ->and(verifier()->verify(signedClaims(['aud' => ['https://api.example.com']])))->not->toBeNull();
+});
+
+it('honours the configured leeway, and five seconds when it is unset', function () {
+    // The clock skew a verifier tolerates. Read as 0 and a token minted a second ago by a peer whose
+    // clock runs slow is refused; read as unbounded and an expired token lives on. Asserted on the
+    // value handed to the library, because the library compares against real `time()` — a test that
+    // tried to straddle one second of it would flake.
+    config(['lukk.leeway' => 120]);
+    verifier()->verify('not-a-token');
+    expect(JWT::$leeway)->toBe(120);
+
+    // ...and it is the value that decides: a token 30 seconds past `exp` still verifies under it.
+    expect(verifier()->verify(signedClaims(['exp' => time() - 30])))->not->toBeNull();
+
+    $lukk = (array) config('lukk');
+    unset($lukk['leeway']);
+    config()->set('lukk', $lukk);
+    verifier()->verify('not-a-token');
+
+    expect(JWT::$leeway)->toBe(5)
+        ->and(verifier()->verify(signedClaims(['exp' => time() - 30])))->toBeNull();
+});
+
+it('reads a jti or fid another issuer encoded as a number', function () {
+    // Both reach the denylist as strings; a JSON number there was a TypeError on every request.
+    expect(verifier()->verify(signedClaims(['jti' => 42, 'fid' => 7])))->not->toBeNull();
+});

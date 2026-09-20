@@ -10,6 +10,7 @@ use Illuminate\Validation\ValidationException;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Lukk;
 
 /**
  * Exchange a 2FA challenge for the verified user: consume the (single-use)
@@ -46,7 +47,7 @@ class VerifyTwoFactorChallenge
         // an unprefixed key is not yet reachable — but it is exactly the colliding-ids-across-
         // providers hazard the multi-guard work exists to remove, and it would go live silently the
         // moment the feature surfaces extend to another guard.
-        $key = 'lukk:2fa-challenge:'.($this->guard ?? 'api').':'.$userId;
+        $key = 'lukk:2fa-challenge:'.($this->guard ?? Lukk::defaultGuard()).':'.$userId;
         // `verify()` returns `?string` and the null branch threw above, so this is already a string.
         $subject = (string) $userId; // @pest-mutate-ignore: RemoveStringCast
 

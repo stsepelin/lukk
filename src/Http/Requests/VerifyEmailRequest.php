@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Facades\Auth;
+use Lukk\Lukk;
 
 /**
  * Stateless email-verification request. The `signed` middleware validates the link
@@ -44,7 +45,7 @@ class VerifyEmailRequest extends FormRequest
     {
         if (! $this->lookedUp) {
             $this->lookedUp = true;
-            $this->resolved = Auth::createUserProvider(config('lukk.user_provider') ?? 'users')
+            $this->resolved = Auth::createUserProvider(Lukk::userProviderName(Lukk::defaultGuard()))
                 ?->retrieveById($this->route('id'));
         }
 
