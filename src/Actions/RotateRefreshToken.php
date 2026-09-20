@@ -189,7 +189,14 @@ class RotateRefreshToken
             );
 
             // +1 for the successor being persisted in this transaction.
-            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access);
+            //
+            // The `?? 0` fallback is reached only where the parent was FRESH — no sibling was minted,
+            // so the family holds exactly this one live token. `forkThreshold()` is floored at 2, so
+            // no value that branch can produce ever clears it and the number never leaves this line:
+            // mutating the fallback is equivalent. Pest ignores per line and per mutator name, not per
+            // literal, so this necessarily covers the `+ 1` as well — that one is real, and is pinned
+            // by the exact sibling counts asserted in `RotateRefreshTokenTest`.
+            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access); // @pest-mutate-ignore: DecrementInteger,IncrementInteger
         });
 
         // ADVISORY, so it must not be able to cost the caller its session. Dispatched synchronously
@@ -291,7 +298,11 @@ class RotateRefreshToken
     private function pair(RotationOutcome $outcome): TokenPair
     {
         // Only ever called on an `issued` outcome, which is the one shape that carries both.
-        assert($outcome->access !== null && $outcome->refreshSecret !== null);
+        // `RotationOutcome::issued()` is the only constructor of that type and declares both
+        // non-nullable, so neither half can be false for any input: weakening the `&&` or removing the
+        // assertion outright is equivalent, and what is load-bearing here is the narrowing it gives
+        // the analyser rather than any runtime check.
+        assert($outcome->access !== null && $outcome->refreshSecret !== null); // @pest-mutate-ignore: BooleanAndToBooleanOr,RemoveFunctionCall
 
         return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
     }

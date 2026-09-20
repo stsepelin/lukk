@@ -220,6 +220,26 @@ class Lukk
     }
 
     /**
+     * Whether a user who enrolled a second factor must present it on this guard.
+     *
+     * Only an explicit off switches it off. `null` — a per-guard `env()` that is not set — survives
+     * `guardConfig()`'s merge and used to beat the global `true`, and read as `?? false` it handed an
+     * enrolled account a session on its password alone: a single-factor login for someone who opted
+     * into two (ASVS 5.0 6.3.4, "authentication strength enforced consistently"; 16.5.3, no fail-open).
+     * Unset is not a decision, so it fails closed. The cost of that is bounded to accounts that already
+     * enrolled, and the challenge route mounts on this same predicate, so none of them is stranded.
+     *
+     * `''` counts as unset: it is what `env()` returns for a blank `ADMIN_TWO_FACTOR=` line copied from
+     * an `.env.example`. `false`, `0` and `'0'` are somebody's answer, and switch it off.
+     */
+    public static function enforcesTwoFactor(?string $guard = null): bool
+    {
+        $flag = self::guardConfig($guard)['features']['two_factor'] ?? null;
+
+        return $flag === null || $flag === '' || (bool) $flag;
+    }
+
+    /**
      * The custom claims for a user, or `[]` when no hook is configured.
      *
      * Resolved by the calling ACTION, never by the issuer — the same rule abilities follow, and for

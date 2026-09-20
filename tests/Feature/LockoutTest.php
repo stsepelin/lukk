@@ -142,6 +142,28 @@ it('never locks on an empty subject, which would lock the whole application', fu
     expect(Lockout::query()->count())->toBe(0);
 });
 
+it('does not even resolve the subject while the feature is off', function () {
+    // The subject costs a provider lookup — that is the documented price of the feature, and an
+    // install that has not bought it must not be charged anyway. Resolving it unconditionally puts
+    // a second `users` SELECT on every login of every verify-only app, on the one route that takes
+    // unauthenticated traffic.
+    config(['lukk.features.lockout' => false]);
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    $lookups = 0;
+    DB::listen(function ($query) use (&$lookups) {
+        if (str_contains($query->sql, 'from "users" where "email"')) {
+            $lookups++;
+        }
+    });
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertOk();
+
+    // One, and it is the credential check itself.
+    expect($lookups)->toBe(1);
+});
+
 it('does not break login when the feature is on but the table was never published', function () {
     // The flag is one config line; the migration is a separate publish group. Without a guard this
     // 500s EVERY login, including with the correct password — a total auth outage from a typo.

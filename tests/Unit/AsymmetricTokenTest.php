@@ -8,6 +8,24 @@ use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
 use Lukk\Tokens\Jwt\KeyRing;
 
+/** A path that stats as a regular file and then refuses to open — a key file with the wrong owner. */
+class UnreadableKeyFile
+{
+    /** @var resource|null */
+    public $context;
+
+    public function stream_open(string $path, string $mode, int $options, ?string &$openedPath): bool
+    {
+        return false;
+    }
+
+    /** @return array{mode: int} */
+    public function url_stat(string $path, int $flags): array
+    {
+        return ['mode' => 0100000]; // S_IFREG, no permission bits.
+    }
+}
+
 function asymConfig(string $alg, array $public, mixed $private, string $activeKid, ?string $passphrase = null): array
 {
     return [
@@ -126,16 +144,89 @@ it('refuses to sign when the active kid is empty or absent from the public set',
         ->toThrow(InvalidArgumentException::class);
 });
 
-it('skips blank and unreadable public-key entries', function () {
+it('names the offending value when there is no active kid at all', function () {
+    // An absent `keys.active` — an unset `env('LUKK_ACTIVE_KID')` — reads as empty, and the message
+    // has to say which kid lukk went looking for: it is the operator's only clue as to whether the
+    // key is misnamed or simply missing.
+    $kp = rsaKeypair();
+    $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1');
+    unset($config['keys']['active']);
+
+    expect(fn () => (new KeyRing($config))->signingKey())
+        ->toThrow(InvalidArgumentException::class, "lukk.keys.active ('') must be non-empty");
+});
+
+it('refuses an empty active kid even when the public set holds an entry under the empty name', function () {
+    // `'public' => [env('LUKK_KID') => $pem]` with that variable unset registers the key under the
+    // EMPTY name, and `'active' => env('LUKK_ACTIVE_KID')` reads empty too. The pair then matches,
+    // so a presence check alone would sign and publish `"kid":""`. An unset active kid is unset —
+    // not the name of a key.
+    $kp = rsaKeypair();
+
+    expect(fn () => (new KeyRing(asymConfig('RS256', ['' => $kp['public']], $kp['private'], '')))->signingKey())
+        ->toThrow(InvalidArgumentException::class);
+});
+
+it('stamps a numeric kid as a string in both the signing header and the JWK set', function () {
+    // PHP turns a numeric array key into an int, so `'public' => [2024 => $pem]` invites the matching
+    // `'active' => 2024`. But `kid` is "a case-sensitive string" in RFC 7515 §4.1.4 and RFC 7517
+    // §4.5 alike: uncast it would be stamped and published as the JSON number 2024, which a consumer
+    // matching a header kid against a JWKS kid by string never lines up with.
+    $kp = rsaKeypair();
+    $config = asymConfig('RS256', [2024 => $kp['public']], $kp['private'], '2024');
+    $config['keys']['active'] = 2024; // the int the map key silently became; the helper types it string.
+    $ring = new KeyRing($config);
+
+    expect($ring->signingKey()['kid'])->toBe('2024')
+        ->and($ring->jwks()['keys'][0]['kid'])->toBe('2024');
+});
+
+it('skips blank, unset and unreadable public-key entries', function () {
+    // `null` is what an unset `env('LUKK_PUBLIC_KEY_2')` puts in the map — a kid that is configured
+    // in name only. It is skipped like the others, not handed on to the string functions below it.
     $kp = rsaKeypair();
     $ring = new KeyRing(asymConfig(
         'RS256',
-        ['k1' => $kp['public'], 'blank' => '', 'missing' => '@/no/such/key.pem'],
+        ['k1' => $kp['public'], 'blank' => '', 'unset' => null, 'missing' => '@/no/such/key.pem'],
         $kp['private'],
         'k1',
     ));
 
     expect(array_keys($ring->publicKeys()))->toBe(['k1']);
+});
+
+it('skips a public key that stats as a file but cannot be read', function () {
+    // The classic secrets-mount failure: the path is there, the ownership is wrong. `is_file()` says
+    // yes, so the guard admits it, and the read then fails. Both halves have to be handled for this to
+    // be the skip the method promises: the `(string)` cast turns `false` into `''` rather than a
+    // TypeError out of a `: string` method, and the `@` stops the E_WARNING that Laravel's error
+    // handler would otherwise raise as an ErrorException — a 500 on EVERY verify because one
+    // non-active kid is unreadable. Nothing is suppressed at THIS call site: if either half regresses,
+    // this test fails rather than quietly tolerating it.
+    if (! in_array('lukk-unreadable', stream_get_wrappers(), true)) {
+        stream_wrapper_register('lukk-unreadable', UnreadableKeyFile::class);
+    }
+
+    $kp = rsaKeypair();
+    $ring = new KeyRing(asymConfig(
+        'RS256',
+        ['k1' => $kp['public'], 'denied' => '@lukk-unreadable://key.pem'],
+        $kp['private'],
+        'k1',
+    ));
+
+    expect(array_keys($ring->publicKeys()))->toBe(['k1']);
+});
+
+it('tolerates a keys.public written as a bare PEM instead of a kid map', function () {
+    // `'public' => $pem`, the kid map forgotten. It is a misconfiguration either way, but iterating a
+    // string is a PHP warning — an ErrorException under Laravel's handler, so a 500 on every verify —
+    // where reading it as a one-entry set still verifies the tokens that same config signs.
+    $kp = rsaKeypair();
+    $config = asymConfig('RS256', [], $kp['private'], '0');
+    $config['keys']['public'] = $kp['public'];
+
+    expect(array_values((new KeyRing($config))->publicKeys()))->toBe([$kp['public']]);
 });
 
 it('memoizes verification keys so repeated verifies reuse one Key set', function () {
@@ -145,6 +236,24 @@ it('memoizes verification keys so repeated verifies reuse one Key set', function
     // Same instances on the second call → no per-verify Key alloc / PEM re-read.
     expect($ring->verificationKeys())->toBe($ring->verificationKeys())
         ->and($ring->publicKeys())->toBe($ring->publicKeys());
+});
+
+it('reads the public keys from disk once, not on every verify', function () {
+    // The same reason the signing key is memoized, on the hotter path: every verified request asks
+    // for the verification set, and unmemoized each one re-runs `is_file()` + `file_get_contents()`
+    // per configured kid. Config is immutable for the life of the process; the PEMs behind it are too.
+    $kp = rsaKeypair();
+    $path = tempnam(sys_get_temp_dir(), 'lukk-pub').'.pem';
+    file_put_contents($path, $kp['public']);
+
+    $ring = new KeyRing(asymConfig('RS256', ['k1' => '@'.$path], $kp['private'], 'k1'));
+    expect(array_keys($ring->publicKeys()))->toBe(['k1']);
+
+    // Delete the file: a second call that still knows the key proves it was not re-read from disk.
+    unlink($path);
+
+    expect(array_keys($ring->publicKeys()))->toBe(['k1'])
+        ->and($ring->jwks()['keys'])->toHaveCount(1);
 });
 
 it('memoizes the symmetric verification key', function () {
@@ -161,6 +270,29 @@ it('throws a clear error when the private-key passphrase is wrong', function () 
         ->toThrow(InvalidArgumentException::class);
 });
 
+it('treats a missing passphrase and an empty one alike, handing the signer the PEM itself', function (?string $passphrase) {
+    // `'passphrase' => env('LUKK_KEY_PASSPHRASE')` reads as null on an install that has none, and as
+    // `''` once someone writes the variable out empty. Both mean "there is nothing to decrypt", not
+    // "decrypt with the empty passphrase" — openssl accepts `''` against an unencrypted key, so
+    // taking that branch anyway would hand a decrypt failure, blaming a passphrase no one set, to
+    // the first install whose key IS encrypted.
+    $kp = rsaKeypair();
+    $ring = new KeyRing(asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1', $passphrase));
+
+    expect($ring->signingKey()['key'])->toBe($kp['private']);
+})->with([null, '']);
+
+it('accepts a passphrase written as a number in config', function () {
+    // An all-digit passphrase is an int in a PHP config array, and `openssl_pkey_get_private()` takes
+    // `?string`: under `strict_types` an uncast int is a TypeError, i.e. every mint dies on a
+    // passphrase that is perfectly correct.
+    $kp = rsaKeypair('12345');
+    $config = asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1');
+    $config['keys']['passphrase'] = 12345;
+
+    expect((new KeyRing($config))->signingKey()['key'])->toBeInstanceOf(OpenSSLAsymmetricKey::class);
+});
+
 it('builds an RSA JWK set and skips unparseable public keys', function () {
     $kp = rsaKeypair();
     $ring = new KeyRing(asymConfig('RS256', [
@@ -173,6 +305,17 @@ it('builds an RSA JWK set and skips unparseable public keys', function () {
     expect($jwks['keys'])->toHaveCount(1)
         ->and($jwks['keys'][0])->toMatchArray(['kid' => 'good', 'use' => 'sig', 'alg' => 'RS256', 'kty' => 'RSA'])
         ->and($jwks['keys'][0])->toHaveKeys(['n', 'e']);
+});
+
+it('encodes JWK members as unpadded base64url', function () {
+    // RFC 7515 App. C: the encoding here carries no `=` padding. A 2048-bit modulus is 256 bytes,
+    // which always base64s with two of them, so a consumer that decodes members strictly — or
+    // compares two JWKs byte for byte — chokes on every RSA key lukk publishes.
+    $kp = rsaKeypair();
+
+    $jwk = (new KeyRing(asymConfig('RS256', ['k1' => $kp['public']], $kp['private'], 'k1')))->jwks()['keys'][0];
+
+    expect($jwk['n'])->not->toContain('=');
 });
 
 it('builds an EC JWK for ES256', function () {

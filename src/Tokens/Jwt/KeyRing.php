@@ -114,7 +114,9 @@ class KeyRing
             $pem = $this->load($value);
 
             if ($pem !== '') {
-                $keys[(string) $kid] = $pem;
+                // The cast is for the declared `array<string, string>`, not for the runtime: PHP
+                // normalizes a numeric-string key straight back to the int it came from.
+                $keys[(string) $kid] = $pem; // @pest-mutate-ignore: RemoveStringCast
             }
         }
 
@@ -129,9 +131,11 @@ class KeyRing
      */
     public function jwks(): array
     {
-        // A symmetric algorithm publishes no public keys.
+        // A symmetric algorithm publishes no public keys. Stated here rather than left to fall out of
+        // the loop below — `toJwk()` answers non-null only for an `ES*`/`RS*` algorithm, which no
+        // `HS*` one can also be, so the fall-through would build the same empty set the long way.
         if ($this->isSymmetric()) {
-            return ['keys' => []];
+            return ['keys' => []]; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         $jwks = [];
@@ -261,7 +265,9 @@ class KeyRing
             return $this->privateKey;
         }
 
-        $pem = $this->load($this->config['keys']['private'] ?? '');
+        // Any default that is neither a PEM nor an existing path comes back from `load()` as '', so
+        // nothing but '' can be written here without changing what this reads.
+        $pem = $this->load($this->config['keys']['private'] ?? ''); // @pest-mutate-ignore: EmptyStringToNotEmpty
         $passphrase = $this->config['keys']['passphrase'] ?? null;
 
         if ($passphrase !== null && $passphrase !== '') {
@@ -286,8 +292,10 @@ class KeyRing
     {
         $value = (string) $value;
 
-        if ($value === '') {
-            return '';
+        // `is_file('')` is false, so the tail of this method answers '' for the empty string anyway —
+        // the fast path saves two calls, it does not decide anything.
+        if ($value === '') { // @pest-mutate-ignore: EmptyStringToNotEmpty
+            return ''; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         if (str_contains($value, '-----BEGIN')) {
@@ -296,6 +304,12 @@ class KeyRing
 
         $path = str_starts_with($value, '@') ? substr($value, 1) : $value;
 
-        return is_file($path) ? (string) file_get_contents($path) : '';
+        // `@` completes the skip this method promises. `is_file()` answers true for a file the process
+        // cannot OPEN — a secrets mount with the wrong ownership is the realistic case — and the warning
+        // `file_get_contents` then raises becomes an `ErrorException` under Laravel's handler: a 500 on
+        // every verify, rather than one kid quietly missing from the set. Skipping is the right answer
+        // here because the ACTIVE signing kid is checked separately and fails loudly (`signingKey()`);
+        // what reaches this line is a verification key, and the others must keep working.
+        return is_file($path) ? (string) @file_get_contents($path) : '';
     }
 }

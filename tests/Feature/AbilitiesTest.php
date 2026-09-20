@@ -1123,6 +1123,61 @@ it('fails a parameterless pinned gate loudly, for everyone', function () {
         ->toThrow(InvalidArgumentException::class, 'needs at least one ability');
 });
 
+it('reads a pinned gate declared with a space after the comma', function () {
+    // The router splits middleware parameters on the comma and trims nothing, so `a, b` arrives as
+    // ` b` — which is not a legal scope token, and would turn a harmless formatting habit in the
+    // routes file into a 500 for every caller of the route.
+    Route::middleware(['auth:api', RequirePinnedAbility::class.':'.Abilities::SESSIONS.', '.Abilities::ACCOUNT])
+        ->get('/_test/spaced-pinned', fn () => response()->json(['ok' => true]));
+
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy', Abilities::ACCOUNT]);
+
+    $this->withToken($pat->accessToken)->getJson('/_test/spaced-pinned')->assertOk();
+});
+
+it('keeps the pinned gate closed when a cached config predates the flag', function () {
+    // `config:cache` skips the deep merge, so an install cached before `gate_auth_routes` existed
+    // has no such key at all. The flag is an opt-OUT: reading its absence as "off" would hand every
+    // pinned token session management back on upgrade, with nothing in the config saying so.
+    config(['lukk.features' => array_diff_key(config('lukk.features'), ['gate_auth_routes' => true])]);
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $this->withToken($pat->accessToken)->deleteJson('/auth/sessions')->assertStatus(403);
+});
+
+it('tells a refused pinned token which ability would have sufficed', function () {
+    // The RFC 6750 challenge is what a generic client acts on, and the message is what the developer
+    // reads — both name the route's requirement, since that is the one thing to add to the pin.
+    Route::middleware(['auth:api', RequirePinnedAbility::class.':'.Abilities::SESSIONS.','.Abilities::ACCOUNT])
+        ->get('/_test/refused-pinned', fn () => response()->json(['ok' => true]));
+
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $response = $this->withToken($pat->accessToken)->getJson('/_test/refused-pinned')
+        ->assertStatus(403)
+        ->assertJsonPath('message', 'This token was issued with a fixed set of abilities, and none of them is lukk.sessions or lukk.account.');
+
+    expect($response->headers->get('WWW-Authenticate'))
+        ->toContain('error="insufficient_scope"')
+        ->toContain('scope="lukk.sessions lukk.account"');
+});
+
+it('announces a pinned token refused one of lukk\'s own routes', function () {
+    // A machine token reaching for logout-all or step-up is the same probing signal the application
+    // gates report — arguably a stronger one, since these are the routes that take an account over.
+    Event::fake([TokenAbilityDenied::class]);
+    $pat = start()(User::factory()->create()->getKey(), [], ['ci.deploy']);
+
+    $this->withToken($pat->accessToken)->deleteJson('/auth/sessions')->assertStatus(403);
+
+    Event::assertDispatched(TokenAbilityDenied::class, function (TokenAbilityDenied $e) use ($pat) {
+        // ANY-of, like `lukk.ability` — the pinned gate never requires all of its list.
+        return $e->required === [Abilities::SESSIONS]
+            && $e->requiresAll === false
+            && $e->familyId === claims($pat->accessToken)->fid;
+    });
+});
+
 it('refuses to mint a pinned session whose pin did not reach storage', function () {
     // The escalation this closes, reproduced end to end before the fix: a `useRefreshTokenModel`
     // subclass declaring `$fillable` silently dropped `scope` from the mass-assigned insert, so a
@@ -1177,6 +1232,113 @@ it('leaves no orphan refresh row when the permission store is down at login', fu
     Lukk::$abilitiesUsing = null;
 
     expect(RefreshToken::count())->toBe(0);
+});
+
+it('names the offending ability and spells out the whole rule it broke', function () {
+    // This message IS the behaviour of the reject branch. `fromArray` throws rather than dropping
+    // precisely so the bug surfaces at the first login in development instead of as a confusing 403
+    // somewhere else — and that only pays off if the text arriving in the application log says which
+    // name broke and which characters are illegal. Pinned in full: a diagnostic missing its middle
+    // clause, or with its clauses re-ordered, still "mentions a scope token" while telling a
+    // developer whose ability names come from a DB column nothing they can act on.
+    Lukk::abilitiesUsing(fn () => ['orders.read admin']);
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability "orders.read admin" is not a valid scope token (RFC 6749 §3.3): it may not '
+        .'contain a space, a double quote, a backslash, a control character or a non-ASCII byte. '
+        .'The scope claim is space-delimited, so a space would split one ability into several.',
+    );
+});
+
+it('refuses an ability with a TRAILING newline, not merely one with a newline inside it', function () {
+    // The anchor is `\z`, never `$`: PCRE's `$` also matches immediately before a FINAL newline, so
+    // `admin\n` passed a check whose entire job is that the mint grammar is no wider than the gate
+    // grammar. A verifier splitting `scope` on `\s+` — the common implementation, and the audience
+    // this registered claim exists for — then reads that token as the bare `admin`.
+    Lukk::abilitiesUsing(fn () => ["admin\n"]);
+
+    expect(fn () => User::factory()->create()->startSession())
+        ->toThrow(InvalidArgumentException::class, 'is not a valid scope token');
+});
+
+it('explains that a comma is the gate\'s separator, not merely that it is refused', function () {
+    // The reason is the whole point here: `,` is legal in RFC 6749, so a developer told only "no
+    // commas" reads it as lukk being arbitrary. It is refused because `lukk.ability:a,b` splits on
+    // it — such a name could be minted and never required, and any route that tried would widen
+    // itself to `orders` OR `read`.
+    Lukk::abilitiesUsing(fn () => ['orders,read']);
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability "orders,read" may not contain a comma: the ability middleware uses it to '
+        .'separate a list (`lukk.ability:a,b`), so such a name could never be required by a route '
+        .'and would widen any gate that tried.',
+    );
+});
+
+it('reports the size it refused, and what to do instead, when a grant overruns the claim', function () {
+    // The failure this replaces is a production-only lockout: past the proxy's header limit EVERY
+    // request 431s. A developer meeting it at issue time needs the two numbers to recognise it
+    // (how many abilities, how many bytes) and the remedy — collapse a family with a wildcard —
+    // or the obvious "fix" is to raise the limit until the proxy rejects it again.
+    $many = array_map(fn ($i) => 'ns'.$i.'.'.str_repeat('x', 100), range(10, 29));
+    Lukk::abilitiesUsing(fn () => $many);
+
+    // Note the 2119 bytes against 20 × 105: the separators count, because they ride in the header too.
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk granted 20 abilities totalling 2119 bytes, over the 2048-byte scope limit. The claim '
+        .'rides in an Authorization header, so an oversized grant makes every request fail at the '
+        .'proxy. Abilities are meant to be coarse — collapse a family with a wildcard (`orders.*`) '
+        .'rather than enumerating it.',
+    );
+});
+
+it('echoes a runaway ability name from the head, bounded, and marked as truncated', function () {
+    // The message is the one place in lukk where an ability string reaches the application log, and
+    // a callback returning the wrong thing — a model, a row, a whole result set — must not put all
+    // of it there. Bounded to 120 bytes of the JSON encoding, taken from the START (the namespace
+    // prefix is what identifies the name; the tail is the part that ran away) and marked so nobody
+    // debugs the truncation as the ability's real value.
+    Lukk::abilitiesUsing(fn () => [str_repeat('a', 200).' overflow']);
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability "'.str_repeat('a', 119).'…" (truncated) is not a valid scope token',
+    );
+});
+
+it('does not truncate a name that exactly fits, nor keep one a byte over', function () {
+    // Both sides of the 120-byte bound, because only these two inputs can tell it from 119 or 121.
+    // A name that fits must arrive whole — truncating it turns a legible diagnostic into a guess —
+    // and one byte more must not.
+    Lukk::abilitiesUsing(fn () => [' '.str_repeat('a', 117)]);   // 120 bytes encoded
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability " '.str_repeat('a', 117).'" is not a valid scope token',
+    );
+
+    Lukk::abilitiesUsing(fn () => [' '.str_repeat('a', 118)]);   // 121
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability " '.str_repeat('a', 118).'…" (truncated) is not a valid scope token',
+    );
+});
+
+it('still refuses a non-UTF-8 ability name diagnosably, instead of fataling on it', function () {
+    // A raw byte like `\xFF` is exactly what a name derived from a legacy latin-1 column looks like.
+    // It is refused by the charset rule — but `json_encode` cannot describe it and answers `false`,
+    // so the value is echoed as nothing rather than crashing the describe step: an InvalidArgument
+    // the caller can catch at first login, not a TypeError from inside lukk's error path.
+    Lukk::abilitiesUsing(fn () => ["orders\xFFread"]);
+
+    expect(fn () => User::factory()->create()->startSession())->toThrow(
+        InvalidArgumentException::class,
+        'lukk ability  is not a valid scope token (RFC 6749 §3.3)',
+    );
 });
 
 /** A consumer model that filters mass assignment — `useRefreshTokenModel` is a documented seam. */

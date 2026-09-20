@@ -168,6 +168,36 @@ it('revokes both families when the bearer and the refresh token name different s
         ->and(familyIsLive(familyOf($second->refreshToken)))->toBeFalse();
 });
 
+it('keeps reading the presented tokens after one that resolves to nothing', function () {
+    // "Log me out" names every credential the request carries, and they are read in order: the body
+    // first, then the cookie. Stopping at the first unproductive lookup would leave the session the
+    // cookie names alive behind the same 204 — a stale `refresh_token` in a body is enough to do it.
+    config(['lukk.cookie_mode' => true]);
+    $pair = User::factory()->create()->startSession();
+
+    $this->withCredentials()->withUnencryptedCookie('__Host-refresh', $pair->refreshToken)
+        ->postJson('/auth/logout', ['refresh_token' => 'not-a-real-token'])
+        ->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('takes a co-issuer identifier that arrives as a JSON number', function (string $claim, int $id) {
+    // JSON has one number type and nothing says `fid`/`jti` must be strings, so `{"jti": 42}` is a
+    // legal co-issued token. Both ids are handed on to `string`-typed seams — `RevokeSession` and the
+    // denylist — so an uncast number ends the request in a TypeError instead of ending the session.
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', $claim => $id,
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+
+    expect(app(Denylist::class)->has($claim, (string) $id))->toBeTrue()
+        ->and(verifier()->verify($token))->toBeNull();
+})->with([['fid', 4242], ['jti', 4243]]);
+
 it('revokes the whole family, successor included, for a token rotated inside the grace window', function () {
     // The grace window treats a recently rotated token as still belonging to the live session, so
     // presenting it to logout ends that session — the sibling minted by rotation with it. Not a theft
@@ -472,6 +502,27 @@ it('does not meter a co-issuer bearer that carries a jti, since the call denylis
     expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
 });
 
+it('does not meter a bearer that names a family but carries no jti', function () {
+    // The mirror image of the test above: a `fid` is enough to spend the bearer, so the `jti` branch
+    // must not be reached at all. Falling through to it reports a revoked bearer as unspent — and an
+    // ordinary logout then pays for its lookup out of a budget it was never supposed to touch.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+    $cfg = Lukk::guardConfig();
+    $familyOnly = fn (string $fid) => JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'fid' => $fid,
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $pair = User::factory()->create()->startSession();
+
+    $this->withToken($familyOnly(familyOf($pair->refreshToken)))
+        ->postJson('/auth/logout', ['refresh_token' => 'guess-1'])->assertNoContent();
+    $this->withToken($familyOnly('some-other-family'))
+        ->postJson('/auth/logout', ['refresh_token' => 'guess-2'])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
 it('still meters a valid bearer that cannot be revoked, since it could be replayed for more lookups', function () {
     // A co-issuer token with neither `fid` nor `jti` survives the call, so it must not buy free lookups.
     config(['lukk.rate_limits.refresh.max_attempts' => 1]);
@@ -609,6 +660,127 @@ it('counts every concurrent miss, and never answers differently for a hit and a 
         ->and(familyIsLive(familyOf($pair->refreshToken)))->toBeTrue();
 });
 
+it('sends a Retry-After the client can actually wait out', function () {
+    // The header is the bucket's real remaining time. A constant — which is what a `min` here would
+    // send, whatever was left — puts the client straight back into the 429 it was just given, and the
+    // refusal becomes a loop instead of a wait.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.refresh.decay_seconds' => 90]);
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertNoContent();
+
+    $first = $this->postJson('/auth/logout', ['refresh_token' => 'junk-2'])->assertStatus(429);
+
+    expect((int) $first->headers->get('Retry-After'))->toBe(90);
+
+    // And it shrinks with the window rather than overstating it: a client told to wait two seconds for
+    // a bucket with one left waits a second longer than it had to.
+    $this->travel(89)->seconds();
+
+    $last = $this->postJson('/auth/logout', ['refresh_token' => 'junk-3'])->assertStatus(429);
+
+    expect((int) $last->headers->get('Retry-After'))->toBe(1);
+});
+
+it('never sends Retry-After: 0, however little the limiter says is left', function () {
+    // `Retry-After: 0` is an instruction to retry immediately, which a client obeys — and is refused
+    // again. Laravel's array store resets the bucket in the same instant its timer reaches zero, so
+    // only a store with coarser expiry (or a RateLimiter swapped in through the container, as here)
+    // reaches this; the floor is what keeps the answer useful when one does.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1]);
+    app()->instance(RateLimiter::class, new class(app('cache')->store()) extends RateLimiter
+    {
+        public function tooManyAttempts($key, $maxAttempts)
+        {
+            return true;
+        }
+
+        public function availableIn($key)
+        {
+            return 0;
+        }
+    });
+
+    $throttled = $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertStatus(429);
+
+    expect((int) $throttled->headers->get('Retry-After'))->toBe(1);
+});
+
+it('decays the lookup bucket on the configured window, not a fixed minute', function () {
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.refresh.decay_seconds' => 10]);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertStatus(429);
+
+    $this->travel(10)->seconds();
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('falls back to a minute of decay when decay_seconds is missing from a cached config', function () {
+    // `config:cache` run before a key existed is never backfilled, so the fallbacks are the values a
+    // real install can end up running on. Too short and the budget stops being a budget; too long and
+    // a caller who shares an address with a prober waits longer than the refresh route would make it.
+    config(['lukk.rate_limits.refresh.max_attempts' => 1, 'lukk.rate_limits.refresh.decay_seconds' => null]);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertNoContent();
+
+    $this->travel(59)->seconds();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertStatus(429);
+
+    $this->travel(1)->seconds();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('falls back to a budget of thirty lookups when max_attempts is missing from a cached config', function () {
+    // The other half of the same stale-config case, and the dangerous direction: a missing rate-limit
+    // key read as 0 refuses every cookie logout in the install.
+    config(['lukk.rate_limits.refresh.max_attempts' => null]);
+    $end = fn (string $token) => app(EndSession::class)('', [$token], 'client');
+
+    foreach (range(1, 30) as $n) {
+        $end('miss-'.$n);
+    }
+
+    expect(fn () => $end('miss-31'))->toThrow(ThrottleRequestsException::class);
+});
+
+it('reads rate limits handed over as strings, as a config built straight from env() gives them', function () {
+    // `env('LUKK_REFRESH_DECAY', 60)` returns the .env value as a STRING; lukk's own config casts it,
+    // a published config that dropped the cast does not. Read uncast, `maxMisses()` breaks its own
+    // `int` return type and the decay reaches Carbon as a string — either way the route 500s, and a
+    // client that asked to be logged out is told nothing about whether it was.
+    config(['lukk.rate_limits.refresh.max_attempts' => '2', 'lukk.rate_limits.refresh.decay_seconds' => '30']);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('degrades to the built-in budget when rate_limits.refresh is not an array at all', function (mixed $refresh) {
+    // Same invariant read whole rather than key by key: nothing guarantees the shape of this block
+    // either, and a logout route that dies with "Cannot use object of type stdClass as array" is
+    // worse than one quietly running on the defaults.
+    config(['lukk.rate_limits.refresh' => $refresh]);
+    $pair = expiredSession(User::factory()->create());
+
+    $this->postJson('/auth/logout', ['refresh_token' => 'junk'])->assertNoContent();
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+})->with([
+    'a string' => 'not-an-array',
+    'an integer' => 7,
+    'an object' => (object) ['max_attempts' => 5],
+]);
+
 it('meters logout lookups per guard, independently of the refresh route', function () {
     // Its own bucket: junk /refresh calls must not stop a cookie logout from being looked up either.
     config(['lukk.rate_limits.refresh.max_attempts' => 1]);
@@ -702,6 +874,162 @@ it('keeps a co-issuer token denied for the rest of its life, not for a token sec
     $this->travel(120)->seconds();
 
     expect(app(Denylist::class)->has('jti', 'co-issued-ttl'))->toBeTrue()
+        ->and(verifier()->verify($token))->toBeNull();
+});
+
+it('reports reuse on the configured grace window, not a fixed thirty seconds', function () {
+    // The theft signal has to follow the window rotation actually runs on. An install that turned the
+    // grace window off would otherwise go on treating the first thirty seconds of every replay as
+    // ordinary concurrency, and report nothing for the one case it deliberately narrowed.
+    Event::fake([RefreshTokenReused::class]);
+    config(['lukk.grace_seconds' => 0]);
+    $pair = User::factory()->create()->startSession();
+    $fid = familyOf($pair->refreshToken);
+    rotate()($pair->refreshToken);
+
+    $this->travel(1)->seconds();
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    Event::assertDispatched(RefreshTokenReused::class, fn ($e) => $e->familyId === $fid && $e->reason === 'reuse');
+});
+
+it('falls back to a thirty-second grace window when grace_seconds is missing from a cached config', function () {
+    // The stale-cached-config case again, on the claim that matters most: a fallback shorter than
+    // rotation's own reports ordinary multi-tab concurrency as theft, and a longer one stays silent
+    // about a replay that rotation has already called reuse.
+    Event::fake([RefreshTokenReused::class]);
+    config(['lukk.grace_seconds' => null]);
+    $user = User::factory()->create();
+
+    $inGrace = $user->startSession();
+    rotate()($inGrace->refreshToken);
+    $pastGrace = $user->startSession();
+    rotate()($pastGrace->refreshToken);
+
+    $this->travel(30)->seconds();   // rotated_at + grace === now: still concurrency
+    $this->postJson('/auth/logout', ['refresh_token' => $inGrace->refreshToken])->assertNoContent();
+
+    Event::assertNotDispatched(RefreshTokenReused::class);
+
+    $this->travel(1)->seconds();
+    $this->postJson('/auth/logout', ['refresh_token' => $pastGrace->refreshToken])->assertNoContent();
+
+    Event::assertDispatched(RefreshTokenReused::class, fn ($e) => $e->familyId === familyOf($pastGrace->refreshToken));
+});
+
+it('reads a malformed grace_seconds as zero rather than ending the request', function () {
+    // `'grace_seconds' => env('LUKK_GRACE')` in a published config, with the variable present but
+    // empty, is the empty string — and `$rotatedAt + ''` is a TypeError. The family is revoked before
+    // the theft signal is worked out, so the client gets a 500 for a logout that did happen.
+    config(['lukk.grace_seconds' => '']);
+    $pair = User::factory()->create()->startSession();
+    rotate()($pair->refreshToken);
+
+    $this->travel(1)->seconds();
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('treats a token expiring this very second as live, exactly as rotation does', function () {
+    // Rotation calls a token expired at `expires_at < now`, so a token in its last second is not
+    // expired — it is consumed past grace, which is reuse. Answering `>` here instead would split the
+    // two decision orders on their shared boundary and lose the theft signal for that second.
+    Event::fake([RefreshTokenReused::class]);
+    config(['lukk.grace_seconds' => 0]);
+    $pair = User::factory()->create()->startSession();
+    $fid = familyOf($pair->refreshToken);
+    rotate()($pair->refreshToken);
+
+    RefreshToken::where('family_id', $fid)->update(['expires_at' => now()->addSecond()]);
+    $this->travel(1)->seconds();   // expires_at === now
+
+    $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
+
+    Event::assertDispatched(RefreshTokenReused::class, fn ($e) => $e->familyId === $fid && $e->reason === 'reuse');
+});
+
+/** A co-issued access token — no family, so logout has only its `jti` to kill it by. */
+function coIssued(string $jti, int|float $exp): string
+{
+    $cfg = Lukk::guardConfig();
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'jti' => $jti,
+        'iat' => time(), 'nbf' => time(), 'exp' => $exp,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('keeps the denylist entry for the whole window the verifier would still accept the token in', function () {
+    // The entry has to outlive `exp` by the configured clock-skew leeway, because that is how long the
+    // verifier goes on accepting the token: one expired by less than `leeway` is still a credential,
+    // and an entry sized on `exp` alone would hand those last seconds back to whoever holds it.
+    config(['lukk.leeway' => 20]);
+    $token = coIssued('inside-leeway', time() + 600);
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+
+    $this->travel(619)->seconds();
+
+    expect(verifier()->verify($token))->toBeNull();
+
+    // ...and not one second beyond it: the denylist is sized on recently-revoked sessions, so an entry
+    // that outlives the token it denies is a leak nothing ever reclaims.
+    $this->travel(1)->seconds();
+
+    expect(app(Denylist::class)->has('jti', 'inside-leeway'))->toBeFalse();
+});
+
+it('uses the verifier\'s own default leeway when the key is missing from a cached config', function () {
+    // A config cached before a key existed is never backfilled, so `leeway` can genuinely be absent.
+    // The fallback here has to be the one `FirebaseTokenVerifier` falls back to, or the entry and the
+    // acceptance window stop lining up — short by a second and the token verifies again.
+    config(['lukk.leeway' => null]);
+    $token = coIssued('default-leeway', time() + 600);
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+
+    $this->travel(604)->seconds();
+
+    expect(verifier()->verify($token))->toBeNull();
+
+    $this->travel(1)->seconds();
+
+    expect(app(Denylist::class)->has('jti', 'default-leeway'))->toBeFalse();
+});
+
+it('still denies a token with less than a whole second left', function () {
+    // A zero-second TTL is a `forget()` in Laravel's cache, not a revocation, so without the floor the
+    // token would go on verifying for the fraction of a second it has left — the one moment a client
+    // logging out is most likely to be holding it.
+    config(['lukk.leeway' => 0]);
+    $token = coIssued('last-fraction', time() + 600.5);
+
+    $this->travel(600)->seconds();   // whole seconds remaining: zero. The real clock says half of one.
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+
+    expect(verifier()->verify($token))->toBeNull();
+
+    // And the floor is a second, not more — the token is dead by then and the entry must be too.
+    $this->travel(1)->seconds();
+
+    expect(app(Denylist::class)->has('jti', 'last-fraction'))->toBeFalse();
+});
+
+it('takes a fractional exp and a fractional leeway without failing the request', function () {
+    // RFC 7519 §2 lets a NumericDate carry a fraction and firebase/php-jwt compares it numerically, so
+    // such a token authenticates; `leeway` is documented in seconds, not whole seconds. The denylist
+    // TTL is an `int`, so either fraction reaching it uncast ends the request in a TypeError — and the
+    // token the client just logged out with survives.
+    config(['lukk.leeway' => 5.5]);
+    $token = coIssued('fractional', time() + 600.5);
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+
+    expect(app(Denylist::class)->has('jti', 'fractional'))->toBeTrue()
         ->and(verifier()->verify($token))->toBeNull();
 });
 

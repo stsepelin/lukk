@@ -59,9 +59,13 @@ class RequirePinnedAbility
         // made `RequirePinnedAbility::class` with no argument an `ArgumentCountError` — a 500 for
         // ordinary users, not just the denied — and silently dropped everything after the first in
         // `…:a,b`, which is the same syntax meaning ANY-of one line above in the routes file.
-        $tokens = array_values(array_filter(array_map('trim', explode(',', implode(',', $abilities))), fn ($a) => $a !== ''));
+        //
+        // The empty filter and both `array_values` are tidiness, not decisions: `''` is never
+        // `ALWAYS`, and `fromArray` skips empty entries and re-indexes what it keeps, so `$required`
+        // comes out identical without them. Only the `trim` changes an answer.
+        $tokens = array_values(array_filter(array_map('trim', explode(',', implode(',', $abilities))), fn ($a) => $a !== '')); // @pest-mutate-ignore: UnwrapArrayFilter,UnwrapArrayValues,EmptyStringToNotEmpty
         $always = in_array(self::ALWAYS, $tokens, true);
-        $required = Abilities::fromArray(array_values(array_filter($tokens, fn ($a) => $a !== self::ALWAYS)))->all();
+        $required = Abilities::fromArray(array_values(array_filter($tokens, fn ($a) => $a !== self::ALWAYS)))->all(); // @pest-mutate-ignore: UnwrapArrayValues
 
         if ($required === []) {
             throw new InvalidArgumentException(
@@ -129,6 +133,8 @@ class RequirePinnedAbility
         // `TokenContext::$pinned` and the family id. Denying instead would break the supported
         // co-issuer topology — a token minted by another service sharing the secret carries no
         // `fid` — and that is a real deployment, whereas this is a contract violation.
-        return $token->familyId !== '' && $this->repository->familyIsPinned($token->familyId);
+        // The empty test saves the round trip; it does not decide anything — lukk never persists a
+        // family id of `''`, so asking the repository about one answers false by a slower route.
+        return $token->familyId !== '' && $this->repository->familyIsPinned($token->familyId); // @pest-mutate-ignore: EmptyStringToNotEmpty
     }
 }

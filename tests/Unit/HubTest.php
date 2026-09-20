@@ -49,3 +49,29 @@ it('short-circuits the denylist lookup for an empty id', function () {
 });
 
 class MyRefreshToken extends RefreshToken {}
+
+it('enforces two-factor unless somebody switched it off', function (mixed $flag, bool $enforced) {
+    // Fails closed on everything that is not an answer: an unset per-guard `env()` (null), a key a
+    // cached config predates, and a blank `.env` line (`''`). `1` and `'0'` are answers — a strict
+    // `=== true` would have read `1` as off.
+    config(['lukk.features.two_factor' => $flag]);
+
+    expect(Lukk::enforcesTwoFactor())->toBe($enforced);
+})->with([
+    'null' => [null, true],
+    'blank env line' => ['', true],
+    'true' => [true, true],
+    'one' => [1, true],
+    "string 'true'" => ['true', true],
+    'false' => [false, false],
+    'zero' => [0, false],
+    "string '0'" => ['0', false],
+]);
+
+it('enforces two-factor when the key is missing entirely', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['features']['two_factor']);
+    config()->set('lukk', $lukk);
+
+    expect(Lukk::enforcesTwoFactor())->toBeTrue();
+});

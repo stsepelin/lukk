@@ -42,9 +42,12 @@ class ChallengeToken
             'iss' => $this->config['issuer'] ?? null,
             'aud' => $this->config['audience'] ?? [],
             'sub' => (string) $userId,
-            'jti' => (string) Str::uuid(),
+            // Neither mutant below is observable: `JWT::encode()` JSON-encodes the payload and a
+            // `UuidInterface` serializes to the same string, and firebase/php-jwt falls back to `iat`
+            // for the not-before check when `nbf` is absent — and `iat` is this same `$now`.
+            'jti' => (string) Str::uuid(), // @pest-mutate-ignore: RemoveStringCast
             'iat' => $now,
-            'nbf' => $now,
+            'nbf' => $now, // @pest-mutate-ignore: RemoveArrayItem
             'exp' => $now + $ttl,
             // The GUARD that minted it. Isolation otherwise rested entirely on the consumer giving
             // each guard a distinct issuer/audience/secret — and under the minimal multi-guard shape
@@ -66,7 +69,7 @@ class ChallengeToken
 
         $signing = $this->keys->signingKey();
 
-        return JWT::encode($payload, $signing['key'], $this->config['algorithm'] ?? 'HS256', keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
+        return JWT::encode($payload, $signing['key'], (string) ($this->config['algorithm'] ?? 'HS256'), keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
     }
 
     /**
@@ -77,7 +80,8 @@ class ChallengeToken
     {
         $claims = $this->decode($kind, $token);
 
-        return $claims === null ? null : (string) $claims->sub;
+        // `decode()` admits only a string `sub`, so the cast is the declared type, not a conversion.
+        return $claims === null ? null : (string) $claims->sub; // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**
@@ -92,7 +96,8 @@ class ChallengeToken
     {
         $claims = $this->decode($kind, $token);
 
-        return $claims === null ? null : (isset($claims->fid) ? (string) $claims->fid : null);
+        // `decode()` admits only a string `fid`, so the cast is the declared type, not a conversion.
+        return $claims === null ? null : (isset($claims->fid) ? (string) $claims->fid : null); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**
@@ -109,12 +114,17 @@ class ChallengeToken
 
         // Cover the leeway window too: the token still decodes for `leeway`
         // seconds past exp, so the single-use marker must outlive that.
+        //
+        // `decode()` admits only a string `jti` and `sub` and an int `exp`, so the casts on them are the
+        // declared types, not conversions. Pest ignores per line and per mutator name, so the `(int)`
+        // annotation also covers the cast on `leeway` — that one is real (an uncast env string "2.5"
+        // makes the TTL a float and `revokeJti(int)` a TypeError) and is pinned in `ChallengeTokenTest`.
         $this->denylist->revokeJti(
-            (string) $claims->jti,
-            max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)),
+            (string) $claims->jti, // @pest-mutate-ignore: RemoveStringCast
+            max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)), // @pest-mutate-ignore: RemoveIntegerCast
         );
 
-        return (string) $claims->sub;
+        return (string) $claims->sub; // @pest-mutate-ignore: RemoveStringCast
     }
 
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
@@ -176,7 +186,8 @@ class ChallengeToken
             return null;
         }
 
-        $jti = (string) ($claims->jti ?? '');
+        // Already proven a string above, so neither the fallback nor the cast can change the value.
+        $jti = (string) ($claims->jti ?? ''); // @pest-mutate-ignore: RemoveStringCast,EmptyStringToNotEmpty
 
         if ($jti === '' || $this->denylist->has('jti', $jti)) {
             return null;
