@@ -188,7 +188,8 @@ Route::domain(config('lukk.domain'))
             Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');
             Route::post('two-factor', [TwoFactorAuthenticationController::class, 'store'])->middleware($confirmed);
             Route::delete('two-factor', [TwoFactorAuthenticationController::class, 'destroy'])->middleware($confirmed);
-            Route::post('two-factor/confirm', [ConfirmedTwoFactorAuthenticationController::class, 'store'])->middleware($confirmed);
+            Route::post('two-factor/confirm', [ConfirmedTwoFactorAuthenticationController::class, 'store'])
+                ->middleware([...$confirmed, 'throttle:lukk-2fa']);
             // Gated for a pinned token like the rest of `lukk.account`: it reports how many recovery
             // codes remain, which is reconnaissance for the same attack the write side protects.
             Route::get('two-factor/recovery-codes', [RecoveryCodeController::class, 'index'])

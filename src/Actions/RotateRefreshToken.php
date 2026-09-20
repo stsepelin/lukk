@@ -17,6 +17,7 @@ use Lukk\Support\RotationOutcome;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use RuntimeException;
+use Throwable;
 
 /**
  * The rotation policy (storage-agnostic). Decision tree, evaluated under a row
@@ -191,8 +192,18 @@ class RotateRefreshToken
             return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access);
         });
 
+        // ADVISORY, so it must not be able to cost the caller its session. Dispatched synchronously
+        // between the commit and the return, a throwing listener left the successor committed while the
+        // client got an exception — and past the grace window that is indistinguishable from a replay,
+        // so reuse detection revoked the whole family. That is the precise hole the mint was moved
+        // inside the transaction to close, reopened by an alerting hook returning 500. The listener's
+        // failure is reported and the rotation stands.
         if ($outcome->type === 'issued' && $outcome->siblings > $this->forkThreshold()) {
-            event(new RefreshFamilyForked($outcome->userId, $outcome->familyId, $outcome->siblings));
+            try {
+                event(new RefreshFamilyForked($outcome->userId, $outcome->familyId, $outcome->siblings));
+            } catch (Throwable $e) {
+                report($e);
+            }
         }
 
         return match ($outcome->type) {

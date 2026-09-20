@@ -104,10 +104,19 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 throw new PasskeyVerificationFailed('Not an attestation response.');
             }
 
+            // `authenticatorSelection` is what `CheckUserVerification` reads (WebAuthn L3 §7.1 step 17).
+            // Omitted, it defaults to null and the check returns early — so with the default
+            // `user_verification: required` a presence-only authenticator ENROLLED successfully and
+            // every later assertion was then refused, because `verifyAssertion` does pass the
+            // requirement. The visitor ended up holding a listed passkey that could never be used, and
+            // could lock themselves out by trusting that listing and pruning their other factors.
             $options = PublicKeyCredentialCreationOptions::create(
                 rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
                 user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''),
                 challenge: $this->decode($challenge),
+                authenticatorSelection: AuthenticatorSelectionCriteria::create(
+                    userVerification: (string) ($this->config['user_verification'] ?? 'required'),
+                ),
             );
 
             $record = $this->attestation->check($authenticatorResponse, $options, (string) $this->config['rp_id']);

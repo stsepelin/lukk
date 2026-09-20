@@ -44,7 +44,10 @@ class RequirePinnedAbility
      * upgrade with no re-consent, which is the precise outcome `Abilities::ACCOUNT_DELETE` exists to
      * prevent.
      *
-     * `!` is outside the RFC 6749 §3.3 scope charset, so this can never collide with a real ability.
+     * `!` IS a valid RFC 6749 §3.3 scope character (%x21, the first NQCHAR), so this could be minted as
+     * an ability — it just never is compared against one. It is matched only against route-declared
+     * parameters and is filtered out before `Abilities::fromArray`. Do not build a check of the form
+     * "does this token carry ALWAYS" on it without changing the sentinel first.
      */
     public const ALWAYS = '!always';
 

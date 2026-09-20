@@ -37,7 +37,7 @@ trait EmitsTokens
             'expires_in' => $pair->expiresIn,
         ]);
 
-        $response->withCookie(cookie()->make(
+        $response->withCookie((cookie()->make(
             name: RefreshCookie::name(),
             value: $pair->refreshToken,
             minutes: RefreshCookie::ttlMinutes(),
@@ -49,7 +49,13 @@ trait EmitsTokens
             // Strict, not Lax: the refresh call is an XHR, never a navigation, so
             // Strict costs nothing and blocks the cross-site CSRF that Lax allows.
             sameSite: 'Strict',
-        ));
+            // `->withDomain(null)` after the fact, NOT `domain: null` alone: `CookieJar` resolves the
+            // domain as `$domain ?: $this->domain`, and its default is seeded from `session.domain`. Both
+            // `null` and `''` are falsy, so an app setting `SESSION_DOMAIN=.example.com` — the standard
+            // recipe for sharing a web session across subdomains — had this cookie emitted WITH that
+            // Domain. A `__Host-`-prefixed cookie carrying Domain is discarded outright by the browser
+            // (rfc6265bis §4.1.3.2), so the visitor was silently signed out when the access token lapsed.
+        ))->withDomain(null));
 
         return $this->noStore($response);
     }
