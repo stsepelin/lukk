@@ -46,6 +46,13 @@ class TestCase extends Orchestra
 
     protected function getEnvironmentSetUp($app): void
     {
+        // bcrypt at its production cost (12) is ~233ms per hash, and this suite hashes constantly —
+        // every factory user, every sign-in, and the constant-time dummy check on the unknown-user
+        // path. At cost 4 the suite runs 20.6s → 4.8s, and MUTATION testing runs the covering tests
+        // once per mutant, so the nightly and the per-PR job shrink by the same factor. Nothing here
+        // asserts a cost or a duration; the production value is the consumer's own config.
+        $app['config']->set('hashing.bcrypt.rounds', 4);
+
         $app['config']->set('database.default', 'testing');
         $app['config']->set('database.connections.testing', [
             'driver' => 'sqlite',
