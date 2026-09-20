@@ -283,3 +283,10 @@ it('revokes a family in two statements, closing the PostgreSQL snapshot window',
     revokeSession()((string) RefreshToken::value('family_id'));
     expect($updates)->toHaveCount(2);
 });
+
+it('accepts the refresh token in a form-encoded body', function () {
+    // RFC 6749 §6 defines the refresh request as form-encoded; a JSON body is the other shape lukk reads.
+    $pair = User::factory()->create()->startSession();
+
+    $this->post('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertOk();
+});

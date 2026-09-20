@@ -81,6 +81,7 @@ class JwtGuard
         // lineage, so this half stays the mint-time comparison; with the window clamped past
         // `access_ttl + leeway`, the original access token has normally expired before it could be
         // late, so in practice this path claims and the refresh path is the one that revokes.
-        return (bool) Lukk::onGuard($this->guard, fn () => app(ClaimSession::class)($familyId, $issuedAt));
+        // `ClaimSession` returns a bool; `onGuard()` is typed `mixed`, so the cast states it.
+        return (bool) Lukk::onGuard($this->guard, fn () => app(ClaimSession::class)($familyId, $issuedAt)); // @pest-mutate-ignore: RemoveBooleanCast
     }
 }

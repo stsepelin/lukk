@@ -22,6 +22,7 @@ trait ResolvesCurrentFamily
 {
     private function currentFamilyId(Request $request, TokenVerifier $verifier): ?string
     {
+        // No bearer at all under `Lukk::actingAs()`, which authenticates the guard directly.
         $claims = $verifier->verify((string) $request->bearerToken());
 
         return $claims !== null && isset($claims->fid) ? (string) $claims->fid : null;

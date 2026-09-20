@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Lukk\Events\AccountReleased;
 use Lukk\Lockout\DatabaseLockoutRepository;
+use Lukk\Models\Lockout;
 
 uses()->group('lockout');
 
@@ -218,4 +219,9 @@ it('prunes a counter older than the one-day minimum', function () {
     DB::table('lukk_lockouts')->update(['updated_at' => Carbon::now()->subHours(36)]);
 
     expect($repo->prune(1))->toBe(1);
+});
+
+it('reads the attempt count as an integer whatever the driver hands back', function () {
+    // Some PDO drivers return integer columns as strings, and the cap is compared with `>=`.
+    expect((new Lockout)->forceFill(['attempts' => '3'])->attempts)->toBe(3);
 });

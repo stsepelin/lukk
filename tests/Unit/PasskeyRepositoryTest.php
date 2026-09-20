@@ -114,3 +114,8 @@ it('deletes only the owner’s credential', function () {
     expect(passkeys()->delete(7, 'mine'))->toBeTrue();
     expect(passkeys()->findByCredentialId('mine'))->toBeNull();
 });
+
+it('reads the sign count as an integer whatever the driver hands back', function () {
+    // Some PDO drivers return integer columns as strings.
+    expect((new Passkey)->forceFill(['sign_count' => '7'])->sign_count)->toBe(7);
+});

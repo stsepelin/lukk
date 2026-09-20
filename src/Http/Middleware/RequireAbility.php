@@ -27,7 +27,8 @@ class RequireAbility
 
     public function handle(Request $request, Closure $next, string ...$abilities): Response
     {
-        $this->authorize($request, array_values($abilities), requireAll: false);
+        // A variadic is already a list; `array_values` only states it.
+        $this->authorize($request, array_values($abilities), requireAll: false); // @pest-mutate-ignore: UnwrapArrayValues
 
         return $next($request);
     }

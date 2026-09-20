@@ -567,3 +567,19 @@ it('summarises nothing for an empty subject list or an unpublished table, like f
 
     expect($lockouts->summariesForSubjects(['1'], 'api'))->toBe([]);
 });
+
+it('answers a held step-up lock with its auto-release wait, and counts nothing more', function () {
+    // Checked before a failure is reserved, and read on the guard the lock was recorded under.
+    $this->freezeSecond();
+    app('translator')->addLines(['auth.throttle' => 'Wait :seconds s.'], 'en');
+    config(['lukk.lockout.release_after' => 600, 'lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    $access = $user->startSession()->accessToken;
+    Lockout::create(['purpose' => 'confirm', 'subject' => (string) $user->getKey(), 'guard' => 'api', 'attempts' => 3, 'locked_at' => now()]);
+
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])
+        ->assertStatus(423)
+        ->assertJsonValidationErrors(['password' => 'Wait 600 s.']);
+
+    expect(Lockout::query()->value('attempts'))->toBe(3);
+});

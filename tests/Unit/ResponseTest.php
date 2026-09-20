@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Request;
+use Lukk\Http\Responses\EmailVerificationResponse;
 use Lukk\Http\Responses\LoginResponse;
 use Lukk\Http\Responses\LogoutResponse;
 use Lukk\Lukk;
@@ -143,4 +144,32 @@ it('clears the refresh cookie on logout per the guard\'s own cookie_mode', funct
 
     expect(Lukk::onGuard('admin', fn () => (new LogoutResponse)->toResponse(Request::create('/admin/auth/logout', 'POST')))
         ->headers->getCookies())->toBeEmpty();
+});
+
+it('answers a sign-in in the body when cookie_mode is unset — body mode is the default', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['cookie_mode']);
+    config()->set('lukk', $lukk);
+
+    $response = emit(new TokenPair('access.jwt', 'opaque-refresh', 900));
+
+    expect($response->headers->getCookies())->toBeEmpty()
+        ->and($response->getData(true)['refresh_token'] ?? null)->toBe('opaque-refresh');
+});
+
+it('answers a verified browser with 204 when no frontend URL is configured at all', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['email_verification']['frontend_url']);
+    config()->set('lukk', $lukk);
+
+    $response = (new EmailVerificationResponse)->toResponse(Request::create('/auth/email/verify/1/h'));
+
+    expect($response->getStatusCode())->toBe(204);
+});
+
+it('answers a verified browser with 204 when the frontend URL is set to false', function () {
+    // `LUKK_VERIFY_URL=false` in .env reaches config as the boolean false.
+    config(['lukk.email_verification.frontend_url' => false]);
+
+    expect((new EmailVerificationResponse)->toResponse(Request::create('/auth/email/verify/1/h'))->getStatusCode())->toBe(204);
 });

@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\FinishPasskeyLogin;
+use Lukk\Actions\StartPasskeyRegistration;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
@@ -462,4 +463,25 @@ it('registers a credential id of exactly 255 characters, the column width, and r
     registerPasskey(str_repeat('b', 256))
         ->assertStatus(422)
         ->assertJsonValidationErrors(['credential' => 'The passkey could not be registered.']);
+});
+
+it('names the new credential after the email, or the id when there is none', function () {
+    $user = User::factory()->create(['email' => 'ada@example.test']);
+    $access = $user->startSession()->accessToken;
+    $this->withToken($access)->withHeaders(confirmedHeaders($access))
+        ->postJson('/auth/passkeys/registration-options')
+        ->assertJsonPath('user', 'ada@example.test');
+
+    $anonymous = new class extends User
+    {
+        protected $table = 'users';
+
+        public function getEmailAttribute(): ?string
+        {
+            return null;
+        }
+    };
+    $model = $anonymous::query()->findOrFail($user->getKey());
+
+    expect(app(StartPasskeyRegistration::class)($model)['user'])->toBe((string) $user->getKey());
 });

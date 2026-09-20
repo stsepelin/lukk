@@ -28,3 +28,10 @@ it('prunes expired tokens but keeps active and revoked-but-unexpired ones', func
     expect(RefreshToken::where('user_id', 2)->exists())->toBeTrue();
     expect(RefreshToken::where('user_id', 3)->exists())->toBeTrue();
 });
+
+it('reports each sweep it ran', function () {
+    command('lukk:prune')
+        ->expectsOutputToContain('Pruned 0 lockout counter(s).')
+        ->expectsOutputToContain('Pruned 0 orphaned passkey(s).')
+        ->assertSuccessful();
+});

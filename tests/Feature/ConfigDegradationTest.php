@@ -307,6 +307,7 @@ it('leaves no guarded config read unexercised', function () {
         'lockout' => 'optional feature; LockoutTest',
         'email_verification.expire' => 'optional feature; EmailVerificationTest',
         'email_verification.block_unverified_login' => 'optional feature; EmailVerificationTest',
+        'email_verification.frontend_url' => 'optional feature; absent is covered by the cast as well; see ResponseTest',
         'password_reset.broker' => 'optional feature; PasswordResetTest',
         'password_reset.frontend_url' => 'optional feature; PasswordResetTest',
         'password_reset.revoke_sessions' => 'optional feature; PasswordResetTest',

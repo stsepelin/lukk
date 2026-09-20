@@ -12,7 +12,9 @@ class EmailVerificationResponse implements EmailVerificationResponseContract
 {
     public function toResponse($request): Response|RedirectResponse
     {
-        $target = (string) config('lukk.email_verification.frontend_url', '');
+        // `??`, like every lukk config read: a missing key means "no frontend URL".
+        // The cast is load-bearing too: `LUKK_VERIFY_URL=false` reaches here as the boolean false.
+        $target = (string) (config('lukk.email_verification.frontend_url') ?? '');
 
         // A JSON/SPA client (Accept: application/json), or no frontend URL configured → 204.
         // A plain browser click → bounce to the SPA verify page so the user leaves the raw API

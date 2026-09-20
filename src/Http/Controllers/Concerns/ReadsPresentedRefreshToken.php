@@ -32,6 +32,7 @@ trait ReadsPresentedRefreshToken
         // An array would raise "Array to string conversion" and hash the literal "Array".
         $cookie = $request->cookie(RefreshCookie::name());
 
-        return is_string($presented) ? $presented : (is_string($cookie) ? $cookie : '');
+        // No token resolves under any placeholder, so the '' only states the type.
+        return is_string($presented) ? $presented : (is_string($cookie) ? $cookie : ''); // @pest-mutate-ignore: EmptyStringToNotEmpty
     }
 }

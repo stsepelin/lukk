@@ -276,3 +276,33 @@ it('binds to a co-issuer session whose fid arrives as a JSON number', function (
         ->postJson('/_test/sensitive')
         ->assertOk();
 });
+
+/** How long a confirmation token is good for, from its own claims. */
+function confirmationLifetime(string $token): int
+{
+    $claims = json_decode((string) base64_decode(strtr(explode('.', $token)[1], '-_', '+/')), true);
+
+    return $claims['exp'] - $claims['iat'];
+}
+
+it('lives for confirm.ttl, read from env as a string, and five minutes when unset', function () {
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    config(['lukk.confirm.ttl' => '120']);
+    expect(confirmationLifetime(confirmedHeaders($access)['X-Lukk-Confirmation']))->toBe(120);
+    app('auth')->forgetGuards();
+
+    config(['lukk.confirm.ttl' => null]);
+    expect(confirmationLifetime(confirmedHeaders($access)['X-Lukk-Confirmation']))->toBe(300);
+});
+
+it('answers a confirmation attempt with no password, or a non-string one, with 422', function (array $payload) {
+    // The route reads the field directly; anything but a string must still read as a wrong password.
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    $this->withToken($access)->postJson('/auth/confirm-password', $payload)->assertStatus(422);
+})->with([
+    'missing' => [[]],
+    'null' => [['password' => null]],
+    'a number' => [['password' => 1234]],
+]);
