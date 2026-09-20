@@ -25,7 +25,10 @@ jobs:
   changed:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A PR touching ten classes generates ~800 mutants, and a 4-vCPU runner spends ~1.6s on each —
+    # about 22 minutes. At 20 the job was cancelled mid-run, which reads as a failure and tells
+    # nobody anything.
+    timeout-minutes: 45
     name: Mutation score (changed files)
     steps:
       - name: Checkout
