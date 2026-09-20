@@ -6,6 +6,7 @@ namespace Lukk\Http\Controllers\Concerns;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Lukk;
@@ -40,6 +41,8 @@ trait DeterminesSessionOutcome
             // value whenever the key exists — and a TTL of 0 mints a challenge whose `exp` equals
             // its `iat`, so no one with 2FA on could ever finish signing in.
             '2fa', $user->getAuthIdentifier(), (int) (config('lukk.two_factor.challenge_ttl') ?? 300),
+            // The password this challenge stands in for.
+            passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($user),
         )]);
     }
 
@@ -49,8 +52,9 @@ trait DeterminesSessionOutcome
         // on was silently not gated.
         $config = Lukk::guardConfig();
 
-        return (bool) ($config['features']['email_verification'] ?? false)
-            && (bool) ($config['email_verification']['block_unverified_login'] ?? false)
+        // The `(bool)` casts state the type: `&&` coerces its operands to bool the same way.
+        return (bool) ($config['features']['email_verification'] ?? false) // @pest-mutate-ignore: RemoveBooleanCast
+            && (bool) ($config['email_verification']['block_unverified_login'] ?? false) // @pest-mutate-ignore: RemoveBooleanCast
             && $user instanceof MustVerifyEmail
             && ! $user->hasVerifiedEmail();
     }

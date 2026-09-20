@@ -24,6 +24,7 @@ use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ChangePassword;
 use Lukk\Actions\ClaimSession;
 use Lukk\Actions\ConfirmPassword;
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Actions\EndSession;
@@ -339,6 +340,8 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
+        $this->app->bind(ConfirmPasswordUnchanged::class, fn ($app) => new ConfirmPasswordUnchanged(
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(RefreshTokenRepository::class), $app->make(RevokeSession::class)));
         $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
             $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));

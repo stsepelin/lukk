@@ -304,3 +304,17 @@ it('burns a challenge whose leeway reached config as an un-cast environment stri
     expect($tokens->consume('2fa', $token))->toBe('42')
         ->and($tokens->consume('2fa', $token))->toBeNull();
 });
+
+it('carries the password fingerprint it was issued with, and only a string one', function () {
+    $token = challenge()->issue('2fa', 7, 300, passwordFingerprint: 'fp-123');
+    expect(challenge()->passwordFingerprintOf('2fa', $token))->toBe('fp-123')
+        ->and(challenge()->passwordFingerprintOf('2fa', challenge()->issue('2fa', 7, 300)))->toBeNull()
+        ->and(challenge()->passwordFingerprintOf('2fa', 'garbage'))->toBeNull();
+
+    // RFC 8725 §3.11, as for `sub` and `fid`: a co-issuer's non-string claim is an invalid challenge, not a 500.
+    foreach ([['x'], 42, true] as $bad) {
+        $forged = coIssuedChallenge(['pwf' => $bad]);
+        expect(challenge()->verify('2fa', $forged))->toBeNull()
+            ->and(challenge()->passwordFingerprintOf('2fa', $forged))->toBeNull();
+    }
+});

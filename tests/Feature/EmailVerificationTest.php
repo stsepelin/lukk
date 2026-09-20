@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 use Illuminate\Auth\Events\Verified;
 use Illuminate\Auth\Notifications\VerifyEmail;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\URL;
+use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('email-verification');
@@ -155,4 +158,32 @@ it('allows a verified user to log in when block_unverified_login is on', functio
     $this->postJson('/auth/login', ['email' => 'v@y.com', 'password' => 'password'])
         ->assertOk()
         ->assertJsonStructure(['access_token']);
+});
+
+it('does not gate login on a verification setting that is missing, in either half', function (string $missing) {
+    // Both switches are opt-in: a config cached before either key existed must not start refusing
+    // unverified users on upgrade.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $lukk = (array) config('lukk');
+    Arr::forget($lukk, $missing);
+    config()->set('lukk', $lukk);
+    User::factory()->create(['email' => 'm@y.com', 'email_verified_at' => null]);
+
+    $this->postJson('/auth/login', ['email' => 'm@y.com', 'password' => 'password'])->assertOk();
+})->with(['features.email_verification', 'email_verification.block_unverified_login']);
+
+it('takes a challenge lifetime set from the environment, where it arrives as a string', function () {
+    // `env()` hands back "600", and `ChallengeToken::issue()` takes an int — under strict_types, a
+    // TypeError on every two-factor sign-in without the cast.
+    config(['lukk.two_factor.challenge_ttl' => '600']);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString(app(TwoFactorProvider::class)->generateSecret()),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk()->json('challenge_token');
+    $claims = json_decode((string) base64_decode(strtr(explode('.', (string) $challenge)[1], '-_', '+/')), true);
+
+    expect($claims['exp'] - $claims['iat'])->toBe(600);
 });

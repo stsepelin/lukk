@@ -77,16 +77,17 @@ interface RefreshTokenRepository
     public function revokeFamily(string $familyId): void;
 
     /**
-     * Revoke every active family for the user; return the affected family ids
-     * (so the caller can denylist their access tokens).
+     * Revoke every family live for the user when this call READ them; return exactly those ids (so the
+     * caller can denylist their access tokens). Revoke by those ids, never by the user again: a session
+     * committed after the read would be revoked but neither returned nor denylisted. `$before` receives
+     * the same ids, before anything is revoked.
      *
      * @return array<int,string>
      */
     public function revokeUserFamilies(int|string $userId, ?callable $before = null): array;
 
     /**
-     * Revoke every active family for the user except the given one (logout
-     * others); return the affected family ids.
+     * As {@see revokeUserFamilies()}, except the given family (logout others).
      *
      * @return array<int,string>
      */

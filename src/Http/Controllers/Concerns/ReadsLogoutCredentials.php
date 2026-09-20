@@ -54,12 +54,17 @@ trait ReadsLogoutCredentials
             $tokens[] = $cookie;
         }
 
-        return ['tokens' => array_values(array_unique($tokens)), 'cookie' => $cookieUsable];
+        // `array_values` cannot change the keys here: there are at most two tokens, and `array_unique` keeps the
+        // first of a pair, so no gap is ever left. It states the list shape the return type promises.
+        return ['tokens' => array_values(array_unique($tokens)), 'cookie' => $cookieUsable]; // @pest-mutate-ignore: UnwrapArrayValues
     }
 
     private function hasJsonBody(Request $request): bool
     {
-        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0];
+        // The cast is load-bearing: under `strict_types` a missing header (null) makes `explode` throw a TypeError,
+        // so a body-less logout — a BFF's, a `sendBeacon` — would answer 500. The limit is not: element [0] is the
+        // same at any limit above 1.
+        $essence = explode(';', (string) $request->headers->get('Content-Type'), 2)[0]; // @pest-mutate-ignore: IncrementInteger
 
         return strtolower(trim($essence)) === 'application/json';
     }
