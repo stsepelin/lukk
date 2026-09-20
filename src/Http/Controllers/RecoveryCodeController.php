@@ -33,7 +33,7 @@ class RecoveryCodeController
 
         return $this->noStore(response()->json([
             'remaining' => $user->recoveryCodesRemaining(),
-            'total' => (int) config('lukk.two_factor.recovery_codes', 8),
+            'total' => (int) (config('lukk.two_factor.recovery_codes') ?? 8),
         ]));
     }
 

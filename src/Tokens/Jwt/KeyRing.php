@@ -35,7 +35,20 @@ class KeyRing
 
     public function isSymmetric(): bool
     {
-        return str_starts_with($this->config['algorithm'], 'HS');
+        return str_starts_with($this->algorithm(), 'HS');
+    }
+
+    /**
+     * The configured algorithm, defaulted.
+     *
+     * Read in one place because every other read pins it onto a `Key` or a JWK, and an unset
+     * per-guard `'algorithm' => env('LUKK_ADMIN_ALGORITHM')` survives the config merge as an
+     * explicit null. Null here is not a degraded HS256 — `isSymmetric()` would answer false and the
+     * install would try to sign with a keypair it does not have.
+     */
+    private function algorithm(): string
+    {
+        return (string) ($this->config['algorithm'] ?? 'HS256');
     }
 
     /**
@@ -46,14 +59,14 @@ class KeyRing
     public function signingKey(): array
     {
         if ($this->isSymmetric()) {
-            return ['key' => (string) $this->config['secret'], 'kid' => null];
+            return ['key' => (string) ($this->config['secret'] ?? ''), 'kid' => null];
         }
 
         // Fail loud: signing with a kid absent from the public set mints tokens nothing can verify.
         $kid = (string) ($this->config['keys']['active'] ?? '');
 
         if ($kid === '' || ! array_key_exists($kid, $this->publicKeys())) {
-            throw new InvalidArgumentException("lukk.keys.active ('{$kid}') must be non-empty and present in lukk.keys.public to sign {$this->config['algorithm']} tokens.");
+            throw new InvalidArgumentException("lukk.keys.active ('{$kid}') must be non-empty and present in lukk.keys.public to sign {$this->algorithm()} tokens.");
         }
 
         return ['key' => $this->privateKey(), 'kid' => $kid];
@@ -72,13 +85,13 @@ class KeyRing
         }
 
         if ($this->isSymmetric()) {
-            return $this->verificationKeys = new Key((string) $this->config['secret'], $this->config['algorithm']);
+            return $this->verificationKeys = new Key((string) ($this->config['secret'] ?? ''), $this->algorithm());
         }
 
         $keys = [];
 
         foreach ($this->publicKeys() as $kid => $pem) {
-            $keys[$kid] = new Key($pem, $this->config['algorithm']);
+            $keys[$kid] = new Key($pem, $this->algorithm());
         }
 
         return $this->verificationKeys = $keys;
@@ -127,7 +140,7 @@ class KeyRing
             $jwk = $this->toJwk($pem);
 
             if ($jwk !== null) {
-                $jwks[] = ['kid' => (string) $kid, 'use' => 'sig', 'alg' => $this->config['algorithm']] + $jwk;
+                $jwks[] = ['kid' => (string) $kid, 'use' => 'sig', 'alg' => $this->algorithm()] + $jwk;
             }
         }
 
@@ -166,7 +179,7 @@ class KeyRing
         // it. `null` is this method's existing "malformed key" contract.
         $type = $details['type'] ?? null;
 
-        if ($type === OPENSSL_KEYTYPE_EC && str_starts_with($this->config['algorithm'], 'ES')) {
+        if ($type === OPENSSL_KEYTYPE_EC && str_starts_with($this->algorithm(), 'ES')) {
             // [JWK curve name, field size in bytes]. openssl strips leading zero bytes
             // from x/y, but RFC 7518 §6.2.1.2 requires each coordinate to be the full
             // field length, left-padded — else a ~1/256 short coordinate breaks strict
@@ -195,7 +208,7 @@ class KeyRing
             ];
         }
 
-        if ($type === OPENSSL_KEYTYPE_RSA && str_starts_with($this->config['algorithm'], 'RS')) {
+        if ($type === OPENSSL_KEYTYPE_RSA && str_starts_with($this->algorithm(), 'RS')) {
             /** @var array{n?: string, e?: string} $rsa */
             $rsa = $details['rsa'] ?? [];
 

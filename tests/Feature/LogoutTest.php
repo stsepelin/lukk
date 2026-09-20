@@ -324,6 +324,19 @@ it('honours the cookie on a same-origin request that is not JSON', function () {
         ->and(collect($response->headers->getCookies())->map->getName()->all())->toBe(['__Host-refresh']);
 });
 
+it('honours the cookie on a request with no initiator — the visitor\'s own navigation', function () {
+    // `Sec-Fetch-Site: none` is a typed URL, a bookmark, a link opened in a new tab: there is no
+    // originating site, so there is no cross-site page to be acting on the visitor's behalf. It is in
+    // the allowlist and was documented as accepted; removing it from the list left the suite green.
+    config(['lukk.cookie_mode' => true]);
+    $pair = User::factory()->create()->startSession();
+
+    $response = formLogout($pair->refreshToken, ['Sec-Fetch-Site' => 'none'])->assertNoContent();
+
+    expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse()
+        ->and(collect($response->headers->getCookies())->map->getName()->all())->toBe(['__Host-refresh']);
+});
+
 it('reads a body refresh_token only from a JSON body', function () {
     // An attacker cannot know the token, but one rule for every credential source is easier to keep.
     $pair = User::factory()->create()->startSession();
@@ -607,6 +620,30 @@ it('meters logout lookups per guard, independently of the refresh route', functi
     $this->postJson('/auth/logout', ['refresh_token' => $pair->refreshToken])->assertNoContent();
 
     expect(familyIsLive(familyOf($pair->refreshToken)))->toBeFalse();
+});
+
+it('meters each guard separately — one guard\'s exhausted budget does not refuse another\'s logouts', function () {
+    // The per-guard half of the key. It was pinned only by a literal-string assertion on the bucket
+    // name, which says nothing about behaviour and breaks on any reformat: dropping `$this->guard`
+    // from `throttleKey()` left every behavioural test in this file green, while in a multi-guard
+    // install a burst of junk logouts aimed at one mount would then refuse them on every other.
+    config(['lukk.rate_limits.refresh.max_attempts' => 2, 'lukk.guards.admin' => ['path' => 'admin/auth']]);
+    $end = fn (string $token) => app(EndSession::class)('', [$token], 'client');
+
+    // Spend the default guard's whole miss budget.
+    $end('junk-one');
+    $end('junk-two');
+    expect(fn () => $end('junk-three'))->toThrow(ThrottleRequestsException::class);
+
+    // The admin guard's budget is untouched: two of its own before it refuses, and the default guard
+    // is still refusing throughout. Sharing one bucket would have refused the very first of these.
+    Lukk::onGuard('admin', function () use ($end) {
+        $end('junk-one');
+        $end('junk-two');
+        expect(fn () => $end('junk-three'))->toThrow(ThrottleRequestsException::class);
+    });
+
+    expect(fn () => $end('junk-four'))->toThrow(ThrottleRequestsException::class);
 });
 
 // ---------------------------------------------------------------------------

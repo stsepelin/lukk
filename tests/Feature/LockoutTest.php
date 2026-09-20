@@ -516,6 +516,11 @@ it('summarises nothing for an empty subject list or an unpublished table, like f
     // key (it would name every unkeyable caller's shared bucket), and a missing table is no data.
     $lockouts = app(LockoutRepository::class);
     $lockouts->recordFailure('confirm', '1', 'api');
+    // A row that IS keyed on the empty sentinel, written PAST the repository — `recordFailure` refuses
+    // one, which is exactly why the read-side filter is defence in depth against a row some other
+    // writer (or an older release) left behind. Without such a row in the table the filter matches
+    // nothing whether it is there or not, and deleting it leaves the suite green.
+    Lockout::create(['purpose' => 'confirm', 'subject' => '', 'guard' => 'api', 'attempts' => 3]);
 
     expect($lockouts->summariesForSubjects(['', ''], 'api'))->toBe([])
         ->and($lockouts->summariesForSubjects(['1'], 'api'))->toHaveCount(1);

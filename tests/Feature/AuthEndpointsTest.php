@@ -2,11 +2,13 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
 use Lukk\Events\RefreshTokenReused;
+use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Tests\Fixtures\User;
 
@@ -201,6 +203,26 @@ it('keeps the caller\'s refresh cookie when revoking other sessions in cookie mo
     $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
     $this->withCredentials()->withUnencryptedCookie('__Host-refresh', $current->refreshToken)
         ->postJson('/auth/refresh')->assertOk();
+});
+
+it('revokes nothing for a bearer that names no session — it would otherwise mean "every one"', function () {
+    // A co-issuer sharing the secret mints tokens with no `fid`. "Others" is defined relative to THIS
+    // session, and with no family to except, the call has no way to spare the caller's own: forcing the
+    // guard true hands `RevokeOtherSessions` an empty family id, and every session goes — including the
+    // one making the request. The route answers 204 either way, so only the sessions tell them apart.
+    $user = User::factory()->create();
+    $kept = $user->startSession();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $this->withToken($token)->deleteJson('/auth/sessions/others')->assertNoContent();
+
+    expect(RefreshToken::whereNull('revoked_at')->count())->toBe(1);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/refresh', ['refresh_token' => $kept->refreshToken])->assertOk();
 });
 
 it('answers revoke-other-sessions with a bare 204 in body mode too', function () {

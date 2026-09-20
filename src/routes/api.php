@@ -135,7 +135,10 @@ Route::domain(config('lukk.domain'))
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
         $sessionRoutes((string) config('lukk.guard', 'api'));
 
-        if (config('lukk.features.account_deletion')) {
+        // `?? true` for the same reason `logout_all` has one: absent is a stale cached config, not a
+        // decision to switch the feature off, and a silently unmounted route is a 404 on a documented
+        // endpoint with nothing in the log to explain it.
+        if ((bool) (config('lukk.features.account_deletion') ?? true)) {
             // Step-up confirmed AND gated on its own ability, which are two different controls doing
             // two different jobs.
             //
@@ -170,7 +173,7 @@ Route::domain(config('lukk.domain'))
             Route::delete('account', [AccountController::class, 'destroy'])->middleware([...$confirmed, $erasure]);
         }
 
-        if (config('lukk.features.change_password')) {
+        if ((bool) (config('lukk.features.change_password') ?? true)) {
             // Shares the confirm budget deliberately: it re-verifies the same secret, and two
             // independent allowances for guessing one password is just a larger allowance.
             //

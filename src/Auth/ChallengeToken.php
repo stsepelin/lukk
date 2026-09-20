@@ -39,8 +39,8 @@ class ChallengeToken
         $now = now()->getTimestamp();
 
         $payload = [
-            'iss' => $this->config['issuer'],
-            'aud' => $this->config['audience'],
+            'iss' => $this->config['issuer'] ?? null,
+            'aud' => $this->config['audience'] ?? [],
             'sub' => (string) $userId,
             'jti' => (string) Str::uuid(),
             'iat' => $now,
@@ -66,7 +66,7 @@ class ChallengeToken
 
         $signing = $this->keys->signingKey();
 
-        return JWT::encode($payload, $signing['key'], $this->config['algorithm'], keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
+        return JWT::encode($payload, $signing['key'], $this->config['algorithm'] ?? 'HS256', keyId: $signing['kid'], head: ['typ' => $kind.'+challenge']);
     }
 
     /**
@@ -111,7 +111,7 @@ class ChallengeToken
         // seconds past exp, so the single-use marker must outlive that.
         $this->denylist->revokeJti(
             (string) $claims->jti,
-            max(1, (int) $claims->exp - now()->getTimestamp() + (int) $this->config['leeway']),
+            max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)),
         );
 
         return (string) $claims->sub;
@@ -120,7 +120,7 @@ class ChallengeToken
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
     private function decode(string $kind, string $token): ?object
     {
-        JWT::$leeway = $this->config['leeway'];
+        JWT::$leeway = $this->config['leeway'] ?? 5;
 
         try {
             $claims = JWT::decode($token, $this->keys->verificationKeys());
@@ -148,7 +148,19 @@ class ChallengeToken
             return null;
         }
 
-        if (($claims->iss ?? null) !== $this->config['issuer'] || ($claims->aud ?? null) !== $this->config['audience']) {
+        // Fails CLOSED when there is nothing to bind to, exactly as the access-token verifier does via its
+        // audience intersection. With `issuer` and `audience` both lost from a config cached before they
+        // existed, `null === null` and `[] === []` both hold and the challenge was bound to NOTHING — and
+        // in a multi-guard install sharing a secret, one guard's challenge then redeemed against another.
+        // An absent audience is a broken install, not a degraded one: refuse rather than invent identity.
+        $issuer = $this->config['issuer'] ?? null;
+        $audience = $this->config['audience'] ?? [];
+
+        if ($issuer === null || array_filter((array) $audience) === []) {
+            return null;
+        }
+
+        if (($claims->iss ?? null) !== $issuer || ($claims->aud ?? null) !== $audience) {
             return null;
         }
 

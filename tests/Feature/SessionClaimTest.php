@@ -466,7 +466,12 @@ it('never treats a successor as the original, however large the configured leewa
     // proximity test must not widen with it. While it did, `leeway: 120` made a successor minted 40 s
     // after sign-in pass as the original — and a resurrected marker then logged out a live session,
     // the exact outcome the "original credential only" rule exists to make impossible.
+    //
+    // The proximity test is the FALLBACK, so the repository has to be one that cannot answer
+    // `original` — the shipped one answers it exactly, and against it this test would pass whatever
+    // the tolerance were derived from, proving nothing.
     config(['lukk.claim_seconds' => 600, 'lukk.leeway' => 120]);
+    bindRepositoryReporting(original: false, createdAt: true);
     $tokens = signIn(User::factory()->create());
     $family = familyFor($tokens['refresh_token']);
     $issuedAt = Cache::get('lukk:unclaimed:'.$family);

@@ -36,7 +36,7 @@ class FirebaseTokenVerifier implements TokenVerifier
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed})|null */
     public function verify(string $jwt): ?object
     {
-        JWT::$leeway = $this->config['leeway'];
+        JWT::$leeway = $this->config['leeway'] ?? 5;
 
         // Non-null so firebase/php-jwt populates it with the verified header.
         $headers = new \stdClass;
@@ -53,12 +53,12 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        if (($claims->iss ?? null) !== $this->config['issuer']) {
+        if (($claims->iss ?? null) !== ($this->config['issuer'] ?? null)) {
             return null;
         }
 
         // Accept when this service is one of the token's audiences (string or array).
-        $accepted = array_filter((array) $this->config['audience']);
+        $accepted = array_filter((array) ($this->config['audience'] ?? []));
         $presented = array_filter((array) ($claims->aud ?? []));
 
         if (! array_intersect($presented, $accepted)) {

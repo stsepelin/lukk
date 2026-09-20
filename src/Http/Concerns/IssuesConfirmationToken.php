@@ -22,7 +22,9 @@ trait IssuesConfirmationToken
             'confirmation_token' => $challengeTokens->issue(
                 'reauth',
                 $userId,
-                (int) config('lukk.confirm.ttl', 300),
+                // Not `config($key, 300)`: that default only applies to an ABSENT key, and a TTL
+                // of 0 makes the step-up token expired the moment it is minted.
+                (int) (config('lukk.confirm.ttl') ?? 300),
                 $familyId,
             ),
         ]));

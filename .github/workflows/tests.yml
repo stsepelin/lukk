@@ -117,13 +117,19 @@ jobs:
           LUKK_TEST_ENGINE: ${{ matrix.engine }}
           LUKK_TEST_PGSQL: '1'
           LUKK_TEST_MYSQL: '1'
-        # The tests skip themselves when the engine is unreachable — right locally, useless here,
-        # where a silent skip is indistinguishable from a pass. So fail on one.
+        # The tests skip themselves when the engine is unreachable — right locally, useless here, where
+        # a silent skip is indistinguishable from a pass.
+        #
+        # Assert that tests RAN, rather than banning the word "skipped". Banning it made an engine-
+        # specific case unable to say so honestly, so one was written as `expect(true)->toBeTrue()`
+        # instead — a passing test asserting nothing. It also passed a group that matched ZERO tests,
+        # which is the same blindness in a different costume.
         run: |
           set -o pipefail
           vendor/bin/pest --group=concurrency | tee /tmp/concurrency.log
-          if grep -q 'skipped' /tmp/concurrency.log; then
-            echo "::error::the concurrency suite skipped — the ${{ matrix.engine }} service was not reachable"
+          passed="$(grep -oE '[0-9]+ passed' /tmp/concurrency.log | tail -1 | grep -oE '[0-9]+' || echo 0)"
+          if [ "${passed:-0}" -lt 4 ]; then
+            echo "::error::the concurrency suite ran only ${passed:-0} tests against ${{ matrix.engine }} — the service was probably unreachable"
             exit 1
           fi
 

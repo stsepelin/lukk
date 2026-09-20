@@ -1,0 +1,101 @@
+name: mutation
+
+# Does the suite NOTICE when the code changes?
+#
+# 100% line coverage says every line ran, not that anything would fail if it behaved differently. The
+# gap is not academic here: 25 of 30 `?? default` guards could be deleted one at a time with the whole
+# suite green, and the tests that were supposed to pin them had been written alongside the very change
+# they were meant to catch. Mutation testing asks the other question, and does not care what anyone
+# believed while writing the test.
+#
+# PRs are scoped to the files they touch, so the feedback is fast and lands before merge. The full run
+# is nightly, because it is minutes rather than seconds and nothing about it needs to block a push.
+
+on:
+  pull_request:
+  schedule:
+    # 03:20 UTC, off the hour to avoid the scheduling stampede GitHub warns about.
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # A PR touching ten classes generates ~800 mutants, and a 4-vCPU runner spends ~1.6s on each —
+    # about 22 minutes. At 20 the job was cancelled mid-run, which reads as a failure and tells
+    # nobody anything.
+    timeout-minutes: 45
+    name: Mutation score (changed files)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge base has to exist locally for the diff below to name anything.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Mutate the classes this PR touches
+        run: |
+          set -euo pipefail
+          base="$(git merge-base origin/${{ github.base_ref }} HEAD)"
+          # `--class` takes PSR-4 names, so map `src/Foo/Bar.php` → `Lukk\Foo\Bar`. Only files that
+          # still exist (a deleted one has no class to mutate), and only class files — `src/routes/*.php`
+          # is a route manifest, not a class, and naming it would filter everything out.
+          classes="$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- 'src/**.php' \
+            | grep -E '^src/([A-Z][^/]*/)*[A-Z][^/]*\.php$' \
+            | sed -E 's#^src/#Lukk/#; s#\.php$##; s#/#\\#g' \
+            | paste -sd, -)"
+          if [ -z "$classes" ]; then
+            echo "No mutable src/ classes changed — nothing to do."
+            exit 0
+          fi
+          echo "Mutating: $classes"
+          # The SAME floor the nightly run uses, not 100. A demand for 100 here would fail nearly every
+          # pull request — the package sits in the mid-eighties — and a gate that is always red gets
+          # switched off, which is worse than no gate. This one fires when a change makes the classes it
+          # touches measurably worse. Paying the debt down is done by raising the floor, deliberately.
+          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=70 \
+            --class="$classes"
+
+  full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    name: Mutation score (whole package)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      # PROVISIONAL FLOOR — raise it from the first run of this job.
+      #
+      # A whole-package run takes over an hour on a developer machine, so this number was not measured
+      # locally before landing; 70 is deliberately low, chosen to be a real guard against a collapse
+      # rather than a made-up precision. The job PRINTS the true score: take it and set this to it, the
+      # way lukk-js's two packages already pin 86 and 85. Leaving it at 70 tolerates a 15-point
+      # regression, which is the one thing this workflow exists to prevent.
+      - name: Mutation score
+        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=70

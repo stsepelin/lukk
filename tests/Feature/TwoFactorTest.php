@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -607,4 +608,40 @@ it('does not gate an unverified two-factor user when block_unverified_login is o
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
         ->assertOk()
         ->assertJsonStructure(['access_token']);
+});
+
+// Same rule, sharpest 2FA consequence: an unusable `two_factor.recovery_codes` generates ZERO
+// recovery codes. Enrolment still answers 200 with an empty list, and the only way back into an
+// account whose authenticator is lost has quietly been removed. `config($key, 8)` would not save
+// this either — its default applies to an ABSENT key, not to one holding null.
+it('generates the documented number of recovery codes when the count is unusable', function (Closure $break) {
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($token);
+
+    $break();
+
+    $codes = $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor')
+        ->assertOk()->json('recovery_codes');
+
+    expect($codes)->toHaveCount(8);
+})->with([
+    'null (a per-guard env that is not set)' => [fn () => config()->set('lukk.two_factor.recovery_codes', null)],
+    'absent (a config cached before the key existed)' => [fn () => config()->set('lukk.two_factor', Arr::except(config('lukk.two_factor'), ['recovery_codes']))],
+]);
+
+// The regeneration path is a second binding reading the same key — and the one a user reaches when
+// their codes are already spent, so an empty set there locks the account out on the next lost phone.
+it('regenerates the documented number of recovery codes when the count is null', function () {
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $token = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($token);
+
+    config()->set('lukk.two_factor.recovery_codes', null);
+
+    $response = $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/recovery-codes')->assertOk();
+
+    expect($response->json('recovery_codes'))->toHaveCount(8);
+    expect($this->withToken($token)->getJson('/auth/two-factor/recovery-codes')->json('total'))->toBe(8);
 });

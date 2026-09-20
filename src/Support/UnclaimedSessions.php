@@ -46,7 +46,10 @@ class UnclaimedSessions
         }
 
         $accessTtl = is_numeric($config['access_ttl'] ?? null) ? (int) $config['access_ttl'] : 900;
-        $leeway = is_numeric($config['leeway'] ?? null) ? (int) $config['leeway'] : 0;
+        // 5, not 0, when absent or unusable — the same default the verifier reads. Short by `leeway`, the
+        // clamp landed inside the token's real acceptance band, and a session whose first use was its
+        // original access token in that gap was judged late and had its whole family revoked.
+        $leeway = is_numeric($config['leeway'] ?? null) ? (int) $config['leeway'] : 5;
 
         return max((int) $window, $accessTtl + $leeway, 60);
     }
