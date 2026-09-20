@@ -294,3 +294,62 @@ it('rejects a NUL byte in the new password instead of 500ing', function () {
         'password_confirmation' => "new-password\0evil",
     ])->assertStatus(422)->assertJsonValidationErrors(['password']);
 });
+
+it('answers a held confirm lock with its auto-release wait, and counts nothing more', function () {
+    // Checked before a failure is reserved, so a request refused by the lock does not extend the run;
+    // and read on the guard the lock was recorded under, or the wait reads as "contact support".
+    $this->freezeSecond();
+    app('translator')->addLines(['auth.throttle' => 'Wait :seconds s.'], 'en');
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 3, 'lukk.lockout.release_after' => 600,
+        'lukk.rate_limits.confirm.max_attempts' => 500]);
+    [$user, $pair] = signedIn();
+    Lockout::create(['purpose' => 'confirm', 'subject' => (string) $user->getKey(), 'guard' => 'api', 'attempts' => 3, 'locked_at' => now()]);
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertStatus(423)->assertJsonValidationErrors(['current_password' => 'Wait 600 s.']);
+
+    expect(Lockout::query()->value('attempts'))->toBe(3);
+});
+
+/** A co-issuer access token whose `fid` arrives as a JSON number. */
+function numericFidToken(User $user): string
+{
+    $cfg = Lukk\Lukk::guardConfig();
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(), 'fid' => 42,
+        'jti' => 'numeric-fid-'.$user->getAuthIdentifier(), 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('reads a session id that another issuer encoded as a number', function () {
+    // It names the same session, and must not become a 500 on the way to naming it.
+    [$user] = signedIn();
+
+    $this->withToken(numericFidToken($user))->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertOk();
+    app('auth')->forgetGuards();
+
+    $this->withToken(numericFidToken($user))->deleteJson('/auth/sessions/others')->assertNoContent();
+});
+
+it('answers a password that is not a string with 422, not a 500', function () {
+    [, $pair] = signedIn();
+
+    $this->withToken($pair->accessToken)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => ['x'], 'password_confirmation' => ['x'],
+    ])->assertStatus(422)->assertJsonValidationErrors(['password']);
+});
+
+it('changes the password and signs out other sessions for a user authenticated with actingAs', function () {
+    // `Lukk::actingAs()` authenticates the guard with no bearer at all, so nothing here may assume one.
+    [$user] = signedIn();
+    Lukk\Lukk::actingAs($user);
+
+    $this->deleteJson('/auth/sessions/others')->assertNoContent();
+    $this->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
+    ])->assertOk();
+});

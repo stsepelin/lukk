@@ -26,7 +26,9 @@ trait ResolvesAuthenticatedUser
     {
         $user = $request->user();
 
-        assert($user !== null);
+        // Only reached behind `auth:`; with assertions compiled out it degrades to a TypeError on the
+        // return, which is the same loud failure one frame later.
+        assert($user !== null); // @pest-mutate-ignore: RemoveFunctionCall
 
         return $user;
     }

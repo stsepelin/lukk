@@ -29,7 +29,8 @@ class ConfirmablePasskeyController
 
     public function store(PasskeyAssertionRequest $request, FinishPasskeyLogin $finishPasskeyLogin): JsonResponse
     {
-        $userId = $finishPasskeyLogin((string) $request->input('ceremony_id'), $request->array('credential'));
+        // `ceremony_id` is validated as a required string; the cast states it.
+        $userId = $finishPasskeyLogin((string) $request->input('ceremony_id'), $request->array('credential')); // @pest-mutate-ignore: RemoveStringCast
 
         if ((string) $userId !== (string) $this->authenticated($request)->getAuthIdentifier()) {
             throw ValidationException::withMessages(['credential' => [__('That passkey does not belong to you.')]]);

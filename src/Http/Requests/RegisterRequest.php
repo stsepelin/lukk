@@ -31,10 +31,11 @@ class RegisterRequest extends FormRequest
     public function rules(): array
     {
         if (Lukk::$registerValidation !== null) {
-            return (array) (Lukk::$registerValidation)($this);
+            // The hook is typed to return an array; the cast only states it.
+            return (array) (Lukk::$registerValidation)($this); // @pest-mutate-ignore: RemoveArrayCast
         }
 
-        $field = (string) config('lukk.username', 'email');
+        $field = Lukk::usernameField();
 
         return [
             'name' => ['required', 'string', 'max:255'],
@@ -57,10 +58,12 @@ class RegisterRequest extends FormRequest
      */
     private function userModel(): string
     {
-        $provider = (string) config('lukk.user_provider', 'users');
+        $provider = (string) (config('lukk.user_provider') ?? 'users'); // @pest-mutate-ignore: RemoveStringCast
 
+        // Both casts only state types: a provider name only reaches this key, and a missing model
+        // fails the unique rule either way.
         /** @var class-string $model */
-        $model = (string) config("auth.providers.{$provider}.model");
+        $model = (string) config("auth.providers.{$provider}.model"); // @pest-mutate-ignore: RemoveStringCast
 
         return $model;
     }

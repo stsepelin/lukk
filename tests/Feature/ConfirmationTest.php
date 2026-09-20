@@ -2,9 +2,14 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Lukk\Auth\ChallengeToken;
+use Lukk\Http\Middleware\RequireConfirmation;
 use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 uses()->group('confirmation');
 
@@ -36,7 +41,9 @@ it('rejects confirmation with a wrong password', function () {
 it('locks a gated route (423) when no confirmation is presented', function () {
     $access = User::factory()->create()->startSession()->accessToken;
 
-    $this->withToken($access)->postJson('/_test/sensitive')->assertStatus(423);
+    $this->withToken($access)->postJson('/_test/sensitive')
+        ->assertStatus(423)
+        ->assertJson(['message' => 'This action requires confirmation.']);
 });
 
 it('locks a gated route (423) when the confirmation token is garbage', function () {
@@ -45,7 +52,8 @@ it('locks a gated route (423) when the confirmation token is garbage', function 
     $this->withToken($access)
         ->withHeaders(['X-Lukk-Confirmation' => 'not-a-real-token'])
         ->postJson('/_test/sensitive')
-        ->assertStatus(423);
+        ->assertStatus(423)
+        ->assertJson(['message' => 'This action requires confirmation.']);
 });
 
 it('allows a gated route once a fresh confirmation is presented', function () {
@@ -151,7 +159,12 @@ it('refuses a confirmation earned by a different session', function () {
     $borrowed = confirmedHeaders($browser->accessToken);
     app('auth')->forgetGuards();
 
-    $this->withToken($machine->accessToken)->postJson('/auth/two-factor', [], $borrowed)->assertStatus(423);
+    $this->withToken($machine->accessToken)->postJson('/auth/two-factor', [], $borrowed)
+        ->assertStatus(423)
+        ->assertExactJson([
+            'message' => 'This confirmation belongs to a different session.',
+            'reason' => 'confirmation_session_mismatch',
+        ]);
     app('auth')->forgetGuards();
 
     // ...while the session that earned it still works.
@@ -191,3 +204,105 @@ it('refuses a bound confirmation presented without the token that earned it', fu
 
     $this->postJson('/auth/two-factor', [], $borrowed)->assertStatus(423);
 });
+
+/** An access token minted by a co-issuer sharing the secret: valid, but naming no lukk session. */
+function coIssuedToken(User $user): string
+{
+    $cfg = Lukk::guardConfig();
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-'.$user->getAuthIdentifier(), 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('refuses a co-issuer bearer that presents no confirmation, or someone else\'s', function () {
+    // With no `fid` on either side the session binding compares null with null and passes, so for
+    // this topology the subject check is the whole gate.
+    $alice = User::factory()->create();
+    $bob = User::factory()->create();
+
+    $this->withToken(coIssuedToken($bob))->postJson('/_test/sensitive')->assertStatus(423);
+    app('auth')->forgetGuards();
+
+    $forAlice = app(ChallengeToken::class)->issue('reauth', $alice->getKey(), 300);
+    $this->withToken(coIssuedToken($bob))->withHeaders(['X-Lukk-Confirmation' => $forAlice])
+        ->postJson('/_test/sensitive')
+        ->assertStatus(423);
+    app('auth')->forgetGuards();
+
+    // ...and the gate still opens for the subject's own unbound confirmation.
+    $forBob = app(ChallengeToken::class)->issue('reauth', $bob->getKey(), 300);
+    $this->withToken(coIssuedToken($bob))->withHeaders(['X-Lukk-Confirmation' => $forBob])
+        ->postJson('/_test/sensitive')
+        ->assertOk();
+});
+
+it('reads the confirmation from the configured header', function () {
+    config(['lukk.confirm.header' => 'X-Step-Up']);
+    $access = User::factory()->create()->startSession()->accessToken;
+    $token = confirmedHeaders($access)['X-Lukk-Confirmation'];
+    app('auth')->forgetGuards();
+
+    $this->withToken($access)->withHeaders(['X-Step-Up' => $token])->postJson('/_test/sensitive')->assertOk();
+});
+
+it('answers 423, not a 500, when the gate runs without an authenticated user', function () {
+    // The alias can be put on a route without `auth:`; a confirmation for someone is then not a
+    // confirmation for nobody.
+    $request = Request::create('/', 'POST', server: [
+        'HTTP_X_LUKK_CONFIRMATION' => app(ChallengeToken::class)->issue('reauth', 1, 300),
+    ]);
+
+    try {
+        app(RequireConfirmation::class)->handle($request, fn () => response('passed'));
+        $this->fail('The gate let an unauthenticated request through.');
+    } catch (HttpException $e) {
+        expect($e->getStatusCode())->toBe(423);
+    }
+});
+
+it('binds to a co-issuer session whose fid arrives as a JSON number', function () {
+    // Another issuer sharing the secret may encode `fid` as a number; it names the same session.
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $bearer = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(), 'fid' => 42,
+        'jti' => 'co-issued-fid', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+    $confirmation = app(ChallengeToken::class)->issue('reauth', $user->getKey(), 300, '42');
+
+    $this->withToken($bearer)->withHeaders(['X-Lukk-Confirmation' => $confirmation])
+        ->postJson('/_test/sensitive')
+        ->assertOk();
+});
+
+/** How long a confirmation token is good for, from its own claims. */
+function confirmationLifetime(string $token): int
+{
+    $claims = json_decode((string) base64_decode(strtr(explode('.', $token)[1], '-_', '+/')), true);
+
+    return $claims['exp'] - $claims['iat'];
+}
+
+it('lives for confirm.ttl, read from env as a string, and five minutes when unset', function () {
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    config(['lukk.confirm.ttl' => '120']);
+    expect(confirmationLifetime(confirmedHeaders($access)['X-Lukk-Confirmation']))->toBe(120);
+    app('auth')->forgetGuards();
+
+    config(['lukk.confirm.ttl' => null]);
+    expect(confirmationLifetime(confirmedHeaders($access)['X-Lukk-Confirmation']))->toBe(300);
+});
+
+it('answers a confirmation attempt with no password, or a non-string one, with 422', function (array $payload) {
+    // The route reads the field directly; anything but a string must still read as a wrong password.
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    $this->withToken($access)->postJson('/auth/confirm-password', $payload)->assertStatus(422);
+})->with([
+    'missing' => [[]],
+    'null' => [['password' => null]],
+    'a number' => [['password' => 1234]],
+]);

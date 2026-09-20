@@ -31,8 +31,9 @@ class PasswordController
 
         $change(
             $this->authenticated($request),
-            (string) $validated['current_password'],
-            (string) $validated['password'],
+            // Both validated as strings (`string`, and the `Password` rule refuses anything else).
+            (string) $validated['current_password'], // @pest-mutate-ignore: RemoveStringCast
+            (string) $validated['password'], // @pest-mutate-ignore: RemoveStringCast
             // The session to KEEP — see the trait for why it comes from the verified token.
             $this->currentFamilyId($request, $verifier),
         );

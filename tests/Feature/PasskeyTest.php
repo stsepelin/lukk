@@ -5,12 +5,17 @@ declare(strict_types=1);
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Testing\TestResponse;
+use Illuminate\Validation\ValidationException;
+use Lukk\Actions\FinishPasskeyLogin;
+use Lukk\Actions\StartPasskeyRegistration;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
 use Lukk\Models\Passkey;
+use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Support\Abilities;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
@@ -177,7 +182,7 @@ it('rejects a passkey confirmation with another user’s passkey', function () {
     $this->withToken($access)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => $start['ceremony_id'],
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1],
-    ])->assertStatus(422);
+    ])->assertStatus(422)->assertJsonValidationErrors(['credential' => 'That passkey does not belong to you.']);
 });
 
 it('rejects a passkey login with a missing or non-array credential', function () {
@@ -389,4 +394,94 @@ it('still lets a verified user sign in with a passkey when block_unverified_logi
         'ceremony_id' => $start['ceremony_id'],
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-verified', 'sign_count' => 1],
     ])->assertOk()->assertJsonStructure(['access_token']);
+});
+
+/** Present `cred-1` with the given counter to a fresh sign-in ceremony. */
+function presentPasskey(int $signCount): TestResponse
+{
+    $start = test()->postJson('/auth/passkeys/login-options')->json();
+
+    return test()->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => $signCount],
+    ]);
+}
+
+it('rejects a sign count that merely repeats the stored one', function (int $stored) {
+    // WebAuthn L3 §6.1.1: once a non-zero counter has been seen, anything not strictly greater is
+    // the clone signal — an equal count included.
+    Event::fake([PasskeyCloneDetected::class]);
+    storePasskey(User::factory()->create()->id, 'cred-1', $stored);
+
+    presentPasskey($stored)
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['credential' => 'The passkey could not be verified.']);
+
+    Event::assertDispatched(PasskeyCloneDetected::class);
+})->with([
+    'the first non-zero count' => [1],
+    'a later count' => [10],
+]);
+
+it('advances the stored counter to the one just presented', function (int $stored, int $presented) {
+    // The ratchet the clone check compares against: left behind, a replay of an older assertion
+    // would pass it.
+    storePasskey(User::factory()->create()->id, 'cred-1', $stored);
+
+    presentPasskey($presented)->assertOk();
+
+    expect(Passkey::findOrFail('cred-1')->sign_count)->toBe($presented);
+})->with([
+    'from zero' => [0, 7],
+    'from a count' => [5, 9],
+]);
+
+it('refuses a credential id that is not a string, rather than failing on its type', function () {
+    // Reachable when the action is called directly, without the request that types `credential.id`.
+    $ceremony = app(PasskeyChallengeStore::class)->putForCeremony(app(PasskeyChallengeStore::class)->generate());
+
+    expect(fn () => app(FinishPasskeyLogin::class)($ceremony, ['id' => 123]))->toThrow(ValidationException::class);
+});
+
+/** Register `$credentialId` for a fresh user through the HTTP ceremony. */
+function registerPasskey(string $credentialId): TestResponse
+{
+    $access = User::factory()->create()->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+    $challenge = test()->withToken($access)->withHeaders($headers)
+        ->postJson('/auth/passkeys/registration-options')->json('challenge');
+
+    return test()->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys', [
+        'credential' => ['challenge' => $challenge, 'id' => $credentialId, 'public_key' => 'PUB', 'sign_count' => 0],
+    ]);
+}
+
+it('registers a credential id of exactly 255 characters, the column width, and refuses a longer one', function () {
+    registerPasskey(str_repeat('a', 255))->assertNoContent();
+    app('auth')->forgetGuards();
+
+    registerPasskey(str_repeat('b', 256))
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['credential' => 'The passkey could not be registered.']);
+});
+
+it('names the new credential after the email, or the id when there is none', function () {
+    $user = User::factory()->create(['email' => 'ada@example.test']);
+    $access = $user->startSession()->accessToken;
+    $this->withToken($access)->withHeaders(confirmedHeaders($access))
+        ->postJson('/auth/passkeys/registration-options')
+        ->assertJsonPath('user', 'ada@example.test');
+
+    $anonymous = new class extends User
+    {
+        protected $table = 'users';
+
+        public function getEmailAttribute(): ?string
+        {
+            return null;
+        }
+    };
+    $model = $anonymous::query()->findOrFail($user->getKey());
+
+    expect(app(StartPasskeyRegistration::class)($model)['user'])->toBe((string) $user->getKey());
 });

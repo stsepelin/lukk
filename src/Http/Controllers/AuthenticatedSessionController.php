@@ -64,8 +64,7 @@ class AuthenticatedSessionController
         // `ConfirmPasswordUnchanged`. Answered exactly like a wrong password: to this caller, it now is one.
         ($this->passwordUnchanged)(
             $user->getAuthIdentifier(), $checked, $pair,
-            // A column name: a string whenever it is set, so the cast states the type rather than converting.
-            (string) (config('lukk.username') ?? 'email'), __('These credentials do not match our records.'), // @pest-mutate-ignore: RemoveStringCast
+            Lukk::usernameField(), __('These credentials do not match our records.'),
         );
 
         return app(LoginResponse::class, ['pair' => $pair]);

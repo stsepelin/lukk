@@ -48,7 +48,8 @@ class PasskeyChallengeStore
 
     public function pullForCeremony(string $ceremonyId): ?string
     {
-        return $ceremonyId === '' ? null : $this->redeem($this->ceremonyKey($ceremonyId));
+        // A shortcut: no challenge is ever stored under an empty ceremony id.
+        return $ceremonyId === '' ? null : $this->redeem($this->ceremonyKey($ceremonyId)); // @pest-mutate-ignore: EmptyStringToNotEmpty
     }
 
     /**

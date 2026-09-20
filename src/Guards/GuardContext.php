@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Guards;
 
 use Closure;
+use Lukk\Lukk;
 
 /**
  * Holds the lukk guard active for the current request. Login/refresh/logout run on public or
@@ -34,9 +35,11 @@ class GuardContext
         // Only honoured for a guard lukk knows: a hybrid app's session `web` guard has no lukk
         // identity, and reading config for it would just be the default guard under another name.
         $resolved = (string) app('auth')->getDefaultDriver();
-        $default = (string) config('lukk.guard', 'api');
+        $default = Lukk::defaultGuard();
+        // Not `(array)`: that turns `guards => false` into `[0 => false]`, a guard named "0".
+        $guards = config('lukk.guards');
 
-        return $resolved === $default || isset(((array) config('lukk.guards', []))[$resolved])
+        return $resolved === $default || (is_array($guards) && isset($guards[$resolved]))
             ? $resolved
             : $default;
     }

@@ -28,7 +28,12 @@ class GenerateKeysCommand extends Command
         $algorithm = strtoupper($this->stringOption('algorithm'));
 
         $spec = match ($algorithm) {
-            'RS256' => ['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA],
+            // Both items match the defaults on a stock install: the key type is PHP's
+            // OPENSSL_KEYTYPE_DEFAULT (RSA) and the size the stock openssl.cnf's `default_bits`
+            // (2048), and OpenSSL 3 rounds an odd size of 2049 down to 2048. Dropping an item or
+            // adding a bit therefore changes nothing here. They are stated because an openssl.cnf
+            // can set another `default_bits`, or none at all.
+            'RS256' => ['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA], // @pest-mutate-ignore: IncrementInteger,RemoveArrayItem
             'ES256' => ['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1'],
             default => null,
         };
@@ -41,7 +46,9 @@ class GenerateKeysCommand extends Command
 
         $resource = openssl_pkey_new($spec);
 
-        if ($resource === false || ! openssl_pkey_export($resource, $private)) {
+        // `openssl_pkey_new()` never returns `true`, so `=== true` would leave the export alone to fail.
+        if ($resource === false || ! openssl_pkey_export($resource, $private)) { // @pest-mutate-ignore: FalseToTrue
+            // Unreachable from a test: the spec is fixed, so only a broken OpenSSL install gets here.
             $this->components->error('Could not generate a keypair — check that the OpenSSL extension and its configuration are available.'); // @codeCoverageIgnore
 
             return self::FAILURE; // @codeCoverageIgnore
@@ -51,6 +58,7 @@ class GenerateKeysCommand extends Command
 
         // `false` on a key openssl cannot introspect. Indexing it would fatal on the line that is
         // supposed to be HANDING the operator their new key.
+        // Unreachable from a test for the same reason.
         // @codeCoverageIgnoreStart
         if ($details === false || ! isset($details['key'])) {
             $this->components->error('Could not read the generated key.');
@@ -59,7 +67,8 @@ class GenerateKeysCommand extends Command
         }
         // @codeCoverageIgnoreEnd
 
-        $public = (string) $details['key'];
+        // `key` is always the PEM string; the cast only narrows `array<mixed>` for the analyser.
+        $public = (string) $details['key']; // @pest-mutate-ignore: RemoveStringCast
         $kid = $this->stringOption('kid') !== '' ? $this->stringOption('kid') : 'k'.bin2hex(random_bytes(4));
 
         $this->components->info("Generated an {$algorithm} keypair (kid: {$kid}).");

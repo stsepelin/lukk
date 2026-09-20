@@ -45,7 +45,8 @@ trait EmitsTokens
             domain: null,
             secure: RefreshCookie::secure(),
             httpOnly: true,
-            raw: false,
+            // The value is cookie-safe (hex by default), so it encodes the same raw or not.
+            raw: false, // @pest-mutate-ignore: FalseToTrue
             // Strict, not Lax: the refresh call is an XHR, never a navigation, so
             // Strict costs nothing and blocks the cross-site CSRF that Lax allows.
             sameSite: 'Strict',

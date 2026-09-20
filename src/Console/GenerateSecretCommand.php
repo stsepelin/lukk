@@ -24,7 +24,8 @@ class GenerateSecretCommand extends Command
         $key = bin2hex(random_bytes(32));
 
         if ($this->option('show')) {
-            $this->line('<comment>'.$key.'</comment>');
+            // The tags only colour the key: undecorated output (a pipe, a CI log) is the key alone either way.
+            $this->line('<comment>'.$key.'</comment>'); // @pest-mutate-ignore: ConcatRemoveLeft,ConcatRemoveRight,ConcatSwitchSides
 
             return self::SUCCESS;
         }

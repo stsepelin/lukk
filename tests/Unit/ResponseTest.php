@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Request;
+use Lukk\Http\Responses\EmailVerificationResponse;
 use Lukk\Http\Responses\LoginResponse;
 use Lukk\Http\Responses\LogoutResponse;
 use Lukk\Lukk;
@@ -29,11 +30,15 @@ it('returns both tokens in the JSON body in BFF mode (default)', function () {
 });
 
 it('marks token responses as non-cacheable (no-store) in both modes', function () {
+    // `Pragma` as well: an HTTP/1.0 cache — or a proxy behaving like one — ignores Cache-Control,
+    // and a cached token response hands the next caller someone else's session.
     config(['lukk.cookie_mode' => false]);
     expect(emit(new TokenPair('a', 'b', 900))->headers->get('Cache-Control'))->toContain('no-store');
+    expect(emit(new TokenPair('a', 'b', 900))->headers->get('Pragma'))->toBe('no-cache');
 
     config(['lukk.cookie_mode' => true]);
     expect(emit(new TokenPair('a', 'b', 900))->headers->get('Cache-Control'))->toContain('no-store');
+    expect(emit(new TokenPair('a', 'b', 900))->headers->get('Pragma'))->toBe('no-cache');
 });
 
 it('puts the refresh token in a __Host- cookie and omits it from the body in cookie mode', function () {
@@ -104,6 +109,16 @@ it('clears the refresh cookie on logout in cookie mode', function () {
     // A forget cookie carries no value and an expiry in the past.
     expect((string) $cookies[0]->getValue())->toBe('');
     expect($cookies[0]->getExpiresTime())->toBeLessThan(time());
+    // Same attributes as the cookie it removes, HttpOnly included.
+    expect($cookies[0]->isHttpOnly())->toBeTrue();
+});
+
+it('emits no cookie on logout when cookie_mode is unset — body mode is the default', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['cookie_mode']);
+    config()->set('lukk', $lukk);
+
+    expect((new LogoutResponse)->toResponse(Request::create('/auth/logout', 'POST'))->headers->getCookies())->toBeEmpty();
 });
 
 it('emits no cookie on logout in BFF mode', function () {
@@ -133,4 +148,32 @@ it('clears the refresh cookie on logout per the guard\'s own cookie_mode', funct
 
     expect(Lukk::onGuard('admin', fn () => (new LogoutResponse)->toResponse(Request::create('/admin/auth/logout', 'POST')))
         ->headers->getCookies())->toBeEmpty();
+});
+
+it('answers a sign-in in the body when cookie_mode is unset — body mode is the default', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['cookie_mode']);
+    config()->set('lukk', $lukk);
+
+    $response = emit(new TokenPair('access.jwt', 'opaque-refresh', 900));
+
+    expect($response->headers->getCookies())->toBeEmpty()
+        ->and($response->getData(true)['refresh_token'] ?? null)->toBe('opaque-refresh');
+});
+
+it('answers a verified browser with 204 when no frontend URL is configured at all', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['email_verification']['frontend_url']);
+    config()->set('lukk', $lukk);
+
+    $response = (new EmailVerificationResponse)->toResponse(Request::create('/auth/email/verify/1/h'));
+
+    expect($response->getStatusCode())->toBe(204);
+});
+
+it('answers a verified browser with 204 when the frontend URL is set to false', function () {
+    // `LUKK_VERIFY_URL=false` in .env reaches config as the boolean false.
+    config(['lukk.email_verification.frontend_url' => false]);
+
+    expect((new EmailVerificationResponse)->toResponse(Request::create('/auth/email/verify/1/h'))->getStatusCode())->toBe(204);
 });

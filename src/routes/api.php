@@ -88,11 +88,13 @@ $sessionRoutes = function (string $guardName, string $throttle = ''): void {
 // Additional guards (multi-audience). Mounted FIRST so a subdomain-scoped guard takes precedence
 // over the host-agnostic default guard sharing the same path. Each gets the CORE session routes
 // wired to its own `auth:{name}` + crypto identity (features stay on the default guard for now).
-foreach ((array) config('lukk.guards', []) as $guardName => $override) {
+// Not `(array)`: `guards => false` means "no extra guards", and `(array) false` mounted a guard named 0.
+foreach (is_array($extraGuards = config('lukk.guards')) ? $extraGuards : [] as $guardName => $override) {
     $cfg = Lukk::guardConfig($guardName);
 
     Route::domain($cfg['domain'] ?? null)
-        ->prefix((string) ($cfg['path'] ?? 'auth'))
+        // A path from config is a string; the cast states it.
+        ->prefix((string) ($cfg['path'] ?? 'auth')) // @pest-mutate-ignore: RemoveStringCast
         ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.$guardName])
         ->group(function () use ($guardName, $sessionRoutes) {
             Route::get('jwks', JwksController::class);
@@ -106,22 +108,23 @@ foreach ((array) config('lukk.guards', []) as $guardName => $override) {
             // MANAGEMENT routes (enrol, confirm, disable, recovery codes) stay on the default guard;
             // they need step-up, which is a separate mount, and their absence locks nobody out.
             // The SAME predicate login enforces on, so an unset flag that challenges also redeems.
-            if (Lukk::enforcesTwoFactor((string) $guardName)) {
+            // Keys of an array `guards` are strings here: boot refuses a numeric one. The casts state it.
+            if (Lukk::enforcesTwoFactor((string) $guardName)) { // @pest-mutate-ignore: RemoveStringCast
                 Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])
                     ->middleware('throttle:lukk-'.$guardName.'-2fa');
             }
 
-            $sessionRoutes((string) $guardName, $guardName.'-');
+            $sessionRoutes((string) $guardName, $guardName.'-'); // @pest-mutate-ignore: RemoveStringCast
         });
 }
 
 // `ForceJsonRequest` renders these routes' errors as JSON regardless of host config. This is the
 // DEFAULT guard — it carries every feature; `lukk.set-guard` resets the active guard each request.
 Route::domain(config('lukk.domain'))
-    ->prefix((string) config('lukk.path', 'auth'))
-    ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.config('lukk.guard', 'api')])
+    ->prefix((string) (config('lukk.path') ?? 'auth'))
+    ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.Lukk::defaultGuard()])
     ->group(function () use ($sessionRoutes) {
-        $guard = 'auth:'.config('lukk.guard', 'api');
+        $guard = 'auth:'.Lukk::defaultGuard();
         $confirmed = [$guard, 'lukk.confirm'];
 
         // Public key set (RFC 7517) — populated only under an asymmetric algorithm.
@@ -134,7 +137,7 @@ Route::domain(config('lukk.domain'))
 
         Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
         Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
-        $sessionRoutes((string) config('lukk.guard', 'api'));
+        $sessionRoutes(Lukk::defaultGuard());
 
         // `?? true` for the same reason `logout_all` has one: absent is a stale cached config, not a
         // decision to switch the feature off, and a silently unmounted route is a 404 on a documented
@@ -188,7 +191,7 @@ Route::domain(config('lukk.domain'))
         // Redemption follows the login predicate — an unset flag still challenges an enrolled account,
         // so it must still be able to answer. Management needs the feature switched ON: enrolling a
         // new factor on a flag nobody set is a decision the install never made.
-        if (Lukk::enforcesTwoFactor((string) config('lukk.guard', 'api'))) {
+        if (Lukk::enforcesTwoFactor(Lukk::defaultGuard())) {
             Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');
         }
 
@@ -240,7 +243,7 @@ Route::domain(config('lukk.domain'))
 // browser redirect vs a 204. Gated on the feature like the routes above.
 if (config('lukk.features.email_verification')) {
     Route::domain(config('lukk.domain'))
-        ->prefix((string) config('lukk.path', 'auth'))
+        ->prefix((string) (config('lukk.path') ?? 'auth'))
         ->middleware(['api'])
         ->group(function () {
             Route::get('email/verify/{id}/{hash}', VerifyEmailController::class)

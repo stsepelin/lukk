@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -18,6 +20,7 @@ use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Lukk;
 use Lukk\Models\Lockout;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('account-deletion');
@@ -380,6 +383,9 @@ it('sweeps the CONFIGURED broker, not whatever the default one points at', funct
         'lukk.password_reset.broker' => 'lukkbroker',
     ]);
 
+    // Only the configured broker's table exists, so a sweep guarded on the default one's name skips.
+    Schema::drop('password_reset_tokens');
+
     $user = User::factory()->create(['email' => 'broker@example.test']);
     Password::broker('lukkbroker')->createToken($user);
     expect(DB::table('lukk_password_resets')->count())->toBe(1);
@@ -504,4 +510,37 @@ it('forgets nothing, without erroring, on an install that never migrated lockout
     Schema::drop('lukk_lockouts');
 
     expect(app(LockoutRepository::class)->forget(['id:1'], 'api'))->toBe(0);
+});
+
+/** A soft-deleting user model, the case where `delete()` erases nothing. */
+class SoftDeletingUser extends User
+{
+    use SoftDeletes;
+
+    protected $table = 'users';
+}
+
+it('erases a soft-deleting user for real', function () {
+    // `delete()` on a SoftDeletes model only stamps `deleted_at`: every column of personal data stays.
+    Schema::table('users', fn (Blueprint $table) => $table->softDeletes());
+    $user = SoftDeletingUser::query()->findOrFail(User::factory()->create()->getKey());
+
+    app(DeleteAccount::class)($user);
+
+    expect(SoftDeletingUser::withTrashed()->whereKey($user->getKey())->exists())->toBeFalse();
+});
+
+it('erases the lockout counters in all three key spaces, keyed as strings', function () {
+    // The contract hands a replacement repository `array<int, string>`; a numeric identifier column
+    // and an int id both arrive as strings.
+    $spy = new RecordingLockoutRepository;
+    app()->instance(LockoutRepository::class, $spy);
+    config(['lukk.username' => 'phone']);
+    Lukk::deleteUserUsing(fn () => null);
+
+    app(DeleteAccount::class)(new GenericUser(['id' => 5, 'phone' => 5551234]));
+    expect($spy->forgotten)->toBe(['id:5', '5', 'idn:5551234']);
+
+    app(DeleteAccount::class)(new GenericUser(['id' => 5]));
+    expect($spy->forgotten)->toBe(['id:5', '5', '']);
 });

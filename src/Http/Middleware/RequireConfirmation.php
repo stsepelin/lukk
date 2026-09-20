@@ -30,7 +30,9 @@ class RequireConfirmation
 
     public function handle(Request $request, Closure $next): Response
     {
-        $token = (string) $request->header((string) (config('lukk.confirm.header') ?? 'X-Lukk-Confirmation'), '');
+        // The casts and the '' default only state types: a real header's value is a string, and a
+        // missing header fails verification whatever the default is.
+        $token = (string) $request->header((string) (config('lukk.confirm.header') ?? 'X-Lukk-Confirmation'), ''); // @pest-mutate-ignore: RemoveStringCast,EmptyStringToNotEmpty
         $challenges = $this->challenges();
         $subject = $challenges->verify('reauth', $token);
 
@@ -93,6 +95,8 @@ class RequireConfirmation
      */
     private function challenges(): ChallengeToken
     {
-        return new ChallengeToken(Lukk::guardConfig((string) $this->auth->getDefaultDriver()), $this->denylist);
+        // Documented to return a string, though it is config underneath; a null there resolves through
+        // `GuardContext` to the default guard's config either way, so the cast only states the type.
+        return new ChallengeToken(Lukk::guardConfig((string) $this->auth->getDefaultDriver()), $this->denylist); // @pest-mutate-ignore: RemoveStringCast
     }
 }

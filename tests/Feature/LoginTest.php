@@ -2,11 +2,18 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Auth\Events\Lockout;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Hashing\Hasher;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
@@ -240,4 +247,102 @@ it('keys the throttle on a normalized email so case does not split the bucket', 
     $lower = Request::create('/', 'POST', ['email' => 'user@example.com']);
 
     expect($limiter->key($upper))->toBe($limiter->key($lower));
+});
+
+it('refuses a lukk.username naming a column the users table does not have', function () {
+    // Not loud on its own: SQLite reads `"mial"` as a string literal, so the lookup compares two
+    // literals — and submitting `mial` as the identifier then matches every row, handing back the
+    // first account for whoever knows its password.
+    config(['app.debug' => true, 'lukk.username' => 'mial']);
+    User::factory()->create();
+    $this->withoutExceptionHandling();
+
+    expect(fn () => $this->postJson('/auth/login', ['mial' => 'mial', 'password' => 'password']))
+        ->toThrow(RuntimeException::class, 'lukk.username is [mial], but the table [users] has no such column. On SQLite that makes the sign-in lookup compare two string literals rather than a column, so submitting [mial] as the identifier matches every row. Set `lukk.username` to the column your users authenticate with.');
+});
+
+it('says nothing about the identifier column outside debug', function () {
+    // One array lookup in production, and no schema query.
+    config(['app.debug' => false, 'lukk.username' => 'mial']);
+    User::factory()->create();
+
+    // An identifier that is not the column name matches no row, so this is the ordinary refusal —
+    // the point is only that no schema query and no exception happen here.
+    $this->postJson('/auth/login', ['mial' => 'nobody@example.test', 'password' => 'password'])->assertStatus(422);
+});
+
+it('leaves a provider whose table lukk cannot see alone', function () {
+    // A provider lukk cannot introspect has no table to ask about, so the check is skipped rather
+    // than guessed at — and nothing calls a model factory it does not have.
+    config(['app.debug' => true, 'lukk.username' => 'mial']);
+    Auth::provider('tableless', fn () => new class implements UserProvider
+    {
+        public function retrieveById($identifier) {}
+
+        public function retrieveByToken($identifier, $token) {}
+
+        public function updateRememberToken(Authenticatable $user, $token) {}
+
+        public function retrieveByCredentials(array $credentials) {}
+
+        public function validateCredentials(Authenticatable $user, array $credentials)
+        {
+            return false;
+        }
+
+        public function rehashPasswordIfRequired(Authenticatable $user, array $credentials, bool $force = false) {}
+    });
+    config(['auth.providers.users' => ['driver' => 'tableless']]);
+
+    $this->postJson('/auth/login', ['mial' => 'whoever', 'password' => 'password'])->assertStatus(422);
+});
+
+it('never matches an account whose identifier column is null when the field is omitted', function () {
+    // The field is read as a string: an omitted one is '', which matches nothing. Left as null, the
+    // lookup becomes `where username is null` — and an account with no identifier set would then be
+    // signed in by anyone who knows its password and sends no username at all.
+    Schema::table('users', fn (Blueprint $table) => $table->string('username')->nullable());
+    config(['lukk.username' => 'username']);
+    User::factory()->create(['username' => null]);
+
+    $this->postJson('/auth/login', ['password' => 'password'])->assertStatus(422);
+});
+
+it('refuses a sign-in with no password as a wrong credential, not as an error', function () {
+    // Read as a string, so an omitted password is '' — which no hash matches. Left as null it reaches
+    // the hasher, where PHP's deprecation for a null subject is one upgrade away from a 500.
+    User::factory()->create(['email' => 'ada@example.test']);
+
+    $this->postJson('/auth/login', ['email' => 'ada@example.test'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['email' => 'These credentials do not match our records.']);
+});
+
+it('leaves an EloquentUserProvider subclass that resolves its own identifier alone', function () {
+    // The hazard is the stock provider's `where($field, $value)`. A subclass that answers a VIRTUAL
+    // identifier has no column to have, and refusing it would break a working customization on every
+    // machine with APP_DEBUG on.
+    config(['app.debug' => true, 'lukk.username' => 'login']);
+    User::factory()->create(['email' => 'ada@example.test']);
+    Auth::provider('virtual-identifier', fn ($app, array $config) => new class($app['hash'], User::class) extends EloquentUserProvider
+    {
+        public function retrieveByCredentials(array $credentials)
+        {
+            return User::query()->where('email', 'like', ($credentials['login'] ?? '').'@%')->first();
+        }
+    });
+    config(['auth.providers.users' => ['driver' => 'virtual-identifier']]);
+
+    $this->postJson('/auth/login', ['login' => 'ada', 'password' => 'password'])->assertOk();
+});
+
+it('says nothing about the column on an application that has not migrated yet', function () {
+    // Every column is missing from a table that does not exist, and the driver says that better than
+    // a confident "no such column" on the first route a developer hits.
+    config(['app.debug' => true]);
+    Schema::drop('users');
+    $this->withoutExceptionHandling();
+
+    expect(fn () => $this->postJson('/auth/login', ['email' => 'ada@example.test', 'password' => 'password']))
+        ->toThrow(QueryException::class);
 });

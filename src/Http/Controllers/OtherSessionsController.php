@@ -29,6 +29,7 @@ class OtherSessionsController
 
     public function destroy(Request $request, TokenVerifier $verifier): Response
     {
+        // No bearer at all under `Lukk::actingAs()`, which authenticates the guard directly.
         $claims = $verifier->verify((string) $request->bearerToken());
 
         if ($claims !== null && isset($claims->fid)) {

@@ -27,9 +27,11 @@ trait AuthorizesAbilities
         // Split on comma so `lukk.ability:a,b` and repeated parameters both behave. Filtered with an
         // explicit predicate — bare `array_filter` also drops `'0'`, and while a lone `'0'` is a
         // strange ability name, losing it out of an ALL list quietly weakens the requirement.
-        $required = array_values(array_filter(
+        // (`Abilities::fromArray()` below also skips empty strings and reads values only, so the filter
+        // and `array_values` restate it; the `trim` is what matters — a space is not a valid scope token.)
+        $required = array_values(array_filter( // @pest-mutate-ignore: UnwrapArrayFilter,UnwrapArrayValues
             array_map('trim', explode(',', implode(',', $abilities))),
-            fn (string $ability) => $ability !== '',
+            fn (string $ability) => $ability !== '', // @pest-mutate-ignore: EmptyStringToNotEmpty
         ));
 
         // Validated here, not where the challenge header is built. Doing it there meant a

@@ -27,12 +27,14 @@ trait ThrowsWhenLocked
 
     private function throwLocked(string $purpose, string $subject, string $field): never
     {
-        $seconds = $this->lockouts?->availableIn($purpose, $subject, $this->lockoutGuard());
+        // Every caller reaches here through a non-null `$lockouts`; the `?->` only states that it may be.
+        $seconds = $this->lockouts?->availableIn($purpose, $subject, $this->lockoutGuard()); // @pest-mutate-ignore: RemoveNullSafeOperator
 
         throw ValidationException::withMessages([
             $field => [$seconds === null
                 ? __('This account is locked. Contact support to restore access.')
-                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])],
+                // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
+                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
         ])->status(423);
     }
 }

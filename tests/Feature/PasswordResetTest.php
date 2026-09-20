@@ -52,6 +52,15 @@ it('points the reset link at the SPA frontend with the token + email', function 
     // Joins with `&` when the configured URL already carries a query string.
     config(['lukk.password_reset.frontend_url' => 'https://app.test/reset?ref=x']);
     expect($notification->toMail($user)->actionUrl)->toBe('https://app.test/reset?ref=x&token=the-token&email=a%40b.c');
+
+    // Unset (an unset env, or a config cached before the key): a relative link, not a TypeError from
+    // `str_contains(null, …)` under strict_types.
+    config(['lukk.password_reset.frontend_url' => null]);
+    expect($notification->toMail($user)->actionUrl)->toBe('?token=the-token&email=a%40b.c');
+
+    // `env()` turns the literal "false" into a boolean — the same relative link, not a TypeError.
+    config(['lukk.password_reset.frontend_url' => false]);
+    expect($notification->toMail($user)->actionUrl)->toBe('?token=the-token&email=a%40b.c');
 });
 
 it('resets the password with a valid token and fires PasswordReset', function () {
@@ -242,4 +251,30 @@ it('spends equivalent work on an unknown address, so timing cannot enumerate', f
     $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
 
     expect($onHit)->toBeGreaterThan(0)->and($hasher->made)->toBe($onHit);
+});
+
+it('revokes existing sessions when revoke_sessions is unset — the default is on', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['password_reset']['revoke_sessions']);
+    config()->set('lukk', $lukk);
+    $user = User::factory()->create(['email' => 'a@b.c']);
+    $pair = $user->startSession();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => Password::createToken($user),
+        'email' => 'a@b.c',
+        'password' => 'new-password-123',
+        'password_confirmation' => 'new-password-123',
+    ])->assertOk();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertStatus(401);
+});
+
+it('answers every failed reset with the one generic token message', function () {
+    User::factory()->create(['email' => 'a@b.c']);
+
+    $this->postJson('/auth/reset-password', [
+        'token' => 'not-a-token', 'email' => 'a@b.c',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422)->assertJsonValidationErrors(['email' => __('passwords.token')]);
 });

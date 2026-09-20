@@ -164,6 +164,27 @@ it('does not echo an unbounded value into the exception message', function () {
     }
 });
 
+it('hands a Collection\'s items over as they are, without recursing into Arrayable ones', function () {
+    // `Collection::toArray()` recurses into Arrayable items, so a relation of permission models
+    // with a `__toString()` would arrive as a list of arrays and fail every login.
+    $permission = new class implements Arrayable, Stringable
+    {
+        public function toArray(): array
+        {
+            return ['name' => 'orders.read'];
+        }
+
+        public function __toString(): string
+        {
+            return 'orders.read';
+        }
+    };
+
+    Lukk::abilitiesUsing(fn () => collect([$permission]));
+
+    expect(notNull(Lukk::abilitiesFor(1, new TokenContext('api', 1, 'fid')))->all())->toBe(['orders.read']);
+});
+
 it('reads a Collection with all() but any other Arrayable with toArray()', function () {
     // `all()` is an ENUMERABLE method; `Arrayable` declares only `toArray()`. Calling `all()` on the
     // contract resolved to the STATIC `Model::all()` for an Eloquent model — an unbounded table
@@ -193,4 +214,24 @@ it('rejects a comma, which the ability middleware owns as its list separator', f
     // narrower. The mint grammar must not be wider than the gate grammar.
     expect(fn () => Abilities::fromArray(['orders,read']))
         ->toThrow(InvalidArgumentException::class, 'may not contain a comma');
+});
+
+it('lists each granted ability once, as a list', function () {
+    // De-duplicated and re-indexed: a repeated ability would otherwise be stamped twice into the
+    // scope claim, and gaps in the keys leak into anything that reads `all()` positionally.
+    expect(Abilities::fromArray(['orders.read', 'orders.read', 'orders.write'])->all())
+        ->toBe(['orders.read', 'orders.write']);
+});
+
+it('accepts a grant of exactly the maximum scope length, and refuses one byte more', function () {
+    // The bound exists so a claim cannot make every request fail at the proxy; the boundary itself
+    // decides whether a legitimate maximal grant is issuable at all.
+    // Each ability is bounded at 128 bytes, so a maximal scope is many of them plus the separators.
+    $exact = array_map(fn (int $i) => str_pad("a{$i}.", 127, 'x'), range(1, 15));
+    $exact[] = str_pad('b.', 128, 'x');
+    $over = $exact;
+    $over[0] = str_pad('c.', 128, 'x');
+
+    expect(strlen((string) Abilities::fromArray($exact)->toScope()))->toBe(2048)
+        ->and(fn () => Abilities::fromArray($over))->toThrow(InvalidArgumentException::class, 'over the 2048-byte scope limit');
 });

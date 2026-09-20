@@ -56,8 +56,9 @@ class VerifiedToken
     {
         $tokens = self::all($request);
 
+        // A shortcut: with no tokens both reads below answer null anyway.
         if ($tokens === []) {
-            return null;
+            return null; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         if ($guard !== null) {

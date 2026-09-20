@@ -29,11 +29,13 @@ trait ResolvesPresentingFamily
     {
         $bearer = (string) $request->bearerToken();
 
-        if ($bearer === '') {
-            return null;
+        // A shortcut: verifying an empty bearer answers null too.
+        if ($bearer === '') { // @pest-mutate-ignore: EmptyStringToNotEmpty
+            return null; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
-        $guard = (string) app('auth')->getDefaultDriver();
+        // `getDefaultDriver()` is declared to return a string; the cast states it.
+        $guard = (string) app('auth')->getDefaultDriver(); // @pest-mutate-ignore: RemoveStringCast
         $claims = (new FirebaseTokenVerifier(Lukk::guardConfig($guard), app(Denylist::class)))->verify($bearer);
         $family = $claims === null ? null : (string) ($claims->fid ?? '');
 

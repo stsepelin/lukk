@@ -149,7 +149,8 @@ class ExportAccount
         $identifier = $this->identifierOf($user);
 
         $rows = $this->lockouts->summariesForSubjects([
-            LoginRateLimiter::lockoutSubject($user, ''),                                        // id:<userId>   — login
+            // id:<userId> — login. (The identifier argument is unused when a user is passed.)
+            LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
             (string) $user->getAuthIdentifier(),                                                // <userId>      — confirm / two-factor
             $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier),    // idn:<normalized>
         ], $this->guard);

@@ -4,16 +4,19 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Auth\Events\Lockout;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
+use RuntimeException;
 
 /**
  * Resolve + validate credentials into a user. Honors a Lukk::authenticateUsing()
@@ -40,6 +43,8 @@ class AttemptLogin
         // choosing 423 over 429 exists to avoid.
         // Resolved once and reused: the gate, the failure count and the release must all name the
         // same bucket, and re-deriving it per call would mean three provider lookups.
+        $this->assertIdentifierColumnExists();
+
         $subject = $this->lockoutSubject($request);
 
         $this->ensureIsNotLocked($request, $subject);
@@ -126,7 +131,10 @@ class AttemptLogin
         $field = $this->field();
         $credentials = [
             $field => (string) $request->input($field),
-            'password' => (string) $request->input('password'),
+            // The identifier cast is load-bearing — a null there becomes `WHERE … IS NULL`, which
+            // matches an account with no identifier set. A null password only reaches the hasher,
+            // where it fails like any wrong one; the cast keeps it out of a PHP that may refuse it.
+            'password' => (string) $request->input('password'), // @pest-mutate-ignore: RemoveStringCast
         ];
 
         $user = $this->users->retrieveByCredentials($credentials);
@@ -169,6 +177,51 @@ class AttemptLogin
         ]);
     }
 
+    /**
+     * Refuse a `lukk.username` naming a column the provider's table does not have — in DEBUG only.
+     *
+     * A typo does not fail loudly on its own. SQLite compiles a double-quoted identifier matching no
+     * column to a string LITERAL, so `lukk.username = 'mial'` turns the lookup into `"mial" = ?`:
+     * signing in with the literal `mial` matches every row, and the first account's password then
+     * signs that account in. PostgreSQL and MySQL raise "column does not exist" instead, which is
+     * loud but arrives as a 500 on the login route rather than as an explanation.
+     *
+     * Behind `app.debug`, and only for the STOCK `EloquentUserProvider`: the hazard lives in its
+     * `retrieveByCredentials()`, which does `where($field, $value)`. A subclass that resolves a
+     * virtual identifier its own way has no column to have, and refusing it would break a working
+     * customization on every developer's machine. Run before the lockout subject is derived, which
+     * performs the same lookup — otherwise the driver's error, or a failure counted against whichever
+     * account the literal comparison matched, arrives first and this sentence never does.
+     *
+     * Not memoized: in debug, one extra `pragma`/`information_schema` read per sign-in buys nothing
+     * worth the state. `hasColumn()` is case-INSENSITIVE, so a miscased column still passes here and
+     * fails on PostgreSQL only.
+     */
+    private function assertIdentifierColumnExists(): void
+    {
+        if ($this->users::class !== EloquentUserProvider::class || ! config('app.debug')) {
+            return;
+        }
+
+        $field = $this->field();
+        $model = $this->users->createModel();
+        $table = $model->getTable();
+        $schema = Schema::connection($model->getConnectionName());
+
+        // Nothing to diagnose on an application that has not migrated yet: every column is missing,
+        // and the driver's own "no such table" says it better.
+        if (! $schema->hasTable($table) || $schema->hasColumn($table, $field)) {
+            return;
+        }
+
+        throw new RuntimeException(
+            "lukk.username is [{$field}], but the table [{$table}] has no such column. On SQLite that "
+            .'makes the sign-in lookup compare two string literals rather than a column, so submitting '
+            ."[{$field}] as the identifier matches every row. Set `lukk.username` to the column your "
+            .'users authenticate with.'
+        );
+    }
+
     /** The identifier field (config `lukk.username`) — the request field + the error key. */
     /**
      * The lockout subject for this attempt. Costs one provider lookup, and only when the feature is
@@ -194,7 +247,7 @@ class AttemptLogin
 
     private function field(): string
     {
-        return (string) config('lukk.username', 'email');
+        return Lukk::usernameField();
     }
 
     private function timingHash(): string

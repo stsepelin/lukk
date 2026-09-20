@@ -132,7 +132,8 @@ class DatabaseLockoutRepository implements LockoutRepository
             return 0;
         }
 
-        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== ''));
+        // `array_values` only tidies the keys; `whereIn` and the emptiness check below ignore them.
+        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== '')); // @pest-mutate-ignore: UnwrapArrayValues
 
         if ($subjects === []) {
             return 0;
@@ -149,7 +150,7 @@ class DatabaseLockoutRepository implements LockoutRepository
     {
         // The same empty-subject filter and table guard as `forget()`, so the two can never reach
         // different rows.
-        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== ''));
+        $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== '')); // @pest-mutate-ignore: UnwrapArrayValues
 
         if ($subjects === [] || ! Schema::hasTable((new Lockout)->getTable())) {
             return [];
@@ -207,9 +208,13 @@ class DatabaseLockoutRepository implements LockoutRepository
             // transaction (25P02 on every later statement), which would make this recovery itself
             // the 500 on /auth/login that it exists to prevent. Rolling back to the savepoint keeps
             // the outer transaction — and its `lockForUpdate` — usable. MySQL doesn't need it.
-            return DB::transaction(fn () => Lockout::query()->create(
-                ['purpose' => $purpose, 'subject' => $subject, 'guard' => (string) $guard, 'attempts' => 0]
-            ));
+            return DB::transaction(fn () => Lockout::query()->create([
+                'purpose' => $purpose,
+                'subject' => $subject,
+                'guard' => (string) $guard,
+                // The column defaults to 0 as well; stated so the model holds the value without a re-read.
+                'attempts' => 0, // @pest-mutate-ignore: RemoveArrayItem
+            ]));
         } catch (UniqueConstraintViolationException) {
             return $this->query($purpose, $subject, $guard)->lockForUpdate()->firstOrFail();
         }

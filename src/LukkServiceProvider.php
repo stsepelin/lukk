@@ -228,9 +228,12 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->singleton(UnclaimedSessions::class, fn () => new UnclaimedSessions($this->cacheStore()));
 
         $this->app->singleton(WebAuthnCeremony::class, function () {
-            OptionalDependency::ensure(AuthenticatorAttestationResponseValidator::class, 'web-auth/webauthn-lib', 'passkeys');
+            // Unmeasurable here, not equivalent: it names the missing package on an install without it, and
+            // require-dev always installs it. `ensure()` itself is pinned in tests/Unit/OptionalDependencyTest.
+            OptionalDependency::ensure(AuthenticatorAttestationResponseValidator::class, 'web-auth/webauthn-lib', 'passkeys'); // @pest-mutate-ignore: RemoveMethodCall
 
-            $passkeys = (array) ($this->config()['passkeys'] ?? []);
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $passkeys = (array) ($this->config()['passkeys'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
 
             return new SpomkyWebAuthnCeremony([
                 'rp_id' => $passkeys['rp_id'] ?? null,
@@ -247,9 +250,12 @@ class LukkServiceProvider extends ServiceProvider
     private function registerTwoFactor(): void
     {
         $this->app->singleton(TwoFactorProvider::class, function () {
-            OptionalDependency::ensure(Google2FA::class, 'pragmarx/google2fa', 'two_factor');
+            // Unmeasurable here, not equivalent: it names the missing package on an install without it, and
+            // require-dev always installs it. `ensure()` itself is pinned in tests/Unit/OptionalDependencyTest.
+            OptionalDependency::ensure(Google2FA::class, 'pragmarx/google2fa', 'two_factor'); // @pest-mutate-ignore: RemoveMethodCall
 
-            $twoFactor = (array) ($this->config()['two_factor'] ?? []);
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $twoFactor = (array) ($this->config()['two_factor'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
 
             return new Google2FaTotpProvider(new Google2FA, $this->cacheStore(), [
                 'issuer' => $twoFactor['issuer'] ?? $this->appName(),
@@ -257,6 +263,8 @@ class LukkServiceProvider extends ServiceProvider
                 // §5.2 recommends "at most one time step" for network delay; each extra step widens the
                 // accepted set by two 30-second codes, so an unclamped `window: 100` made 201 of the
                 // million codes valid at once — 67x weaker per guess, from one env var typo.
+                // The cast is load-bearing: PHP 8 compares an int with a NON-numeric string as strings,
+                // so without it `min(10, 'abc')` is 10, and a typo would open the widest window.
                 'window' => max(0, min(10, (int) ($twoFactor['window'] ?? 1))),
             ]);
         });
@@ -281,7 +289,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeAllSessions::class),
             $app->make(PasskeyRepository::class),
             $app->make(LockoutRepository::class),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             Lukk::currentGuard(),
             $this->config()['password_reset']['broker'] ?? null,
         ));
@@ -289,7 +297,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(ExportAccount::class, fn ($app) => new ExportAccount(
             $app->make(RefreshTokenRepository::class),
             $app->make(PasskeyRepository::class),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             // Unconditional, like `DeleteAccount` above: export must reach every row erasure reaches.
             $app->make(LockoutRepository::class),
             Lukk::currentGuard(),
@@ -322,20 +330,25 @@ class LukkServiceProvider extends ServiceProvider
             (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
             (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
             (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
-            (string) ($this->config()['username'] ?? 'email'),
+            Lukk::usernameField(),
             Lukk::currentGuard(),
         ));
         // Login/confirm resolve the CURRENT guard's user provider (from config/auth.php), so the
         // admin login authenticates against the admins table, not the users table.
         $this->app->bind(LockoutRepository::class, function () {
-            $lockout = (array) ($this->config()['lockout'] ?? []);
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $lockout = (array) ($this->config()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
             // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
             // account on its owner's first typo — the `Limit(0)` failure class this package already
             // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
-            $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100;
-            $after = is_numeric($lockout['release_after'] ?? null) ? (int) $lockout['release_after'] : 0;
+            // Any default of 100 or more clamps to the same 100 below; the value names the ceiling.
+            $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100; // @pest-mutate-ignore: IncrementInteger
+            // `0` means "manual release only", and the repository reads EVERY value at or below it that way
+            // (each use is `> 0` / `<= 0`) — so the floor and this default only have to be non-positive.
+            $after = is_numeric($lockout['release_after'] ?? null) ? (int) $lockout['release_after'] : 0; // @pest-mutate-ignore: DecrementInteger
+            $after = max(0, $after); // @pest-mutate-ignore: DecrementInteger
 
-            return new DatabaseLockoutRepository(max(1, min(100, $max)), max(0, $after));
+            return new DatabaseLockoutRepository(max(1, min(100, $max)), $after);
         });
 
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
@@ -351,7 +364,7 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
             $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(
-            $this->userModelClass(), (string) ($this->config()['username'] ?? 'email')));
+            $this->userModelClass(), Lukk::usernameField()));
 
         $this->app->bind(EnableTwoFactor::class, fn ($app) => new EnableTwoFactor(
             // A missing key generates ZERO recovery codes: 2FA enables, the user is shown an empty
@@ -445,7 +458,8 @@ class LukkServiceProvider extends ServiceProvider
 
         foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'] as $key => $name) {
             $limiter->for($name, function ($request) use ($key, $name) {
-                $limit = (array) ($this->config()['rate_limits'][$key] ?? []);
+                // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+                $limit = (array) ($this->config()['rate_limits'][$key] ?? []); // @pest-mutate-ignore: RemoveArrayCast
                 $max = (int) ($limit['max_attempts'] ?? 30);
                 $decay = (int) ($limit['decay_seconds'] ?? 60);
 
@@ -484,10 +498,11 @@ class LukkServiceProvider extends ServiceProvider
             });
         }
 
-        $this->registerClaimLimiter($limiter, 'lukk-claim', (string) ($this->config()['guard'] ?? 'api'));
+        $this->registerClaimLimiter($limiter, 'lukk-claim', Lukk::defaultGuard());
 
         $limiter->for('lukk-login', function ($request) {
-            $limit = (array) ($this->config()['rate_limits']['login'] ?? []);
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $limit = (array) ($this->config()['rate_limits']['login'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
 
             return (new Limit(maxAttempts: (int) ($limit['ip_max_attempts'] ?? 30), decaySeconds: (int) ($limit['decay_seconds'] ?? 60)))
                 ->by(Lukk::rateLimitKey($request));
@@ -495,8 +510,16 @@ class LukkServiceProvider extends ServiceProvider
 
         // Per-guard login/refresh limiters for the additional guards' core-session routes, so an
         // admin login flood can't consume the users guard's budget (each keyed per IP).
-        foreach (array_keys((array) ($this->config()['guards'] ?? [])) as $guardName) {
-            $limits = (array) (Lukk::guardConfig((string) $guardName)['rate_limits'] ?? []);
+        // Not `(array)`: `guards => false` means "no extra guards", and `(array) false` registered
+        // limiters for a phantom guard named 0.
+        $extraGuards = $this->config()['guards'] ?? null;
+
+        foreach (is_array($extraGuards) ? array_keys($extraGuards) : [] as $guardName) {
+            // `assertGuardsIsolated()` runs first in boot() and refuses a numeric key in an array
+            // `guards`, so `$guardName` is already a string here; the cast states the type
+            // array_keys() cannot.
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $limits = (array) (Lukk::guardConfig((string) $guardName)['rate_limits'] ?? []); // @pest-mutate-ignore: RemoveStringCast,RemoveArrayCast
 
             $limiter->for("lukk-{$guardName}-login", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['login']['ip_max_attempts'] ?? 30),
@@ -510,7 +533,7 @@ class LukkServiceProvider extends ServiceProvider
             // so it needs its own bucket. Registered unconditionally: a limiter attached to a route
             // that never mounts is inert, whereas a route mounted against a MISSING limiter is a
             // 500 on the endpoint standing between a user and their account.
-            $this->registerClaimLimiter($limiter, "lukk-{$guardName}-claim", (string) $guardName);
+            $this->registerClaimLimiter($limiter, "lukk-{$guardName}-claim", (string) $guardName); // @pest-mutate-ignore: RemoveStringCast
 
             $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
                 maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
@@ -551,7 +574,8 @@ class LukkServiceProvider extends ServiceProvider
     private function registerClaimLimiter(RateLimiter $limiter, string $name, string $guard): void
     {
         $limiter->for($name, function ($request) use ($name, $guard) {
-            $limits = (array) (Lukk::guardConfig($guard)['rate_limits']['refresh'] ?? []);
+            // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
+            $limits = (array) (Lukk::guardConfig($guard)['rate_limits']['refresh'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
 
             // `user()` THROWS for a guard `auth.guards` does not declare, and the limiter would then
             // 500 the route instead of throttling it. Same guard as the confirm limiters above.
@@ -659,25 +683,14 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function userProviderFor(string $guard): UserProvider
     {
-        $config = $this->app->make('config');
-
-        // `?? 'users'` — the shipped config's own value, and the default the other two readers of this key
-        // already use. Falling through to null does NOT mean "let Laravel decide": stock Laravel sets the
-        // provider under `auth.guards.web.provider`, not `auth.defaults.provider`, so
-        // `createUserProvider(null)` resolves to null and every auth route 500s. A per-guard mount still
-        // prefers its own `auth.guards.{guard}.provider` first, so this changes nothing for one.
-        $provider = $guard === (string) ($this->config()['guard'] ?? 'api')
-            ? ($this->config()['user_provider'] ?? 'users')
-            : ($config->get("auth.guards.{$guard}.provider") ?? $this->config()['user_provider'] ?? 'users');
-
-        $resolved = $this->app->make('auth')->createUserProvider($provider);
+        $resolved = $this->app->make('auth')->createUserProvider(Lukk::userProviderName($guard));
 
         // Null only when the named provider is not configured at all — a typo in `auth.providers`.
         // Nothing validates that at boot (`assertGuardsIsolated` checks driver/audience/path/domain,
         // NOT provider names), so this is a genuine assertion rather than a restatement of an
         // earlier guard. With assertions compiled out it degrades to a TypeError on the return,
         // which is the same loud failure one frame later.
-        assert($resolved !== null);
+        assert($resolved !== null); // @pest-mutate-ignore: RemoveFunctionCall
 
         return $resolved;
     }
@@ -692,8 +705,11 @@ class LukkServiceProvider extends ServiceProvider
     {
         $provider = $this->config()['user_provider'] ?? 'users';
 
+        // A provider with no model (Laravel's `database` driver) cannot register through lukk at all —
+        // `RegisterRequest`'s uniqueness rule reads the table from this same model — so an empty string
+        // here and a TypeError on a null fail the same request. The cast keeps the declared type.
         /** @var class-string $model */
-        $model = (string) $this->app->make('config')->get("auth.providers.{$provider}.model");
+        $model = (string) $this->app->make('config')->get("auth.providers.{$provider}.model"); // @pest-mutate-ignore: RemoveStringCast
 
         return $model;
     }

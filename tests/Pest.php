@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Testing\PendingCommand;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\RevokeSession;
@@ -159,4 +160,39 @@ function ecKeypair(): array
 function ctx(int|string $userId, string $familyId = 'fam'): TokenContext
 {
     return new TokenContext(Lukk\Lukk::currentGuard(), $userId, $familyId);
+}
+
+/**
+ * Run `$callback`; anything it throws fails the test.
+ *
+ * Pest 4's negated `toThrow` cannot say this. It tests the argument with `class_exists()`, which is
+ * false for an interface, so `Throwable::class` is read as an expected MESSAGE:
+ * `->not->toThrow(Throwable::class)` stayed green over a RuntimeException (and the positive form
+ * fails over one). With no argument it fails even when nothing is thrown. A concrete class works,
+ * but misses the other half of Throwable (`Exception` lets a TypeError through). So call it, and
+ * count the call as the assertion.
+ */
+function expectNoThrow(Closure $callback): void
+{
+    $callback();
+    test()->addToAssertionCount(1);
+}
+
+/**
+ * The rules that failed for `$field` when `$data` is validated against `$rules`, keyed by rule name
+ * (`Required`, `Max`, or a rule object's class).
+ *
+ * Asserting on the failed RULE rather than on a 422 pins each rule on its own: most bad inputs trip
+ * two rules, so dropping either one still answers 422.
+ *
+ * @param  array<string, mixed>  $rules
+ * @param  array<string, mixed>  $data
+ * @return array<string, mixed>
+ */
+function failedRulesFor(array $rules, array $data, string $field): array
+{
+    $validator = Validator::make($data, $rules);
+    $validator->fails();
+
+    return $validator->failed()[$field] ?? [];
 }

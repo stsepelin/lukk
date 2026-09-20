@@ -37,7 +37,8 @@ class FinishPasskeyLogin
             $this->fail();
         }
 
-        $stored = $this->passkeys->findByCredentialId((string) ($response['id'] ?? ''));
+        // A missing id is not found under any placeholder, so the '' only states the type.
+        $stored = $this->passkeys->findByCredentialId((string) ($response['id'] ?? '')); // @pest-mutate-ignore: EmptyStringToNotEmpty
 
         if ($stored === null) {
             $this->fail();

@@ -20,6 +20,21 @@ it('generates a base64url challenge of at least 16 bytes', function () {
     expect(strlen((string) base64_decode(strtr($challenge, '-_', '+/'))))->toBeGreaterThanOrEqual(16);
 });
 
+it('generates exactly 128 bits, unpadded base64url', function () {
+    // WebAuthn L3 §13.4.3 asks for at least 16 random bytes; 16 bytes is 22 base64url characters.
+    expect(challengeStore()->generate())->toMatch('/\A[A-Za-z0-9_-]{22}\z/');
+});
+
+it('claims a redeemed challenge under a key bound to its value', function () {
+    $cache = new Repository(new ArrayStore);
+    $store = new PasskeyChallengeStore($cache, 300);
+    $store->putForUser(7, 'CHALLENGE');
+
+    $store->pullForUser(7);
+
+    expect($cache->get('lukk:pk:claimed:'.hash('sha256', 'CHALLENGE')))->toBeTrue();
+});
+
 it('stores and pulls a user registration challenge once (single-use)', function () {
     challengeStore()->putForUser(7, 'CHALLENGE');
 

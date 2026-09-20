@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Artisan;
+
 /**
  * Where the fixture `.env` lives for this test file.
  *
@@ -85,4 +87,39 @@ it('aborts without writing when the user declines to overwrite', function () {
         ->assertFailed();
 
     expect(file_get_contents(secretEnvPath()))->toContain('LUKK_SECRET='.str_repeat('a', 64));
+});
+
+it('appends the secret after one blank line, keeping what the file held', function (string $before) {
+    config(['lukk.secret' => null]);
+    file_put_contents(secretEnvPath(), $before);
+
+    command('lukk:secret')->assertSuccessful();
+
+    expect(file_get_contents(secretEnvPath()))->toMatch('/\AAPP_NAME=Lukk\n\nLUKK_SECRET=[0-9a-f]{64}\n\z/');
+})->with([
+    'no trailing newline' => ['APP_NAME=Lukk'],
+    'trailing newlines' => ["APP_NAME=Lukk\n\n"],
+]);
+
+it('maps a dashed guard name onto an env variable name', function () {
+    file_put_contents(secretEnvPath(), "APP_NAME=Lukk\n");
+
+    command('lukk:secret', ['--guard' => 'back-office'])->assertSuccessful();
+
+    expect(file_get_contents(secretEnvPath()))->toMatch('/^LUKK_BACK_OFFICE_SECRET=[0-9a-f]{64}$/m');
+});
+
+it('treats LUKK_SECRET=false as no secret, rather than asking to overwrite one', function () {
+    // `env()` reads the literal `false` as a boolean, so this is what an unset placeholder looks like.
+    config(['lukk.secret' => false]);
+    file_put_contents(secretEnvPath(), "LUKK_SECRET=false\n");
+
+    command('lukk:secret')->assertSuccessful();
+
+    expect(file_get_contents(secretEnvPath()))->toMatch('/^LUKK_SECRET=[0-9a-f]{64}$/m');
+});
+
+it('prints only the secret with --show', function () {
+    expect(Artisan::call('lukk:secret', ['--show' => true]))->toBe(0)
+        ->and(Artisan::output())->toMatch('/\A[0-9a-f]{64}\n\z/');
 });

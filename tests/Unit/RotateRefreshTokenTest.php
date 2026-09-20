@@ -212,7 +212,7 @@ it('does not let a throwing fork listener cost the client its whole family', fun
     // And the family is intact: that successor still rotates past the grace window, with no reuse
     // revoke — the outcome a lost successor produced.
     test()->travel(61)->seconds();
-    expect(fn () => rotate()($forked->refreshToken))->not->toThrow(Throwable::class);
+    expectNoThrow(fn () => rotate()($forked->refreshToken));
 });
 
 it('stays quiet for the two or three siblings ordinary concurrency produces', function () {

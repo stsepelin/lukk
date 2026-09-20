@@ -8,11 +8,13 @@ name: mutation
 # they were meant to catch. Mutation testing asks the other question, and does not care what anyone
 # believed while writing the test.
 #
-# PRs are scoped to the files they touch, so the feedback is fast and lands before merge. The full run
-# is nightly, because it is minutes rather than seconds and nothing about it needs to block a push.
+# The full run is NIGHTLY, and that is the gate: a regression surfaces within a day, on a diff that
+# says which class moved. A PR can ask for the same check on the files it touches by carrying the
+# `mutation` label — ~18 minutes, so it is opt-in rather than a toll on every push.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   schedule:
     # 03:20 UTC, off the hour to avoid the scheduling stampede GitHub warns about.
     - cron: '20 3 * * *'
@@ -23,13 +25,13 @@ permissions:
 
 jobs:
   changed:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutation')
     runs-on: ubuntu-latest
-    # A PR touching ten classes generates ~800 mutants, and a 4-vCPU runner spends ~1.6s on each —
-    # about 22 minutes. At 20 the job was cancelled mid-run, which reads as a failure and tells
-    # nobody anything.
+    # `--class` is a PREFIX match, so a PR touching 20 classes can mutate 44 files / ~1,700 mutants.
+    # At the suite's cost-4 hashing that is ~18 minutes on a 4-vCPU runner (it was ~45 at cost 12).
+    # Cancelled mid-run reads as a failure and tells nobody anything, so the cap keeps 2.5x margin.
     timeout-minutes: 45
-    name: Mutation score (changed files)
+    name: Mutation score (changed files, label `mutation`)
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,18 +66,19 @@ jobs:
           fi
           echo "Mutating: $classes"
           # The SAME floor the nightly run uses, not 100. A demand for 100 here would fail nearly every
-          # pull request — the package sits in the low eighties — and a gate that is always red gets
+          # pull request — a new class arrives with survivors before its tests do — and a gate that is always red gets
           # switched off, which is worse than no gate. This one fires when a change makes the classes it
           # touches measurably worse. Paying the debt down is done by raising the floor, deliberately.
-          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=81 \
+          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=99 \
             --class="$classes"
 
   full:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Measured at 26.5 minutes on 10 local processes; a 4-vCPU runner takes roughly two and a half times
-    # that. A job killed by its timeout prints no score at all, so the margin is deliberate.
-    timeout-minutes: 120
+    # Measured at 20 minutes on 10 local processes (37 before the suite stopped hashing at production
+    # cost); a 4-vCPU runner takes roughly two and a half times that. A job killed by its timeout
+    # prints no score at all, so the margin is deliberate.
+    timeout-minutes: 90
     name: Mutation score (whole package)
     steps:
       - name: Checkout
@@ -92,8 +95,9 @@ jobs:
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
 
-      # The measured floor: 81.49% on 2026-09-19, with exactly these flags (3,345 mutants; timeouts
-      # count as caught here, as they do in Pest's own score). Raise it as the score rises — never
-      # lower it to turn a build green. The PR job above uses the same number.
+      # The measured floor: 99.94% on 2026-09-19, with exactly these flags (3,266 mutants; timeouts
+      # count as caught here, as they do in Pest's own score), set just below for noise. The two
+      # survivors that run measured are now tested, so the package is at 100% by class. Raise it
+      # as the score rises — never lower it to turn a build green. The PR job above uses the same number.
       - name: Mutation score
-        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=81
+        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=99

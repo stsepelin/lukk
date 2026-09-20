@@ -87,3 +87,21 @@ it('resolves current() by guard, by active guard, or by being the only one', fun
     VerifiedToken::put($request, token('admin', 'admin.all'));
     expect(VerifiedToken::current($request))->toBeNull();
 });
+
+it('prefers the active guard\'s token when a request carries several', function () {
+    $request = Request::create('/');
+    VerifiedToken::put($request, token('admin', 'admin.all'));
+    VerifiedToken::put($request, token('api', 'orders.read'));
+
+    expect(VerifiedToken::current($request)?->guard)->toBe('api');
+});
+
+it('keeps looking past a token that belongs to someone else', function () {
+    $request = Request::create('/');
+    VerifiedToken::put($request, token('admin', 'admin.all', userId: 2));
+    VerifiedToken::put($request, token('api', 'orders.read'));
+    $user = new User;
+    $user->id = 1;
+
+    expect(VerifiedToken::forUser($request, $user)?->guard)->toBe('api');
+});

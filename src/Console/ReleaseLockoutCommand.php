@@ -72,14 +72,17 @@ class ReleaseLockoutCommand extends Command
      */
     private function loginSubject(string $input, string $guard): string
     {
-        $field = (string) config('lukk.username', 'email');
-        $provider = $this->auth->createUserProvider((string) config("auth.guards.{$guard}.provider"));
+        $field = Lukk::usernameField();
+        // The provider sign-in used for this guard, or the lookup reads another table and reports
+        // "no lock found" for a lock that exists. Null for a provider name `auth.providers` lacks.
+        $provider = $this->auth->createUserProvider(Lukk::userProviderName($guard));
 
         // Two lookups: as pasted, then normalized. The realistic operator flow is to paste the
         // address the way the user wrote it (`  Victim@Y.com `), and on any engine whose comparison
         // is binary — PostgreSQL, SQLite — only the normalized form matches the stored row. Falling
         // straight through to the `idn:` bucket would report "no lock found" for a lock that exists.
-        $user = $provider?->retrieveByCredentials([$field => trim($input)])
+        // (`stringArgument()` has already trimmed `$input`; the `trim` keeps this method honest on its own.)
+        $user = $provider?->retrieveByCredentials([$field => trim($input)]) // @pest-mutate-ignore: UnwrapTrim
             ?? $provider?->retrieveByCredentials([$field => LoginRateLimiter::normalize($input)]);
 
         return LoginRateLimiter::lockoutSubject($user, $input);

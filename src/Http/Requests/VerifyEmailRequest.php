@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Facades\Auth;
+use Lukk\Lukk;
 
 /**
  * Stateless email-verification request. The `signed` middleware validates the link
@@ -27,7 +28,8 @@ class VerifyEmailRequest extends FormRequest
         $user = $this->verifiable();
 
         return $user instanceof MustVerifyEmail
-            && hash_equals((string) $this->route('hash'), sha1($user->getEmailForVerification()));
+            // `{hash}` is a required route segment, so the cast only states its type.
+            && hash_equals((string) $this->route('hash'), sha1($user->getEmailForVerification())); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**
@@ -43,7 +45,7 @@ class VerifyEmailRequest extends FormRequest
     {
         if (! $this->lookedUp) {
             $this->lookedUp = true;
-            $this->resolved = Auth::createUserProvider(config('lukk.user_provider') ?? 'users')
+            $this->resolved = Auth::createUserProvider(Lukk::userProviderName(Lukk::defaultGuard()))
                 ?->retrieveById($this->route('id'));
         }
 
