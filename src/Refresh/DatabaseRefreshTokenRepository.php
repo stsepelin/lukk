@@ -89,6 +89,10 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
             createdAt: $row->created_at?->getTimestamp(),
+            // The family's original is the row `StartSession` inserted with no predecessor. Unlike
+            // `scope`, this column needs no "is it there" guard: `persist()` writes `previous_id` on
+            // every insert, so a schema lacking it could not have stored this row in the first place.
+            original: $row->previous_id === null,
         );
     }
 
@@ -140,10 +144,23 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function revokeFamily(string $familyId): void
     {
-        $this->scoped()
+        $revoke = fn (): int => $this->scoped()
             ->where('family_id', $familyId)
             ->whereNull('revoked_at')
             ->update(['revoked_at' => now()]);
+
+        $revoke();
+
+        // Deliberately run TWICE. A rotation checks the denylist under its row lock, but a revoke
+        // whose denylist write lands after that check and before the rotation commits is not seen
+        // there. On PostgreSQL (READ COMMITTED) this UPDATE then takes its snapshot before the
+        // successor row commits, blocks on the parent row the rotation holds, and on unblocking
+        // re-checks ONLY that row — so the successor survives live, and rotates again once the
+        // denylist entry expires. The second statement takes a fresh snapshot, which by then
+        // includes the committed successor: the first UPDATE could only return after the rotation
+        // released its lock, i.e. committed. InnoDB reads the latest version and needs no second
+        // pass; it is a cheap no-op there. Pinned in tests/Concurrency.
+        $revoke();
     }
 
     public function revokeUserFamilies(int|string $userId, ?callable $before = null): array
@@ -180,6 +197,15 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             }
 
             $constrain($this->scoped())->update(['revoked_at' => now()]);
+
+            // A second pass for the same PostgreSQL window as `revokeFamily()`: a successor committed
+            // by a rotation this UPDATE was blocked behind is invisible to its snapshot. READ
+            // COMMITTED gives the next statement a fresh one even inside this transaction. Limited
+            // to the families already denylisted above, so a session started in between is never
+            // revoked in the table without a matching denylist entry.
+            if ($ids !== []) {
+                $constrain($this->scoped())->whereIn('family_id', $ids)->update(['revoked_at' => now()]);
+            }
 
             return $ids;
         });

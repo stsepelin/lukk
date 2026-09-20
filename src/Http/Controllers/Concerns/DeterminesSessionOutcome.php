@@ -42,8 +42,12 @@ trait DeterminesSessionOutcome
 
     private function emailUnverified(Authenticatable $user): bool
     {
-        return (bool) config('lukk.features.email_verification')
-            && (bool) config('lukk.email_verification.block_unverified_login')
+        // Per guard, like `twoFactorRequired()` above: read globally, a guard that switched the gate
+        // on was silently not gated.
+        $config = Lukk::guardConfig();
+
+        return (bool) ($config['features']['email_verification'] ?? false)
+            && (bool) ($config['email_verification']['block_unverified_login'] ?? false)
             && $user instanceof MustVerifyEmail
             && ! $user->hasVerifiedEmail();
     }

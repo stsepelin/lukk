@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Http\Request;
 use Lukk\Http\Responses\LoginResponse;
 use Lukk\Http\Responses\LogoutResponse;
+use Lukk\Lukk;
 use Lukk\Support\TokenPair;
 
 function emit(TokenPair $pair)
@@ -90,4 +91,24 @@ it('emits no cookie on logout in BFF mode', function () {
 
     expect($response->getStatusCode())->toBe(204);
     expect($response->headers->getCookies())->toBeEmpty();
+});
+
+it('clears the refresh cookie on logout per the guard\'s own cookie_mode', function () {
+    // `EmitsTokens` reads `cookie_mode` through the guard config; logout read the global key. A guard
+    // that opted INTO cookie mode set a cookie at login that logout then never cleared, and a guard
+    // that opted OUT was sent a stray clear for a cookie it never had.
+    config(['lukk.cookie_mode' => false, 'lukk.guards.admin' => ['cookie_mode' => true]]);
+
+    $admin = Lukk::onGuard('admin', fn () => (new LogoutResponse)->toResponse(Request::create('/admin/auth/logout', 'POST')));
+    $users = (new LogoutResponse)->toResponse(Request::create('/auth/logout', 'POST'));
+
+    expect($admin->headers->getCookies())->toHaveCount(1)
+        ->and($admin->headers->getCookies()[0]->getName())->toBe('__Host-refresh-admin')
+        ->and($admin->headers->getCookies()[0]->getExpiresTime())->toBeLessThan(time())
+        ->and($users->headers->getCookies())->toBeEmpty();
+
+    config(['lukk.cookie_mode' => true, 'lukk.guards.admin' => ['cookie_mode' => false]]);
+
+    expect(Lukk::onGuard('admin', fn () => (new LogoutResponse)->toResponse(Request::create('/admin/auth/logout', 'POST')))
+        ->headers->getCookies())->toBeEmpty();
 });

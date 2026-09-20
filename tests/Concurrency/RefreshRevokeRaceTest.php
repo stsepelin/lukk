@@ -6,10 +6,14 @@ use Illuminate\Support\Facades\DB;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Contracts\TokenIssuer;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
+use Lukk\Support\Abilities;
+use Lukk\Support\TokenContext;
 use Lukk\Tests\ConcurrencyTestCase;
 use Lukk\Tests\Fixtures\User;
+use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 
 uses(ConcurrencyTestCase::class)->group('concurrency');
 
@@ -204,3 +208,188 @@ it('does not hold the refresh row lock while ANY application callback runs', fun
 
     expect($levels)->toHaveKeys(['abilities', 'claims'])->each->toBe(0);
 })->with([[fn () => ConcurrencyTestCase::engine()]]);
+
+/**
+ * The exact SQL a repository call emits, with bindings substituted — captured with `pretend()` so a
+ * race can replay lukk's OWN statements on a second connection. Replaying hand-written SQL would pin
+ * the engine, not the code: reverting a fix in the repository would leave such a test green.
+ *
+ * @return array<int, string>
+ */
+function emittedSql(Closure $callback): array
+{
+    $connection = DB::connection();
+
+    return array_map(
+        fn (array $query) => $connection->getQueryGrammar()->substituteBindingsIntoRawSql(
+            $query['query'], $connection->prepareBindings($query['bindings']),
+        ),
+        $connection->pretend($callback),
+    );
+}
+
+/**
+ * The exact SQL a repository call runs, captured by EXECUTING it inside a transaction that is then
+ * rolled back. For calls whose later statements depend on what an earlier SELECT returned — the bulk
+ * revoke's second pass is limited to the family ids it read — which `pretend()` cannot capture,
+ * since a pretended SELECT returns nothing.
+ *
+ * @return array<int, string>
+ */
+function executedSql(Closure $callback): array
+{
+    $connection = DB::connection();
+    $captured = [];
+    $capturing = true;
+
+    $connection->listen(function ($query) use (&$captured, &$capturing, $connection) {
+        if ($capturing) {
+            $captured[] = $connection->getQueryGrammar()->substituteBindingsIntoRawSql(
+                $query->sql, $connection->prepareBindings($query->bindings),
+            );
+        }
+    });
+
+    $connection->beginTransaction();
+    $callback();
+    $connection->rollBack();
+    $capturing = false;
+
+    return $captured;
+}
+
+/**
+ * Run a sequence of statements on a SECOND connection. Everything before the first UPDATE runs
+ * synchronously; that UPDATE is fired asynchronously (so it can block on a lock the test's transaction
+ * holds); the rest run once it returns — when `$settle()` is called.
+ *
+ * @param  array<int, string>  $statements
+ */
+function raceStatements(string $engine, array $statements): callable
+{
+    $blocking = 0;
+    while (! str_starts_with(strtolower(ltrim($statements[$blocking])), 'update')) {
+        $blocking++;
+    }
+
+    $before = array_slice($statements, 0, $blocking);
+    $first = $statements[$blocking];
+    $after = array_slice($statements, $blocking + 1);
+
+    if ($engine === 'pgsql') {
+        $conn = pg_connect('host=127.0.0.1 port=55432 dbname=lukk user=lukk password=lukk');
+        foreach ($before as $sql) {
+            pg_query($conn, $sql);
+        }
+        pg_send_query($conn, $first);
+
+        return function () use ($conn, $after) {
+            pg_get_result($conn);
+            foreach ($after as $sql) {
+                pg_query($conn, $sql);
+            }
+            pg_close($conn);
+        };
+    }
+
+    $conn = new mysqli('127.0.0.1', 'lukk', 'lukk', 'lukk', 33306);
+    foreach ($before as $sql) {
+        $conn->query($sql);
+    }
+    $conn->query($first, MYSQLI_ASYNC);
+
+    return function () use ($conn, $after) {
+        $r = [$conn];
+        $e = [$conn];
+        $rej = [$conn];
+        mysqli::poll($r, $e, $rej, 5);
+        $conn->reap_async_query();
+        foreach ($after as $sql) {
+            $conn->query($sql);
+        }
+        $conn->close();
+    };
+}
+
+/**
+ * Bind an issuer whose access-token mint — the last thing rotation does under its row lock, after
+ * the in-transaction denylist check — starts a concurrent revoke: the denylist write first, then the
+ * given statements on a second connection.
+ *
+ * @param  array<int, string>  $statements
+ */
+function revokeInsideTheMint(string $familyId, string $engine, array $statements, stdClass $race): void
+{
+    app()->bind(TokenIssuer::class, fn () => new class(Lukk\Lukk::guardConfig(), $familyId, $engine, $statements, $race) extends FirebaseTokenIssuer
+    {
+        /** @param  array<string, mixed>  $config  @param  array<int, string>  $statements */
+        public function __construct(array $config, private string $familyId, private string $engine, private array $statements, private stdClass $race)
+        {
+            parent::__construct($config);
+        }
+
+        public function accessToken(TokenContext $context, array $claims = [], ?Abilities $abilities = null): array
+        {
+            app(Denylist::class)->revokeFamily($this->familyId, 900);
+            $this->race->settle = raceStatements($this->engine, $this->statements);
+            usleep(300_000);
+
+            return parent::accessToken($context, $claims, $abilities);
+        }
+    });
+}
+
+it('never leaves a live token behind when the revoke lands after rotation checked the denylist', function () {
+    // The second window. Rotation checks the denylist INSIDE its transaction, after persisting the
+    // successor — which catches a revoke whose denylist write came first. It cannot catch one whose
+    // denylist write lands AFTER that check and before COMMIT: rotation issues the pair, and on
+    // PostgreSQL the revoke's UPDATE blocks on the parent row, re-checks only that row once
+    // unblocked, and never sees the successor. One live row survives, and once the denylist entry
+    // expires it rotates again — a logout undoing itself ~15 minutes later.
+    //
+    // The hook is the access-token mint, the last thing rotation does under the lock. The revoke is
+    // replayed from `revokeFamily()`'s own statements, so this pins the repository's fix.
+    $engine = ConcurrencyTestCase::engine();
+    $pair = User::factory()->create()->startSession();
+    $familyId = (string) DB::table('refresh_tokens')->value('family_id');
+    $revoke = emittedSql(fn () => (new DatabaseRefreshTokenRepository(null))->revokeFamily($familyId));
+
+    $race = new stdClass;
+    $race->settle = null;
+    revokeInsideTheMint($familyId, $engine, $revoke, $race);
+
+    // Rotation already passed its denylist check, so it succeeds — the revoke has to finish the job.
+    app(RotateRefreshToken::class)($pair->refreshToken);
+
+    ($race->settle)();
+    usleep(200_000);
+
+    expect(DB::table('refresh_tokens')->where('family_id', $familyId)->count())->toBe(2)
+        ->and(DB::table('refresh_tokens')->where('family_id', $familyId)->whereNull('revoked_at')->count())->toBe(0);
+});
+
+it('never leaves a live token behind when a logout-all lands after rotation checked the denylist', function () {
+    // The same window as above, through the BULK revoke behind logout-all, revoke-others and password
+    // change/reset. Its second pass is limited to the family ids its SELECT returned, so it is replayed
+    // from statements actually executed (and rolled back), inside a transaction as the repository runs
+    // them.
+    $engine = ConcurrencyTestCase::engine();
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+    $familyId = (string) DB::table('refresh_tokens')->value('family_id');
+
+    $revoke = executedSql(fn () => (new DatabaseRefreshTokenRepository(null))->revokeUserFamilies($user->getKey()));
+    expect(DB::table('refresh_tokens')->whereNull('revoked_at')->count())->toBe(1);   // capture rolled back
+
+    $race = new stdClass;
+    $race->settle = null;
+    revokeInsideTheMint($familyId, $engine, ['BEGIN', ...$revoke, 'COMMIT'], $race);
+
+    app(RotateRefreshToken::class)($pair->refreshToken);
+
+    ($race->settle)();
+    usleep(200_000);
+
+    expect(DB::table('refresh_tokens')->where('family_id', $familyId)->count())->toBe(2)
+        ->and(DB::table('refresh_tokens')->where('family_id', $familyId)->whereNull('revoked_at')->count())->toBe(0);
+});

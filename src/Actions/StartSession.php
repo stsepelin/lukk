@@ -11,6 +11,7 @@ use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
+use Lukk\Support\UnclaimedSessions;
 use RuntimeException;
 
 /**
@@ -34,6 +35,8 @@ class StartSession
          * gates then honoured.
          */
         private readonly string $guard = 'api',
+        /** Null unless this guard's `claim_seconds` is on. */
+        private readonly ?UnclaimedSessions $unclaimed = null,
     ) {}
 
     /**
@@ -50,7 +53,7 @@ class StartSession
     {
         $familyId = (string) Str::uuid();
         $secret = $this->issuer->newRefreshSecret();
-        $expiresAt = now()->getTimestamp() + $this->config['refresh_ttl'];
+        $expiresAt = now()->getTimestamp() + (int) ($this->config['refresh_ttl'] ?? 2592000);
         $granted = $abilities === null ? null : Abilities::fromArray($abilities);
 
         // `''`, not null, for a grant that is pinned to NOTHING — a capped impersonation session, a
@@ -63,6 +66,14 @@ class StartSession
         $context = new TokenContext($this->guard, $userId, $familyId, pinned: $granted !== null);
         $claims = array_merge(Lukk::customClaimsFor($userId), $claims);
         $abilities = $granted ?? Lukk::abilitiesFor($userId, $context);
+
+        // Unclaimed until first used (`claim_seconds`). Marked BEFORE the row exists: a cache failure then
+        // fails the sign-in cleanly instead of leaving a session nobody can claim. Never for a pinned
+        // grant — a personal access token or an impersonation session is delivered by the application,
+        // not by a sign-in response that can be lost, and its first use may legitimately be days away.
+        if ($this->unclaimed !== null && $granted === null) {
+            $this->unclaimed->mark($familyId, (int) ($this->config['refresh_ttl'] ?? 2592000));
+        }
 
         $this->repository->persist(
             $userId,

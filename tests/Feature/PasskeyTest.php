@@ -363,3 +363,17 @@ it('refuses a duplicate credential id as a validation failure, not a database er
     // NOTE: under a single guard `scoped()` applies no filter, so this half cannot tell a scoped
     // check from an unscoped one. The property that matters lives in AccountDeletionMultiGuardTest.
 });
+
+it('still lets a verified user sign in with a passkey when block_unverified_login is on', function () {
+    // The gate is about verification status, not the authenticator: the two-factor fix must not
+    // have narrowed the passkey path for an account that IS verified.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    storePasskey($user->id, 'cred-verified', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->json();
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-verified', 'sign_count' => 1],
+    ])->assertOk()->assertJsonStructure(['access_token']);
+});

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Lukk\Actions\Concerns\ComputesDenylistTtl;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\RefreshTokenRepository;
 
@@ -12,6 +13,8 @@ use Lukk\Contracts\RefreshTokenRepository;
  */
 class RevokeOtherSessions
 {
+    use ComputesDenylistTtl;
+
     /**
      * @param  array<string, mixed>  $config
      */
@@ -23,12 +26,12 @@ class RevokeOtherSessions
 
     public function __invoke(int|string $userId, string $currentFamilyId): void
     {
+        $ttl = $this->denylistTtl($this->config);
+
         // Denylisted inside the repository's transaction and BEFORE the rows are revoked — see
         // `RevokeSession` for why that direction is the safe one to fail in.
         $this->repository->revokeUserFamiliesExcept($userId, $currentFamilyId, fn (array $ids) => array_map(
-            fn (string $familyId) => $this->denylist->revokeFamily(
-                $familyId, $this->config['access_ttl'] + $this->config['leeway'],
-            ), $ids,
+            fn (string $familyId) => $this->denylist->revokeFamily($familyId, $ttl), $ids,
         ));
     }
 }

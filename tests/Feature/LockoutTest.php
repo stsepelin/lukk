@@ -510,3 +510,17 @@ it('refuses a confirm request that lost the reservation race', function () {
     app('auth')->forgetGuards();
     $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'correct'])->assertStatus(423);
 });
+
+it('summarises nothing for an empty subject list or an unpublished table, like forget()', function () {
+    // The export read must refuse exactly what the erasure sweep refuses: an empty subject is never a
+    // key (it would name every unkeyable caller's shared bucket), and a missing table is no data.
+    $lockouts = app(LockoutRepository::class);
+    $lockouts->recordFailure('confirm', '1', 'api');
+
+    expect($lockouts->summariesForSubjects(['', ''], 'api'))->toBe([])
+        ->and($lockouts->summariesForSubjects(['1'], 'api'))->toHaveCount(1);
+
+    Schema::drop('lukk_lockouts');
+
+    expect($lockouts->summariesForSubjects(['1'], 'api'))->toBe([]);
+});

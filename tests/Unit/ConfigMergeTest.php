@@ -78,3 +78,13 @@ it('skips the deep merge when the application configuration is cached', function
 
     expect($app->configurationIsCached())->toBeTrue();
 });
+
+it('no longer ships the rotation / reuse_detection / denylist switches', function () {
+    // They were described as switches and read by nothing: rotation, reuse detection and the denylist
+    // are the security model, not options. Shipping them invited an operator to "turn off" a
+    // property that stayed on — or, worse, to believe they had.
+    $defaults = require __DIR__.'/../../config/lukk.php';
+
+    expect($defaults['features'])->not->toHaveKeys(['rotation', 'reuse_detection', 'denylist'])
+        ->and($defaults['features']['logout_all'])->toBeTrue();
+});

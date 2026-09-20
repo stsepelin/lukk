@@ -7,7 +7,9 @@ namespace Lukk\Auth;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Http\Request;
+use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
+use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\VerifiedToken;
 
@@ -22,6 +24,8 @@ class JwtGuard
         private readonly TokenVerifier $verifier,
         private readonly UserProvider $users,
         private readonly string $guard = 'api',
+        /** This guard's `claim_seconds`, resolved once when the guard is built; 0 = feature off. */
+        private readonly int $claimWindow = 0,
     ) {}
 
     public function __invoke(Request $request): ?Authenticatable
@@ -35,6 +39,13 @@ class JwtGuard
         $claims = $this->verifier->verify($token);
 
         if ($claims === null) {
+            return null;
+        }
+
+        // Unclaimed sessions. An integer compare when the feature is off — the action, its cache
+        // store and the cache itself are never touched. When on, one cache read per request, before
+        // the user lookup, so a session revoked here costs no query.
+        if ($this->claimWindow > 0 && ! $this->claimed((string) ($claims->fid ?? ''), is_numeric($claims->iat ?? null) ? (int) $claims->iat : null)) {
             return null;
         }
 
@@ -61,5 +72,15 @@ class JwtGuard
         $request->attributes->set('lukk.claims', $claims);
 
         return $user;
+    }
+
+    private function claimed(string $familyId, ?int $issuedAt): bool
+    {
+        // Resolved on THIS guard, so the revocation it may perform hits this guard's repository. The
+        // token's `iat` decides whether it is the sign-in's original — an access token carries no
+        // lineage, so this half stays the mint-time comparison; with the window clamped past
+        // `access_ttl + leeway`, the original access token has normally expired before it could be
+        // late, so in practice this path claims and the refresh path is the one that revokes.
+        return (bool) Lukk::onGuard($this->guard, fn () => app(ClaimSession::class)($familyId, $issuedAt));
     }
 }

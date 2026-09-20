@@ -21,6 +21,8 @@ use Illuminate\Support\Carbon;
  * @property string|null $guard
  * @property int $attempts
  * @property Carbon|null $locked_at
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
  */
 class Lockout extends Model
 {

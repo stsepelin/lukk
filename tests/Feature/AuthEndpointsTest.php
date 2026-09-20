@@ -87,8 +87,9 @@ it('revokes other sessions but keeps the calling one via DELETE /sessions/others
     expect(RefreshToken::where('family_id', '!=', $currentFid)->whereNull('revoked_at')->count())->toBe(0);
 });
 
-it('requires authentication for the logout endpoints', function () {
-    $this->postJson('/auth/logout')->assertUnauthorized();
+it('requires authentication for the session-collection endpoints', function () {
+    // `POST /auth/logout` is deliberately NOT here: it also accepts the refresh token, so a client
+    // with an expired access token can still end its session. See LogoutTest.
     $this->deleteJson('/auth/sessions')->assertUnauthorized();
     $this->deleteJson('/auth/sessions/others')->assertUnauthorized();
 });
@@ -154,4 +155,86 @@ it('denylists every family before revoking the rows on logout-all', function () 
     app(RevokeAllSessions::class)($user->getKey());
 
     expect($seen)->not->toBeEmpty()->and(min($seen))->toBeGreaterThan(0);
+});
+
+it('keeps rotation, reuse detection and the denylist on under a stale config that says false', function () {
+    // A config published before these keys were removed still carries them, and the deep merge never
+    // deletes a key. They must stay inert: nothing may start reading them as an off switch.
+    config([
+        'lukk.features.rotation' => false,
+        'lukk.features.reuse_detection' => false,
+        'lukk.features.denylist' => false,
+        'lukk.grace_seconds' => 0,
+    ]);
+    Event::fake([RefreshTokenReused::class]);
+    $pair = User::factory()->create()->startSession();
+
+    // Rotation: the token is consumed and a successor minted.
+    $this->postJson('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertOk();
+    expect(RefreshToken::whereNotNull('rotated_at')->count())->toBe(1);
+
+    // Reuse detection: replaying the consumed token past grace kills the family.
+    $this->travel(5)->seconds();
+    $this->postJson('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertUnauthorized();
+    Event::assertDispatched(RefreshTokenReused::class);
+
+    // Denylist: the family's access token no longer verifies.
+    expect(verifier()->verify($pair->accessToken))->toBeNull();
+});
+
+it('keeps the caller\'s refresh cookie when revoking other sessions in cookie mode', function () {
+    // The response was `LogoutResponse`, which in cookie mode clears the refresh cookie — but this
+    // route keeps the calling session alive. The client lost the ability to refresh a session the
+    // server still considered live, and was logged out ~15 minutes later on its next refresh.
+    config(['lukk.cookie_mode' => true]);
+    $user = User::factory()->create();
+    $other = $user->startSession();
+    $current = $user->startSession();
+
+    $response = $this->withToken($current->accessToken)->deleteJson('/auth/sessions/others')
+        ->assertNoContent();
+
+    expect($response->getContent())->toBe('')
+        ->and($response->headers->getCookies())->toBeEmpty();
+
+    // Other sessions are gone; the caller's cookie still refreshes.
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->withCredentials()->withUnencryptedCookie('__Host-refresh', $current->refreshToken)
+        ->postJson('/auth/refresh')->assertOk();
+});
+
+it('answers revoke-other-sessions with a bare 204 in body mode too', function () {
+    $user = User::factory()->create();
+    $user->startSession();
+    $current = $user->startSession();
+
+    $response = $this->withToken($current->accessToken)->deleteJson('/auth/sessions/others')->assertNoContent();
+
+    expect($response->getContent())->toBe('')
+        ->and($response->headers->getCookies())->toBeEmpty();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
+});
+
+it('revokes a family in two statements, closing the PostgreSQL snapshot window', function () {
+    // The race itself only reproduces on a real PostgreSQL (tests/Concurrency). The bulk path cannot be
+    // replayed there — its family ids come from a SELECT — so its second pass is pinned structurally:
+    // one UPDATE per statement snapshot, the second limited to the families already denylisted.
+    $user = User::factory()->create();
+    $user->startSession();
+    $user->startSession();
+
+    $updates = [];
+    DB::listen(function ($query) use (&$updates) {
+        if (str_starts_with(strtolower($query->sql), 'update "refresh_tokens"')) {
+            $updates[] = $query->sql;
+        }
+    });
+
+    revokeAll()($user->getKey());
+    expect($updates)->toHaveCount(2)
+        ->and($updates[1])->toContain('"family_id" in');
+
+    $updates = [];
+    revokeSession()((string) RefreshToken::value('family_id'));
+    expect($updates)->toHaveCount(2);
 });

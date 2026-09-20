@@ -20,6 +20,127 @@ but the default is safe.
 
 ---
 
+## Upgrading to the next release from 0.6.x (unreleased)
+
+### `POST /auth/logout` no longer requires a valid access token
+
+**Medium impact — if a client relies on logout answering 401, uses cookie mode, or you rebound
+`LogoutResponse`.**
+
+Logout accepts a valid access token **or** the refresh token the client holds. What changes:
+
+- A request with no usable credential answers **204** instead of 401, and revokes nothing. Logout is
+  idempotent and never reveals whether a token existed.
+- **Cookie mode:** the refresh cookie is used, and the clearing `Set-Cookie` sent, only when the
+  request has `Content-Type: application/json` or `Sec-Fetch-Site: same-origin`/`none`. A client that
+  POSTs to logout with no body from a sibling subdomain must now send `{}` as JSON (lukk-js does), or
+  its cookie is neither revoked through logout nor cleared — the bearer still ends the session.
+- A body `refresh_token` is read from a **JSON** body only, never a form body or the query string.
+- The route has **no throttle**. Only refresh-token lookups that come up empty are counted
+  (`rate_limits.refresh`, per guard and caller): a MISS, or a token whose family is **already
+  revoked** — so a logout retried or replayed after the session ended costs the budget, while one that
+  resolves to a live family costs nothing. Counted only when no valid bearer is presented; an
+  exhausted bucket refuses the lookup up front. When it is throttled the answer is
+  **429 with `Retry-After`** and the cookie is not cleared — the session is still live, so the client
+  must retry rather than treat it as logged out.
+- A consumed refresh token presented past the grace window dispatches `RefreshTokenReused` and
+  revokes its family, exactly as `/refresh` does. An expired access token alone ends nothing.
+- `LogoutResponse` now takes `bool $clearRefreshCookie = true`. A **rebound** implementation should
+  honour it — sending the clearing cookie when it is false re-opens the forced-logout CSRF.
+
+**Differences from running behind `auth:{guard}`**, for code that reads the request:
+
+- With a valid bearer the request is still authenticated as its user (`$request->user()`,
+  `Auth::user()`), and the active guard is set, before the session is revoked.
+- With only a refresh token — or a valid bearer whose user no longer exists — nobody is authenticated
+  and `$request->user()` is `null`, where the old route would have answered 401 and never reached
+  your response.
+- The `Authenticate` middleware no longer runs on this route, so anything attached through it (a
+  middleware-priority hook, a guest redirect) does not apply.
+- If you **extend** `AuthenticatedSessionController`: its constructor takes `EndSession` instead of
+  `RevokeSession`, and `destroy()` no longer takes a `TokenVerifier`.
+
+A test that used `/auth/logout` as a "does this token authenticate on this guard" probe should use an
+`auth:{guard}` route instead.
+
+### `DELETE /auth/sessions/others` no longer uses `LogoutResponse`
+
+**Low impact — only if you rebound `LogoutResponse` and relied on it for this route.**
+
+The route keeps the caller's session alive, but `LogoutResponse` ends the caller's session
+client-side: in cookie mode it cleared the refresh cookie and the client could no longer refresh. It
+now answers a bare `204` directly — the same status and empty body as before, so clients need no
+change. A rebound `LogoutResponse` still applies to `POST /auth/logout` and `DELETE /auth/sessions`.
+
+### New: unclaimed sessions (`claim_seconds`) and `POST /auth/session/claim`
+
+**Low impact — off by default; the route is new but inert until you set the key.**
+
+```php
+// config/lukk.php (top level, or per guard under `guards.{name}`)
+'claim_seconds' => (int) env('LUKK_CLAIM_SECONDS', 0),   // e.g. 600
+```
+
+With a window set, the ORIGINAL credentials of a session started by a sign-in — its first access
+token and never-rotated refresh token — are revoked (the whole family, `Events\SessionUnclaimed`) if the
+session is not used within the window. **The contract:** every client must, within the window, call
+`POST /auth/session/claim` (204, authenticated, not pin-gated), or make an authenticated request to this
+lukk app, or refresh. A client that uses its access token only on another service must call the claim
+route. The effective window is at least `access_ttl + leeway` and at least 60 seconds. Sessions with a
+pinned grant are exempt.
+
+The clamp only guarantees the original *access* token cannot be used past the window. A client that
+does not make an authenticated request to this app or refresh within it — including one that uses the
+token only on another service and refreshes after that service's 401 — must call the claim route.
+
+If you implement `RefreshTokenRepository` yourself, populate `RefreshTokenRecord::$createdAt` (the row's
+creation time); a `Lukk::useRefreshTokenModel` subclass must keep `$timestamps` on. Without it the
+original refresh token is never recognised, so nothing is revoked, and lukk logs a warning once per
+worker process.
+
+Markers live in the denylist cache store. Losing them fails open; restoring an old snapshot can at most
+revoke a session still presenting its original sign-in refresh token after the window. A published
+config without the key — or a cached one — leaves the feature off.
+
+### An unverified two-factor user is refused at login
+
+**Medium impact — only with `email_verification.block_unverified_login` on.**
+
+The password step now answers **403** for an unverified account *before* issuing a challenge, and the
+challenge route refuses one redeemed after the account became unverified. Previously an enrolled
+account walked past the gate. `block_unverified_login` and `features.email_verification` are now also
+read per guard.
+
+### `features.logout_all` now does something
+
+**Medium impact — only if your published config sets it to `false`.**
+
+It was never read. `false` now removes `DELETE /auth/sessions` for that guard (a 404).
+
+### Three `features` keys removed
+
+**Low impact — no action.** `rotation`, `reuse_detection` and `denylist` were never honoured; those
+behaviours are always on. A published config that still contains them keeps working — the keys are
+simply ignored, as they always were. Delete them to avoid implying they are switches.
+
+### `LockoutRepository` gained a method
+
+**Medium impact — only if you implement `LockoutRepository` yourself.**
+
+```php
++ public function summariesForSubjects(array $subjects, ?string $guard): array;
+```
+
+The read-side mirror of `forget()`, used by the account export: it must reach exactly the rows
+`forget()` deletes, scoped to the guard. The export response gains a `lockouts` key.
+
+### Logout clears the refresh cookie per guard
+
+**Low impact — no action.** `LogoutResponse` reads `cookie_mode` through the guard's config, like
+login and refresh already did.
+
+---
+
 ## Upgrading to 0.6.0 from 0.5.x
 
 ### New routes: `DELETE /auth/account` and `GET /auth/account/export`

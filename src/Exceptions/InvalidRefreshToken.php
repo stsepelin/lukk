@@ -9,7 +9,7 @@ use RuntimeException;
 
 /**
  * Thrown by Actions\RotateRefreshToken when a refresh token cannot be exchanged.
- * `$reason` (unknown|revoked|expired|reuse) is for logging only, never leaked to the
+ * `$reason` (unknown|revoked|expired|reuse|unclaimed) is for logging only, never leaked to the
  * client; self-renders a 401 so it stays a clean response in any app.
  */
 class InvalidRefreshToken extends RuntimeException

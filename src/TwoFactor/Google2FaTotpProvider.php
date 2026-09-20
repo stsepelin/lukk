@@ -45,7 +45,9 @@ class Google2FaTotpProvider implements TwoFactorProvider
 
         // Atomic claim: add() writes only if the key is absent and returns false otherwise,
         // so two concurrent requests presenting the same code can't both pass (has()+put()
-        // would race). The marker outlives the code's full validity band (±window steps).
+        // would race) — on stores with a native add() (Redis, Memcached, database, file,
+        // DynamoDB); APC and the memoizing decorator fall back to get-then-put. The marker
+        // outlives the code's full validity band (±window steps).
         return $this->cache->add($key, true, (2 * $this->config['window'] + 1) * 30);
     }
 }

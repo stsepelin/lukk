@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\ExportAccount;
+use Lukk\Auth\LoginRateLimiter;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('account-deletion');
@@ -99,4 +102,37 @@ it('formats the two-factor timestamp whether the model casts it or not', functio
 
     $user->two_factor_confirmed_at = null;
     expect($export($user)['two_factor']['confirmed_at'])->toBeNull();
+});
+
+it('exports the lockout counters erasure would delete, in all three key spaces', function () {
+    // Art. 15 completeness: `DeleteAccount` erases lukk_lockouts rows as personal data, so the export
+    // has to disclose the same rows — an erasure that destroys what an access request never showed is
+    // the "half-answer that looks whole" this action warns about.
+    $user = User::factory()->create(['email' => 'Locked@Example.test']);
+    $lockouts = app(LockoutRepository::class);
+
+    $lockouts->recordFailure('login', LoginRateLimiter::lockoutSubject($user, ''), 'api');          // id:<id>
+    $lockouts->recordFailure('login', LoginRateLimiter::lockoutSubject($user, ''), 'api');
+    $lockouts->recordFailure('confirm', (string) $user->getKey(), 'api');                          // <id>
+    $lockouts->recordFailure('login', LoginRateLimiter::lockoutSubject(null, $user->email), 'api'); // idn:<normalized>
+
+    // Someone else's counter, which must not appear.
+    $other = User::factory()->create();
+    $lockouts->recordFailure('login', LoginRateLimiter::lockoutSubject($other, ''), 'api');
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['lockouts'])->toHaveCount(3)
+        ->and(collect($export['lockouts'])->pluck('purpose')->sort()->values()->all())->toBe(['confirm', 'login', 'login'])
+        ->and(collect($export['lockouts'])->pluck('attempts')->sort()->values()->all())->toBe([1, 1, 2])
+        ->and($export['lockouts'][0])->toHaveKeys(['purpose', 'attempts', 'locked_at', 'first_failed_at', 'last_failed_at'])
+        ->and($export['lockouts'][0]['last_failed_at'])->toBeString()
+        // lukk's internal key format is not the subject's data; the purpose and counts are.
+        ->and(json_encode($export['lockouts']))->not->toContain('idn:')->not->toContain('id:');
+});
+
+it('exports no lockouts when the lockout table was never published', function () {
+    Schema::drop('lukk_lockouts');
+
+    expect(app(ExportAccount::class)(User::factory()->create())['lockouts'])->toBe([]);
 });
