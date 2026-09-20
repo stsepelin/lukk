@@ -8,11 +8,13 @@ name: mutation
 # they were meant to catch. Mutation testing asks the other question, and does not care what anyone
 # believed while writing the test.
 #
-# PRs are scoped to the files they touch, so the feedback is fast and lands before merge. The full run
-# is nightly, because it is minutes rather than seconds and nothing about it needs to block a push.
+# The full run is NIGHTLY, and that is the gate: a regression surfaces within a day, on a diff that
+# says which class moved. A PR can ask for the same check on the files it touches by carrying the
+# `mutation` label — ~18 minutes, so it is opt-in rather than a toll on every push.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   schedule:
     # 03:20 UTC, off the hour to avoid the scheduling stampede GitHub warns about.
     - cron: '20 3 * * *'
@@ -23,13 +25,13 @@ permissions:
 
 jobs:
   changed:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutation')
     runs-on: ubuntu-latest
     # `--class` is a PREFIX match, so a PR touching 20 classes can mutate 44 files / ~1,700 mutants.
     # At the suite's cost-4 hashing that is ~18 minutes on a 4-vCPU runner (it was ~45 at cost 12).
     # Cancelled mid-run reads as a failure and tells nobody anything, so the cap keeps 2.5x margin.
     timeout-minutes: 45
-    name: Mutation score (changed files)
+    name: Mutation score (changed files, label `mutation`)
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
