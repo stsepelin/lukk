@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Hash;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\LukkServiceProvider;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
 use Lukk\Tests\Fixtures\User;
 use PragmaRX\Google2FA\Google2FA;
@@ -331,4 +332,17 @@ it('leaves no guarded config read unexercised', function () {
     }));
 
     expect($unexercised)->toBe([]);
+});
+
+it('boots with no lukk config block at all, rather than taking the application down', function () {
+    // The whole ROOT key missing — install the package into an application that has already run
+    // `config:cache`, and `mergeConfigDeep` early-returns, so nothing backfills it. `config()` is
+    // declared `array`, so a bare `get('lukk')` returned null into a typed return: a TypeError
+    // thrown from `boot()`, which takes the entire application down rather than just the auth
+    // routes. `ConfigDegradationTest`'s scanner keys on nested keys and cannot see this case.
+    config(['lukk' => null]);
+
+    $provider = new LukkServiceProvider(app());
+
+    expectNoThrow(fn () => $provider->boot());
 });

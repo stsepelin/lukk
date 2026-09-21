@@ -12,6 +12,7 @@ use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Actions\StartPasskeyRegistration;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
+use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
@@ -21,6 +22,7 @@ use Lukk\Support\Abilities;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
 use Lukk\Tests\Fixtures\User;
+use PragmaRX\Google2FA\Google2FA;
 
 uses()->group('passkeys');
 
@@ -99,6 +101,26 @@ it('logs in passwordlessly with a passkey and stamps amr=webauthn', function () 
 
     expect(claims($access)->amr)->toBe(['webauthn'])
         ->and(claims($access)->sub)->toBe((string) $user->id);
+});
+
+it('keeps amr=webauthn across a refresh, rather than downgrading it to pwd', function () {
+    // The `['pwd']` assertions elsewhere cannot see a rotation that stamps a CONSTANT: every one of
+    // them survives a refresh that hardcodes `['pwd']`, which is the fail-open direction — a
+    // phishing-resistant session silently re-described as a password one, and now durable for the
+    // family's whole life rather than a single access_ttl.
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-refresh', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $pair = $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-refresh', 'sign_count' => 1],
+    ])->assertOk()->json();
+
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $pair['refresh_token']])->assertOk();
+
+    expect(claims($rotated->json('access_token'))->amr)->toBe(['webauthn']);
 });
 
 it('rejects a replayed assertion (the challenge is single-use)', function () {
@@ -526,4 +548,102 @@ it('still skips the second factor when user verification is required', function 
         'ceremony_id' => $start['ceremony_id'],
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-uv', 'sign_count' => 1],
     ])->assertOk()->assertJsonStructure(['access_token']);
+});
+
+/** Enrol and confirm a real second factor. Named apart from the multi-guard suite's own helper. */
+function confirmSecondFactorFor(object $model): string
+{
+    $secret = app(TwoFactorProvider::class)->generateSecret();
+
+    $model->forceFill([
+        'two_factor_secret' => Crypt::encryptString($secret),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    return $secret;
+}
+
+it('refuses passkey step-up when user verification is not required', function () {
+    // The login gate alone makes the rest decorative. Under `preferred` an assertion proves
+    // POSSESSION only — `CheckUserVerification` returns before reading the UV flag — yet this route
+    // mints the same `confirmation_token` the password path does, and `routes/api.php` calls it "the
+    // OTHER way to reach step-up". So whoever holds the authenticator, without its PIN, can earn a
+    // step-up and spend it on `DELETE /auth/two-factor` or on enrolling their own key: binding and
+    // removing an authenticator below the account's own assurance level (NIST SP 800-63B §5.2.1).
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+    storePasskey($user->id, 'cred-stepup', 0);
+
+    $start = $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup', 'sign_count' => 1],
+    ])->assertStatus(403)->assertJsonMissingPath('confirmation_token');
+});
+
+it('still allows passkey step-up when user verification is required', function () {
+    config(['lukk.passkeys.user_verification' => 'required']);
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+    storePasskey($user->id, 'cred-stepup-ok', 0);
+
+    $start = $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-ok', 'sign_count' => 1],
+    ])->assertOk()->assertJsonStructure(['confirmation_token']);
+});
+
+it('records amr=webauthn, not pwd, when a passkey login completes a second factor', function () {
+    // The challenge branch hands a WebAuthn login to the 2FA controller, which hardcoded
+    // `['pwd','otp']` — so a passkey login was recorded as a password one. On a PASSWORDLESS account
+    // that asserts a credential the account does not have, and the same release makes `amr` durable,
+    // so the false claim now rides every rotation for the family's whole life. Both directions are
+    // wrong: an RP gating on `pwd` ("the knowledge factor was presented") is fail-open, and one
+    // gating on `webauthn` for phishing resistance refuses a session that was in fact stronger.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create(['password' => null]);
+    $secret = confirmSecondFactorFor($user);
+    storePasskey($user->id, 'cred-2fa-amr', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $challenge = $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-2fa-amr', 'sign_count' => 1],
+    ])->assertOk()->json('challenge_token');
+
+    app('auth')->forgetGuards();
+    $pair = $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge,
+        'code' => app(Google2FA::class)->getCurrentOtp($secret),
+    ])->assertOk()->json();
+
+    expect(claims($pair['access_token'])->amr)->toBe(['webauthn', 'otp']);
+
+    // And it survives rotation, like every other amr.
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $pair['refresh_token']])->assertOk();
+    expect(claims($rotated->json('access_token'))->amr)->toBe(['webauthn', 'otp']);
+});
+
+it('leaves a password-less account a way to step up under preferred', function () {
+    // The gate that refuses possession-only step-up must not strand the accounts this package
+    // itself creates. `ConfirmPassword` calls `validateCredentials`, which returns false whenever
+    // the column is empty — so for a passkey-only, SSO or invited-not-yet-set user the "use your
+    // password instead" advice is impossible to follow, and `IssuesConfirmationToken` has only these
+    // two callers. Refusing both leaves no way to mint a `reauth` token at all: no enrolling a
+    // SECOND passkey (the only self-service recovery from a lost authenticator), no managing 2FA, no
+    // changing a password, no export or erasure. `features.password_reset` is off by default, so
+    // there is not even a reset escape hatch. One lost key and the account is unrecoverable.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create(['password' => null]);
+    $pair = $user->startSession();
+    storePasskey($user->id, 'cred-only-way', 0);
+
+    $start = $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-only-way', 'sign_count' => 1],
+    ])->assertOk()->assertJsonStructure(['confirmation_token']);
 });

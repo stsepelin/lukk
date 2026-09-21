@@ -36,7 +36,7 @@ class RefreshToken extends Model
      * 0.6, the family's pinned entitlement. `$hidden` only affects `toArray`/`toJson`, so nothing
      * inside lukk changes; it just turns a foot-gun into a non-event.
      */
-    protected $hidden = ['token_hash', 'scope'];
+    protected $hidden = ['token_hash', 'scope', 'amr'];
 
     protected function casts(): array
     {

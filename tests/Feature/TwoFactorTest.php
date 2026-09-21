@@ -10,8 +10,10 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\ConfirmTwoFactor;
 use Lukk\Actions\EnableTwoFactor;
+use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
@@ -743,3 +745,29 @@ it('reports the configured recovery-code total as a number, and eight when unset
     'a string from env' => ['10', 10],
     'unset' => [null, 8],
 ]);
+
+it('assumes the password path for a challenge that does not say how the first factor was proved', function () {
+    // A rolling deploy redeems 0.7-minted challenges on 0.8 code, and a co-issuer's challenge may
+    // carry no `amr` at all. Both must keep recording `['pwd','otp']`, the behaviour they had. The
+    // fallback and the parameter default masked each other — removing either alone left the suite
+    // green — so this pins the redemption side on its own by minting a challenge without the claim.
+    $user = User::factory()->create();
+    $secret = app(TwoFactorProvider::class)->generateSecret();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString($secret),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    // Minted directly, with no first factor named — exactly the shape an older release produced.
+    $challenge = app(ChallengeToken::class)->issue(
+        '2fa', $user->getAuthIdentifier(), 300,
+        passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($user),
+    );
+
+    $pair = $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge,
+        'code' => currentOtp($secret),
+    ])->assertOk()->json();
+
+    expect(claims($pair['access_token'])->amr)->toBe(['pwd', 'otp']);
+});

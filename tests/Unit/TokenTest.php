@@ -359,3 +359,38 @@ it('reads a jti or fid another issuer encoded as a number', function () {
     // Both reach the denylist as strings; a JSON number there was a TypeError on every request.
     expect(verifier()->verify(signedClaims(['jti' => 42, 'fid' => 7])))->not->toBeNull();
 });
+
+it('refuses an aud that is not a list of scalars, rather than 500ing before the jti guard', function () {
+    // `array_intersect` compares elements AS STRINGS, so a nested array or object in `aud` raised
+    // "Array to string conversion" — the same ErrorException the `jti`/`fid` guard was added for,
+    // two lines EARLIER in the same method, so that guard never got the chance to run. RFC 7519
+    // §4.1.3 makes `aud` a StringOrURI or an array of them; RFC 8725 §3.11 says check before use.
+    $base = [
+        'iss' => config('lukk.issuer'),
+        'sub' => '1', 'jti' => 'j-aud', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $nested = JWT::encode(['aud' => [[config('lukk.audience')]]] + $base, $secret, 'HS256', head: $head);
+    $object = JWT::encode(['aud' => ['n' => config('lukk.audience')]] + $base, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($nested))->toBeNull()
+        ->and(verifier()->verify($object))->toBeNull();
+});
+
+it('keeps accepting an ordinary string and list aud', function () {
+    // The guard must not refuse what RFC 7519 §4.1.3 allows.
+    $base = [
+        'iss' => config('lukk.issuer'),
+        'sub' => '1', 'jti' => 'j-aud-ok', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $asString = JWT::encode(['aud' => config('lukk.audience')[0] ?? config('lukk.audience')] + $base, $secret, 'HS256', head: $head);
+    $asList = JWT::encode(['aud' => (array) config('lukk.audience')] + $base, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($asString))->not->toBeNull()
+        ->and(verifier()->verify($asList))->not->toBeNull();
+});

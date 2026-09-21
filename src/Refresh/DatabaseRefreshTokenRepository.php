@@ -7,6 +7,7 @@ namespace Lukk\Refresh;
 use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
 use Lukk\Support\RefreshTokenRecord;
@@ -80,6 +81,14 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     private function hydrate(mixed $row): ?RefreshTokenRecord
     {
+        // Learn whether this schema carries `amr` from the ROW, the way `familyIsPinned()` reads the
+        // row rather than naming `scope` — a SELECT * already tells us, so the answer is free. It
+        // matters most on the rotation path, which always reads through the non-locking `findByHash`
+        // BEFORE opening its transaction: the probe below would otherwise run under the row lock.
+        if ($row !== null) {
+            $this->rememberAmrSupport(array_key_exists('amr', $row->getAttributes()));
+        }
+
         return $row === null ? null : new RefreshTokenRecord(
             id: $row->id,
             userId: $row->user_id,
@@ -114,9 +123,17 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             $attributes['scope'] = $scope;
         }
 
-        // Same conditional write as `scope`, and for the same reason: a pre-0.8 schema has no such
-        // column, and null is what its absence means anyway.
-        if ($amr !== null) {
+        // `scope`'s "write it only when set" guard is NOT enough here. `scope` is non-null only for
+        // an opt-in pinned grant, so on an un-migrated schema it almost never fires; every single
+        // sign-in supplies an `amr`, so the same guard would name a missing column on every login —
+        // and migrations here are publish-only, which makes that the DEFAULT outcome of upgrading
+        // the package without republishing. So ask the schema, once per application instance.
+        //
+        // Proactively, not by catching the failure: `persist()` runs inside `RotateRefreshToken`'s
+        // transaction, and on PostgreSQL a failed statement aborts it — every later statement then
+        // errors with 25P02 and `COMMIT` silently becomes `ROLLBACK`. A try/catch here would turn a
+        // missing column into a rotation that reports success and stores nothing.
+        if ($amr !== null && $this->supportsAmr()) {
             $attributes['amr'] = $amr;
         }
 
@@ -273,5 +290,63 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         $query = $this->query();
 
         return $this->guard === null ? $query : $query->where('guard', $this->guard);
+    }
+
+    /**
+     * Does this install's `refresh_tokens` table carry the 0.8 `amr` column?
+     *
+     * Answered from a hydrated row wherever one has been read (free, and the rotation path always
+     * reads one first), and only otherwise by asking the schema.
+     *
+     * Memoized per CONNECTION AND TABLE, on the application instance. Keying it globally answered
+     * for the wrong schema the moment one application served two connections — a migrated tenant and
+     * an un-migrated one — and the un-migrated INSERT then failed inside the rotate transaction,
+     * which on PostgreSQL aborts it: every later statement errors `25P02` and `COMMIT` silently
+     * becomes `ROLLBACK`. That is the precise failure this probe exists to avoid.
+     *
+     * On the application instance rather than in a `static`, because a process-static memo survives
+     * between tests and between Octane requests and would answer for a schema that has since
+     * migrated.
+     */
+    private function supportsAmr(): bool
+    {
+        $known = $this->rememberAmrSupport(null);
+
+        if ($known !== null) {
+            return $known;
+        }
+
+        $model = $this->query()->newModelInstance();
+
+        try {
+            return $this->rememberAmrSupport(
+                Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'amr')
+            ) ?? false;
+        } catch (\Throwable) {
+            // A transient probe failure — a blip, a deadlock, a statement timeout — must NOT be
+            // cached: doing so disabled `amr` for the life of the application instance, silently.
+            // Skipping the column for this one write is the safe direction; the next call re-asks.
+            return false;
+        }
+    }
+
+    /**
+     * Read or record what we know about the `amr` column for THIS connection and table.
+     *
+     * Passing null reads; passing a bool records and returns it. Null back means "not yet known".
+     */
+    private function rememberAmrSupport(?bool $supported): ?bool
+    {
+        $model = $this->query()->newModelInstance();
+        $key = 'lukk.schema.amr.'.($model->getConnectionName() ?? 'default').'.'.$model->getTable();
+        $app = app();
+
+        if ($supported === null) {
+            return $app->bound($key) ? (bool) $app->make($key) : null;
+        }
+
+        $app->instance($key, $supported);
+
+        return $supported;
     }
 }

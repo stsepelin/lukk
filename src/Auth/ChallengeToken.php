@@ -6,6 +6,7 @@ namespace Lukk\Auth;
 
 use Firebase\JWT\JWT;
 use Illuminate\Support\Str;
+use Lukk\Actions\StartSession;
 use Lukk\Contracts\Denylist;
 use Lukk\Lukk;
 use Lukk\Tokens\Jwt\KeyRing;
@@ -34,7 +35,10 @@ class ChallengeToken
         $this->keys = new KeyRing($config);
     }
 
-    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null): string
+    /**
+     * @param  list<string>|null  $firstFactor  How the FIRST factor was proved — `['pwd']`, `['webauthn']`.
+     */
+    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null, ?array $firstFactor = null): string
     {
         $now = now()->getTimestamp();
 
@@ -65,6 +69,15 @@ class ChallengeToken
         // so a refresh mid-window does not invalidate it.
         if ($familyId !== null && $familyId !== '') {
             $payload['fid'] = $familyId;
+        }
+
+        // How the FIRST factor was proved, so redemption can say so truthfully. Without it the 2FA
+        // controller hardcoded `['pwd','otp']` for every redemption — including a passkey login
+        // routed here, which asserted a password on an account that may not have one at all.
+        $encodedFirstFactor = StartSession::encodeAmr($firstFactor);
+
+        if ($encodedFirstFactor !== null) {
+            $payload['amr'] = $firstFactor;
         }
 
         // The PASSWORD the first factor was checked against (see `PasswordFingerprint`), for a challenge
@@ -111,6 +124,33 @@ class ChallengeToken
      * The password fingerprint a challenge was minted with, or null when it carries none (a co-issuer's,
      * or one from before the claim existed) — which `ConfirmPasswordUnchanged` refuses.
      */
+    /**
+     * How the first factor was proved, per the challenge itself. Null when it does not say — an
+     * older challenge, or a co-issuer's — and the caller then assumes the password path.
+     *
+     * @return list<string>|null
+     */
+    public function firstFactorOf(string $kind, string $token): ?array
+    {
+        $claims = $this->decode($kind, $token);
+
+        if ($claims === null || ! isset($claims->amr)) {
+            return null;
+        }
+
+        // Re-validated, never trusted: the claim rides a token this process signed, but `decode()`
+        // does not type-check it and a co-issuer sharing the secret can mint any shape.
+        //
+        // The `is_array` test comes FIRST because a `(array)` cast would widen rather than validate:
+        // it promotes a bare string to `["pwd"]` and a numeric-keyed object to a list, so shapes
+        // `encodeAmr` refuses on every other path would have been accepted here.
+        if (! is_array($claims->amr)) {
+            return null;
+        }
+
+        return StartSession::decodeAmr(StartSession::encodeAmr($claims->amr));
+    }
+
     public function passwordFingerprintOf(string $kind, string $token): ?string
     {
         $claims = $this->decode($kind, $token);

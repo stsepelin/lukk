@@ -549,7 +549,7 @@ class LukkServiceProvider extends ServiceProvider
             $this->registerClaimLimiter($limiter, "lukk-{$guardName}-claim", (string) $guardName); // @pest-mutate-ignore: RemoveStringCast
 
             $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
-                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
+                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 5), // the shipped value; see the $shipped table above
                 decaySeconds: (int) ($limits['two_factor']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
             // The extra guards carry confirm-password too, and they need the SAME per-user bucket as

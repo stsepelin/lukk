@@ -105,6 +105,12 @@ it('applies each sign-in rule on its own', function (array $data, string $field,
     'identifier bounded' => [['email' => str_repeat('a', 256), 'password' => 'secret-123456'], 'email', 'Max'],
     'password a string' => [['email' => 'ada@example.test', 'password' => ['x']], 'password', 'String'],
     'password bounded' => [['email' => 'ada@example.test', 'password' => str_repeat('a', 256)], 'password', 'Max'],
+    // Pinned here, on its own, because the equalizer's try/catch masks it end to end: delete this
+    // rule alone and the whole suite stayed green. `password_hash` raises `ValueError` on a NUL byte
+    // where `password_verify` only returns false, so hashing one on the no-usable-password branch
+    // answered 500 while a real account answered 422 — a deterministic, single-request account
+    // oracle that also escaped the failure limiter. `ChangePasswordRequest` carried the rule already.
+    'password without a NUL byte' => [['email' => 'ada@example.test', 'password' => "a\0b"], 'password', 'NotRegex'],
 ]);
 
 it('leaves a missing sign-in field to the credential check, not to validation', function (string $field) {

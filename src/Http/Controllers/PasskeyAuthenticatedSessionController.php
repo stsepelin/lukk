@@ -50,7 +50,7 @@ class PasskeyAuthenticatedSessionController
         // `DELETE /auth/two-factor`. The password path has always run this gate; this one is the third
         // gate it turned out to be missing, after `block_unverified_login` and the deleted-user check.
         if (! $this->passkeyIsSecondFactor() && $this->twoFactorRequired($user)) {
-            return $this->twoFactorChallenge($user, $challengeTokens);
+            return $this->twoFactorChallenge($user, $challengeTokens, ['webauthn']);
         }
 
         return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['webauthn']])]);

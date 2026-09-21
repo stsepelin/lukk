@@ -33,6 +33,12 @@ class TwoFactorChallengedSessionController
         $challenge = (string) $request->input('challenge_token'); // @pest-mutate-ignore: RemoveStringCast
         // Read before the challenge is spent — a consumed one no longer decodes.
         $checked = $this->challengeTokens->passwordFingerprintOf('2fa', $challenge);
+        // Same reason, same place. How the FIRST factor was proved, so the session records it
+        // truthfully instead of hardcoding `['pwd','otp']`: a passkey login routed here by the
+        // user-verification gate was asserting a password the account may not even have, and `amr`
+        // is durable now, so that would ride every rotation for the family's whole life. A challenge
+        // that does not say — an older one, or a co-issuer's — is assumed to be the password path.
+        $firstFactor = $this->challengeTokens->firstFactorOf('2fa', $challenge) ?? ['pwd'];
 
         $user = ($this->verifyChallenge)(
             $challenge,
@@ -48,7 +54,7 @@ class TwoFactorChallengedSessionController
         // session for an account the policy says must not have one.
         abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
 
-        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp']]);
+        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => [...$firstFactor, 'otp']]);
 
         // The first factor was a password checked up to `challenge_ttl` ago. Changed or reset since, the
         // challenge stood in for a credential the account no longer has — see `ConfirmPasswordUnchanged`.

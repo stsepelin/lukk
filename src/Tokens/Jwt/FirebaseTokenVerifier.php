@@ -78,6 +78,17 @@ class FirebaseTokenVerifier implements TokenVerifier
         $accepted = array_filter((array) ($this->config['audience'] ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
         $presented = array_filter((array) ($claims->aud ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
 
+        // Scalars only, BEFORE `array_intersect`, which compares its elements as strings: a nested
+        // array or object in `aud` raised "Array to string conversion" and so a 500, exactly as a
+        // non-scalar `jti`/`fid` did below — and two lines earlier, so the guard down there never got
+        // the chance. RFC 7519 §4.1.3 makes `aud` a StringOrURI or an array of them; RFC 8725 §3.11
+        // says check the type before using it.
+        foreach ($presented as $audience) {
+            if (! is_scalar($audience)) {
+                return null;
+            }
+        }
+
         if (! array_intersect($presented, $accepted)) {
             return null;
         }

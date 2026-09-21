@@ -36,9 +36,26 @@ function fresh(string $abstract): mixed
 }
 
 describe('the default guard\'s named limiters', function () {
-    $named = ['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa',
-        'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset',
-        'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'];
+    // DERIVED from config/lukk.php, not a third hardcoded copy. The property test below claims a new
+    // key cannot ship with a loose fallback — which was untrue while this list was written by hand:
+    // a key added to the provider's loop and to the config file simply would not appear here, so
+    // neither test would ever look at it. `login` is excluded because it has its own limiter class,
+    // and `ipv6_prefix` because it is not a limiter at all.
+    $shippedLimits = (require __DIR__.'/../../config/lukk.php')['rate_limits'];
+    $named = [];
+    foreach (array_keys($shippedLimits) as $key) {
+        if (in_array($key, ['login', 'ipv6_prefix'], true)) {
+            continue;
+        }
+
+        $named[$key] = 'lukk-'.match ($key) {
+            'two_factor' => '2fa',
+            'email_verification' => 'email-verification',
+            'password_reset' => 'password-reset',
+            'registration' => 'register',
+            default => $key,
+        };
+    }
 
     it('reads each one\'s limits as numbers from the strings env() delivers', function (string $key, string $name) {
         config(["lukk.rate_limits.{$key}" => ['max_attempts' => '7', 'decay_seconds' => '71']]);

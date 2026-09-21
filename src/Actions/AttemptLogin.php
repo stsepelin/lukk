@@ -155,11 +155,35 @@ class AttemptLogin
         // request. That answer identified exactly the accounts worth pivoting to a passkey or a
         // password-reset phish, and this package ships passkeys, so it creates that row shape.
         if ($user === null || ! $this->hasUsablePassword($user)) {
-            Hash::make($credentials['password']);
+            // The equalizer must never be able to THROW on attacker-controlled input, whatever the
+            // hasher is. `password_hash` raises `ValueError` on a NUL byte where `password_verify`
+            // only returns false, which turned this branch into a 500 while a real account still got
+            // its 422 — a deterministic, single-request account oracle, and one that escaped the
+            // failure limiter, since that counts `ValidationException` and not `ValueError`.
+            // `LoginRequest` now rejects NUL outright; this is the belt to that braces, and it also
+            // covers a rebound hasher with its own opinions about what it will not hash.
+            try {
+                Hash::make($credentials['password']);
+            } catch (\Throwable) {
+                // Nothing to report: the work was the only point, and the failure below is the answer.
+            }
+
             $this->fail();
         }
 
-        if (! $this->users->validateCredentials($user, $credentials)) {
+        // Wrapped for the same reason the equalizer above is: `Hash::check` can throw too. With
+        // `hashing.driver` on argon2id and a bcrypt row left by an import or a partial migration,
+        // `AbstractHasher::check` raises "This password does not use the Argon2id algorithm" — a 500
+        // where an unknown identifier gets a 422, which is the same single-request account oracle the
+        // NUL byte opened on the branch above, on the neighbouring line. A stored hash the active
+        // driver cannot read is not a credential anyone can present, so it fails closed.
+        try {
+            $valid = $this->users->validateCredentials($user, $credentials);
+        } catch (\Throwable) {
+            $valid = false;
+        }
+
+        if (! $valid) {
             $this->fail();
         }
 

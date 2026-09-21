@@ -62,3 +62,28 @@ it('covers a token that outlives the configured window, rather than under-coveri
     expect(denylistTtl(['access_ttl' => 300, 'leeway' => 5]))->toBeGreaterThan(305)
         ->and(denylistTtl(['access_ttl' => 300, 'leeway' => 5]))->toBeGreaterThanOrEqual(900);
 });
+
+it('adds leeway to the presented token\'s own remaining life', function () {
+    // Without it the entry expires exactly when the token does, while the verifier still accepts
+    // that token for `leeway` seconds past `exp` — a window in which a revoked family authenticates
+    // again. The configured floor already carries leeway, so only the presented-token branch can
+    // lose it; this pins that branch on its own by keeping the floor far below it.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+
+    $request = Request::create('/auth/sessions', 'DELETE');
+    $claims = verifier()->verify($access);
+    VerifiedToken::put($request, new VerifiedToken(
+        guard: 'api',
+        userId: $user->getAuthIdentifier(),
+        userClass: $user::class,
+        familyId: (string) $claims->fid,
+        abilities: Abilities::fromArray([]),
+        claims: $claims,
+    ));
+    app()->instance('request', $request);
+
+    $remaining = (int) $claims->exp - now()->getTimestamp();
+
+    expect(denylistTtl(['access_ttl' => 1, 'leeway' => 30]))->toBe($remaining + 30);
+});

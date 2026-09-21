@@ -38,6 +38,12 @@ class LoginRequest extends FormRequest
             'password' => [
                 'sometimes', // @pest-mutate-ignore: RemoveArrayItem
                 'string', 'max:255',
+                // A NUL byte makes `password_hash` throw `ValueError` where `password_verify` only
+                // returns false — so the constant-time equalizer, which hashes, raised a 500 on the
+                // no-usable-password branches while a real account still got its 422. One crafted
+                // request per address, no statistics needed: a stronger oracle than the timing one
+                // the equalizer exists to close. `ChangePasswordRequest` carries this rule already.
+                'not_regex:/\0/',
             ],
         ];
     }

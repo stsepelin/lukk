@@ -257,9 +257,14 @@ class RotateRefreshToken
         $claims = Lukk::customClaimsFor($record->userId);
         unset($claims['amr']);
 
-        $amr = $record->amr === null ? null : json_decode($record->amr, true);
+        // Re-validated on the way OUT, not trusted because it was validated on the way in. The
+        // column is written through `RefreshTokenRepository`, a documented swap seam, and
+        // `RefreshTokenRecord::$amr` is a plain string — so a replacement repository, or a row
+        // edited by hand, can put anything here. `is_array()` alone let a decoded JSON OBJECT
+        // through, and RFC 8176 §1 / RFC 7519 §4.1 make `amr` an array of StringOrURI.
+        $amr = StartSession::decodeAmr($record->amr);
 
-        if (is_array($amr) && $amr !== []) {
+        if ($amr !== null) {
             $claims['amr'] = $amr;
         }
 

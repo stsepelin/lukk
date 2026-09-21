@@ -133,3 +133,18 @@ it('reads an undecryptable credential as no credential, rather than throwing', f
 
     expect(passkeys()->findByCredentialId('cred-rotated-key'))->toBeNull();
 });
+
+it('keeps the COSE key and authenticator fingerprint out of a serialized passkey', function () {
+    // `RefreshToken` hides `token_hash`/`scope` with a docblock reasoning about an integrator's
+    // "active sessions" screen; the sibling model carried no `$hidden` at all, so the same screen
+    // for passkeys published the encrypted COSE key and the `aaguid` that identifies the
+    // authenticator's make and model. lukk's own list endpoint allowlists columns and was never
+    // affected — this is about `$user->passkeys` reaching a JSON response directly.
+    passkeys()->store(7, new NewPasskey('cred-hidden', 'COSE-PUBLIC-KEY', 0, ['internal'], 'aaguid-x'));
+
+    $serialized = Passkey::query()->whereKey('cred-hidden')->firstOrFail()->toArray();
+
+    expect($serialized)->not->toHaveKey('public_key')
+        ->and($serialized)->not->toHaveKey('aaguid')
+        ->and($serialized)->toHaveKey('credential_id');
+});

@@ -3,8 +3,10 @@
 declare(strict_types=1);
 
 use Firebase\JWT\JWT;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
 use Lukk\Events\RefreshTokenReused;
@@ -317,9 +319,28 @@ it('carries amr forward across a refresh, rather than dropping it on the first o
 });
 
 it('does not let a claims hook forge or erase the session amr', function () {
-    // Reserved like `scope` and `pin`: applied after the `tokenClaimsUsing` merge, so a hook can
-    // neither invent an authentication method the session never used nor drop the real one.
-    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn'], 'role' => 'x']);
+    // Reserved like `scope` and `pin`. Testing this through `/auth/login` proves almost nothing: the
+    // per-login `['pwd']` wins `array_merge` there whatever the hook returns, so the assertion passes
+    // for a reason unrelated to the guard. The exposed path is `$user->startSession()` — the
+    // documented helper behind personal access tokens, impersonation and SSO sign-ins — which passes
+    // NO claims, so before the guard the hook's `amr` was minted AND persisted as the family's own
+    // authentication record, then re-stamped by every rotation for the family's whole life.
+    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn', 'mfa'], 'role' => 'x']);
+
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+
+    expect(claims($pair->accessToken)->amr ?? null)->toBeNull()
+        ->and(claims($pair->accessToken)->role)->toBe('x');
+
+    $rotated = rotate()($pair->refreshToken);
+
+    expect(claims($rotated->accessToken)->amr ?? null)->toBeNull()
+        ->and(claims($rotated->accessToken)->role)->toBe('x');
+});
+
+it('keeps the real amr when a hook tries to replace it on the sign-in path', function () {
+    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn', 'mfa']]);
 
     $user = User::factory()->create();
     $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
@@ -327,6 +348,48 @@ it('does not let a claims hook forge or erase the session amr', function () {
     app('auth')->forgetGuards();
     $refreshed = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
 
-    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd'])
-        ->and(claims($refreshed->json('access_token'))->role)->toBe('x');
+    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd']);
 });
+
+it('still signs in and rotates against a pre-0.8 schema with no amr column', function () {
+    // The back-compat guard is load-bearing, and `amr` needs a STRONGER one than `scope`: `scope` is
+    // non-null only for an opt-in pinned grant, so its "write it only when set" check rarely fires,
+    // while every single sign-in supplies an `amr`. A conditional write alone therefore names a
+    // missing column on every login of an install that upgraded the package but not the schema —
+    // migrations here are publish-only, so that is the DEFAULT outcome of `composer update`.
+    Schema::table('refresh_tokens', fn (Blueprint $table) => $table->dropColumn('amr'));
+
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    // The claim is simply absent, which is exactly the pre-0.8 behaviour.
+    expect($rotated->json('access_token'))->not->toBeNull();
+});
+
+it('refuses a malformed or oversized stored amr instead of stamping it into a token', function (string $stored) {
+    // The column is written through `RefreshTokenRepository`, a documented swap seam, so the ROTATE
+    // path cannot assume its own validation ran — a replacement repository, a hand-edited row or a
+    // restored backup can put anything there. Unit-testing `decodeAmr` proves the validator works;
+    // it does not prove rotation CALLS it, which is the same gap the `scope`/`pin` seam incidents
+    // came through. With a bare `is_array(json_decode(...))` here an object round-trips into the
+    // signed claim, and a long list mints a claim big enough to 431 at the proxy — for the family's
+    // whole refresh_ttl, since every rotation re-stamps it.
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    DB::table('refresh_tokens')->update(['amr' => $stored]);
+
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    expect(claims($rotated->json('access_token'))->amr ?? null)->toBeNull();
+})->with([
+    'an object' => ['{"role":"admin"}'],
+    'a nested list' => ['[["pwd"]]'],
+    'a non-string method' => ['["pwd",5]'],
+    'oversized' => [json_encode(array_fill(0, 400, 'webauthn'))],
+    'not json at all' => ['pwd'],
+]);

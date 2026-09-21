@@ -86,6 +86,16 @@ class LoginRateLimiter
      * Hashing also puts the `|` delimiter out of reach of an identifier field that carries no
      * charset rule, so a submitted identifier can no longer shape the key's structure.
      *
+     * **It does NOT make these buckets per-account.** `normalize()` is itself many-to-one by design
+     * — `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither of
+     * which a binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` still share a
+     * bucket, and a successful sign-in to the look-alike still `clear()`s the victim's counter. That
+     * fold is deliberate: without it an attacker spreads guesses across spellings and evades the
+     * bucket entirely. `lockoutSubject()` below resolves the same tension for the PERSISTENT counter
+     * by keying on identity when the identifier names an account; these cache buckets cannot, since
+     * they are computed from the request before anyone is resolved. Closing it here means resolving
+     * the user first — see the note in CHANGELOG.
+     *
      * Equality-compared only, so nothing else about the limiter changes. Existing buckets are
      * orphaned on deploy, which costs at most one decay window of counting.
      */

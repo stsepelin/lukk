@@ -127,10 +127,10 @@ it('returns an identical response for an unknown user and a wrong password', fun
         ->and($wrongPassword->json())->toEqual($unknownUser->json());
 });
 
-/** Total key-derivation work one attempt cost, whichever primitive it went through. */
-function kdfWork(object $hasher): int
+/** The SHAPE of one attempt's work: which primitive ran, and how many times. */
+function kdfWork(object $hasher): array
 {
-    return $hasher->makes + count($hasher->checked);
+    return ['makes' => $hasher->makes, 'checks' => count($hasher->checked)];
 }
 
 it('spends the same key-derivation work on every shape of failed attempt', function () {
@@ -139,20 +139,23 @@ it('spends the same key-derivation work on every shape of failed attempt', funct
     // A wall-clock assertion would flake on a loaded runner and prove nothing; the work is the
     // invariant, so the work is what is counted.
     //
-    // Both earlier assertions here were written around the implementation rather than the property,
-    // and so outlived the property. One pinned `Hash::check` specifically, which the unknown-user
-    // path no longer calls; the other allowed `makes <= 1` because the dummy was memoized in a
-    // function `static` — true within one PHP process, false under PHP-FPM, where every unknown
-    // identifier paid `make` + `check` against a real account's single `check`. Measured at bcrypt
-    // cost 12 that was 472ms vs 236ms: the enumeration oracle the equalizer exists to close,
-    // running in the opposite direction. Count the work, not the primitive.
+    // The SHAPE, not the total. Both earlier assertions here were written around the implementation
+    // and outlived the property — one pinned `Hash::check` specifically, the other allowed
+    // `makes <= 1` because the dummy was memoized in a function `static`. And a first replacement,
+    // which summed the two counters, inherited the same blind spot: restore the memo and every test
+    // after the first in a shared process reads `makes: 0, checks: 1` for the unknown path, whose
+    // SUM is the same 1 a real account costs. That is precisely the PHP-FPM bug — a fresh process
+    // per request pays `make` + `check` there against a single `check` here, 472ms vs 236ms at
+    // bcrypt cost 12 — so the sum can never see it and the counters must be read apart.
     User::factory()->create(['email' => 'real@y.com']);
     User::factory()->create(['email' => 'passwordless@y.com', 'password' => null]);
+    User::factory()->create(['email' => 'emptypassword@y.com', 'password' => '']);
 
     $attempts = [
         'unknown identifier' => 'ghost@y.com',
         'wrong password' => 'real@y.com',
-        'account with no password' => 'passwordless@y.com',
+        'password is null' => 'passwordless@y.com',
+        'password is empty' => 'emptypassword@y.com',
     ];
 
     // Installed ONCE: the user provider is handed its hasher when the guard is first built, so a
@@ -168,10 +171,14 @@ it('spends the same key-derivation work on every shape of failed attempt', funct
         $work[$label] = kdfWork($hasher);
     }
 
+    // One derivation each, and the no-usable-password shapes must all take the SAME branch as an
+    // unknown identifier — `password is empty` is the one that catches narrowing the guard to a
+    // bare `!== null`, which leaves `''` to reach the hasher and derive nothing.
     expect($work)->toBe([
-        'unknown identifier' => 1,
-        'wrong password' => 1,
-        'account with no password' => 1,
+        'unknown identifier' => ['makes' => 1, 'checks' => 0],
+        'wrong password' => ['makes' => 0, 'checks' => 1],
+        'password is null' => ['makes' => 1, 'checks' => 0],
+        'password is empty' => ['makes' => 1, 'checks' => 0],
     ]);
 });
 
@@ -371,4 +378,75 @@ it('says nothing about the column on an application that has not migrated yet', 
 
     expect(fn () => $this->postJson('/auth/login', ['email' => 'ada@example.test', 'password' => 'password']))
         ->toThrow(QueryException::class);
+});
+
+it('answers a password containing a NUL byte identically whatever the account is', function () {
+    // The equalizer must not be able to THROW on attacker-controlled input. `password_hash` raises
+    // `ValueError: Bcrypt password must not contain null character` while `password_verify` merely
+    // returns false — so equalizing the two branches with `Hash::make` turned a NUL byte into a
+    // deterministic, single-request account oracle: 500 where no usable password exists, 422 where
+    // one does. That is strictly stronger than the 2x timing channel it replaced, and it re-exposed
+    // the passwordless shape the same change was written to protect. It also escaped the failure
+    // limiter, which counts `ValidationException` and not `ValueError`.
+    User::factory()->create(['email' => 'real@y.com']);
+    User::factory()->create(['email' => 'passwordless@y.com', 'password' => null]);
+
+    $statuses = [];
+    foreach (['real@y.com', 'ghost@y.com', 'passwordless@y.com'] as $email) {
+        app('auth')->forgetGuards();
+        $statuses[$email] = $this->postJson('/auth/login', ['email' => $email, 'password' => "a\0b"])->status();
+    }
+
+    expect(array_values(array_unique($statuses)))->toBe([422])
+        ->and($statuses)->not->toContain(500);
+});
+
+it('still answers 422 when the hasher itself refuses to hash', function () {
+    // The try/catch half, pinned on its own — and on the case the rule cannot reach. A rebound
+    // hasher may refuse input for reasons lukk knows nothing about (`hashing.bcrypt.limit`, a
+    // custom driver, an argon2 build without the algorithm). If the equalizer can throw there, the
+    // no-usable-password branches answer 500 while a real account answers 422: the same
+    // single-request account oracle, reached without a NUL byte.
+    Hash::extend('refuses', fn () => new class implements Hasher
+    {
+        public function info($hashedValue): array
+        {
+            return [];
+        }
+
+        public function make(#[SensitiveParameter] $value, array $options = []): string
+        {
+            throw new RuntimeException('this hasher will not hash that');
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            return false;
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            return false;
+        }
+    });
+    config(['hashing.driver' => 'refuses']);
+
+    User::factory()->create(['email' => 'real@y.com']);
+
+    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'real@y.com', 'password' => 'whatever'])->assertStatus(422);
+});
+
+it('answers 422, not 500, for an account whose stored hash the driver cannot read', function () {
+    // The mirror of the above on the REAL branch: a row imported from another system, or the
+    // widespread `!`/`*`/`x` "unusable password" placeholder, is a non-empty string — so
+    // `hasUsablePassword()` passes it to `Hash::check`, which throws "This password does not use
+    // the Bcrypt algorithm". One crafted request per address, 500 versus 422, and it escapes the
+    // failure limiter, which counts ValidationException.
+    User::factory()->create(['email' => 'imported@y.com', 'password' => '!']);
+
+    $this->postJson('/auth/login', ['email' => 'imported@y.com', 'password' => 'whatever'])->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
 });

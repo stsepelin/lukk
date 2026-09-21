@@ -24,6 +24,8 @@ use Lukk\Lukk;
  */
 trait DeterminesSessionOutcome
 {
+    use ChecksPasskeyAssurance;
+
     private function twoFactorRequired(Authenticatable $user): bool
     {
         // `Lukk::guardConfig()`, never the global block — the same rule CLAUDE.md records for
@@ -35,29 +37,10 @@ trait DeterminesSessionOutcome
     }
 
     /**
-     * Does a passkey assertion stand in for the user's second factor?
-     *
-     * Only when user verification is REQUIRED. WebAuthn with UV is two factors in one gesture —
-     * possession of the authenticator plus the PIN or biometric that unlocks it — which is why
-     * passkey login may skip a confirmed TOTP at all. Below `required` it is possession alone:
-     * `web-auth/webauthn-lib`'s `CheckUserVerification` returns early unless the requirement is
-     * exactly `required`, so the UV flag on the assertion is never even looked at.
-     *
-     * The skip used to be unconditional, and `config/lukk.php` offers `preferred` as a supported
-     * setting. On such an install, whoever held the authenticator got a full session without the
-     * TOTP the user had deliberately enrolled — and, because step-up by passkey is governed by the
-     * same setting, could then spend that session on `DELETE /auth/two-factor` and remove it. The
-     * premise was sound and nothing enforced it; now something does.
+     * @param  list<string>  $firstFactor  How the first factor was proved, carried into the challenge
+     *                                     so redemption can record it truthfully.
      */
-    private function passkeyIsSecondFactor(): bool
-    {
-        $config = Lukk::guardConfig();
-
-        // Fails CLOSED: an unset or unrecognised value is not `required`, so the challenge still runs.
-        return ($config['passkeys']['user_verification'] ?? 'required') === 'required';
-    }
-
-    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens): TwoFactorChallengeResponse
+    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens, array $firstFactor = ['pwd']): TwoFactorChallengeResponse
     {
         return app(TwoFactorChallengeResponse::class, ['challenge' => $challengeTokens->issue(
             // `config($key, $default)` does NOT cover an explicit null — `Arr::get` returns the
@@ -66,6 +49,7 @@ trait DeterminesSessionOutcome
             '2fa', $user->getAuthIdentifier(), (int) (config('lukk.two_factor.challenge_ttl') ?? 300),
             // The password this challenge stands in for.
             passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($user),
+            firstFactor: $firstFactor,
         )]);
     }
 
