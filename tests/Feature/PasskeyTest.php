@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
@@ -484,4 +485,45 @@ it('names the new credential after the email, or the id when there is none', fun
     $model = $anonymous::query()->findOrFail($user->getKey());
 
     expect(app(StartPasskeyRegistration::class)($model)['user'])->toBe((string) $user->getKey());
+});
+
+it('challenges for the second factor when user verification is not required', function () {
+    // The skip used to be unconditional. It is sound ONLY under `user_verification: required`, where
+    // WebAuthn is two factors in one gesture — possession plus the PIN or biometric that unlocks it.
+    // `config/lukk.php` offers `preferred` as a supported setting, and beneath `required`
+    // `web-auth/webauthn-lib`'s `CheckUserVerification` returns early without ever reading the UV
+    // flag. So on such an install whoever held the authenticator got a full session without the TOTP
+    // the user deliberately enrolled — and could then spend it on `DELETE /auth/two-factor`.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString('SECRETSECRETSECR'),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+    storePasskey($user->id, 'cred-2fa', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $response = $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-2fa', 'sign_count' => 1],
+    ])->assertOk();
+
+    $response->assertJsonStructure(['two_factor', 'challenge_token'])->assertJsonMissingPath('access_token');
+});
+
+it('still skips the second factor when user verification is required', function () {
+    // The default, and the case the skip was designed for — it must keep working.
+    config(['lukk.passkeys.user_verification' => 'required']);
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString('SECRETSECRETSECR'),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+    storePasskey($user->id, 'cred-uv', 0);
+
+    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-uv', 'sign_count' => 1],
+    ])->assertOk()->assertJsonStructure(['access_token']);
 });

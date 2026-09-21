@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Contracts\TokenIssuer;
 use Lukk\Lukk;
 use Lukk\Support\PasswordFingerprint;
 use Lukk\Support\TokenPair;
@@ -38,6 +39,7 @@ class ConfirmPasswordUnchanged
         private readonly UserProvider $users,
         private readonly RefreshTokenRepository $tokens,
         private readonly RevokeSession $revoke,
+        private readonly TokenIssuer $issuer,
     ) {}
 
     /**
@@ -73,7 +75,13 @@ class ConfirmPasswordUnchanged
 
         // Revoked, not merely withheld: the session row is already committed, and a change that read the
         // sessions before it did would not have seen it.
-        $record = $this->tokens->findByHash(hash('sha256', $pair->refreshToken));
+        // Through the SEAM, not `hash('sha256', …)` directly. `TokenIssuer::hash()` is a declared
+        // swap point — HMAC-with-a-pepper being the obvious reason to rebind it — and every other
+        // lookup in the package goes through it (`RotateRefreshToken`, `EndSession`, `StartSession`).
+        // Hardcoding the digest here meant a rebound issuer returned null from this lookup, so the
+        // family revoke below silently became a no-op and the session this check exists to take back
+        // stayed live until it expired. That is the same shape as the `scope`/`pin` seam incidents.
+        $record = $this->tokens->findByHash($this->issuer->hash($pair->refreshToken));
 
         if ($record !== null) {
             ($this->revoke)($record->familyId);

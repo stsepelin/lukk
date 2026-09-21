@@ -139,9 +139,23 @@ class AttemptLogin
 
         $user = $this->users->retrieveByCredentials($credentials);
 
-        if ($user === null) {
-            // Equivalent hash so an unknown email costs the same as a wrong password (no timing enumeration).
-            Hash::check($credentials['password'], $this->timingHash());
+        // ONE key-derivation per attempt, on every path, so the answer's timing says nothing about
+        // which accounts exist. `Hash::make` runs the same KDF at the same configured cost as the
+        // `Hash::check` the real path runs, and — unlike a dummy hash — it needs nothing stored.
+        //
+        // The previous equalizer memoized a dummy in a `static`, which PHP resets at request
+        // shutdown: under PHP-FPM every unknown-identifier attempt paid `make` + `check` while a
+        // known one paid a single `check`. Measured at bcrypt cost 12: 472ms vs 236ms — a 2x
+        // enumeration oracle, inverted from the one being defended against but just as usable. The
+        // memo is also why no test could see it: one process, every request after the first cheap.
+        //
+        // The second branch is the password-LESS account (passkey-only, SSO, invited-not-yet-set).
+        // `EloquentUserProvider::validateCredentials` returns false before hashing when the column
+        // is null, and `AbstractHasher::check` does the same for `''` — zero KDF, ~0ms, a single
+        // request. That answer identified exactly the accounts worth pivoting to a passkey or a
+        // password-reset phish, and this package ships passkeys, so it creates that row shape.
+        if ($user === null || ! $this->hasUsablePassword($user)) {
+            Hash::make($credentials['password']);
             $this->fail();
         }
 
@@ -250,11 +264,23 @@ class AttemptLogin
         return Lukk::usernameField();
     }
 
-    private function timingHash(): string
+    /**
+     * Whether this user carries a password the hasher would actually do work on.
+     *
+     * Deliberately only "a non-empty string" — the two states the framework short-circuits on. A
+     * stricter test (`Hash::info()` reporting a known algorithm) would also catch a corrupt or
+     * foreign hash, but it would lock out every install running a custom hasher whose output
+     * `password_get_info` cannot name, which is a far worse failure than the timing it closes.
+     */
+    private function hasUsablePassword(Authenticatable $user): bool
     {
-        static $hash;
-
-        return $hash ??= Hash::make('lukk-timing-equalizer');
+        // The cast NORMALIZES rather than silences: `Authenticatable::getAuthPassword()` is
+        // documented `string`, but the framework does not believe its own docblock —
+        // `EloquentUserProvider::validateCredentials()` returns false on `is_null($hashed)` and
+        // `AbstractHasher::check()` on `(string) $hashedValue === ''`. Both of those states mean the
+        // same thing here (nothing to derive against), and `(string) null` is `''`, so one comparison
+        // covers both.
+        return (string) $user->getAuthPassword() !== '';
     }
 
     private function lockoutGuard(): string

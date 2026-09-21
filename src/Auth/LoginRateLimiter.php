@@ -61,14 +61,37 @@ class LoginRateLimiter
 
     public function key(Request $request): string
     {
-        return $this->guard.'|'.$this->identifier($request).'|'.Lukk::rateLimitKey($request);
+        return $this->guard.'|'.$this->identifierKey($request).'|'.Lukk::rateLimitKey($request);
     }
 
     /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood
      *  on one guard's login can't lock a colliding account out of another guard. */
     public function accountKey(Request $request): string
     {
-        return 'acct|'.$this->guard.'|'.$this->identifier($request);
+        return 'acct|'.$this->guard.'|'.$this->identifierKey($request);
+    }
+
+    /**
+     * The identifier's contribution to a cache key: HASHED, never the identifier itself.
+     *
+     * These keys reach `Illuminate\Cache\RateLimiter` directly, so they never get the md5 that
+     * `ThrottleRequests` applies — only `cleanRateLimiterKey`, which is `htmlentities()` plus an
+     * entity-shortening regex, i.e. a MANY-TO-ONE fold. `a&b@x.com` and `aab@x.com` are both valid
+     * addresses and both land on the key `aab@x.com`, so they shared a bucket. Since a successful
+     * login calls `clear()`, and `clear()` cleans the key the same way, whoever registered the
+     * look-alike could reset the victim's per-account counter on demand — and that counter is the
+     * IP-INDEPENDENT one, the backstop that exists so a distributed attacker can't get
+     * `max_attempts` guesses per IP against one account. That left only the per-IP cap it backstops.
+     *
+     * Hashing also puts the `|` delimiter out of reach of an identifier field that carries no
+     * charset rule, so a submitted identifier can no longer shape the key's structure.
+     *
+     * Equality-compared only, so nothing else about the limiter changes. Existing buckets are
+     * orphaned on deploy, which costs at most one decay window of counting.
+     */
+    private function identifierKey(Request $request): string
+    {
+        return hash('sha256', $this->identifier($request));
     }
 
     /** The guard this limiter is scoped to, so a lock on one guard can't reach another. */

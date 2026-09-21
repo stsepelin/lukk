@@ -88,12 +88,29 @@ class DatabasePasskeyRepository implements PasskeyRepository
         return (bool) $this->scoped()->where('user_id', $userId)->whereKey($credentialId)->delete();
     }
 
-    private function toRecord(Passkey $row): PasskeyRecord
+    /**
+     * Null when the stored COSE key cannot be decrypted — a rotated `APP_KEY` without
+     * `app.previous_keys`, or a corrupt row.
+     *
+     * Letting `DecryptException` escape turned that into a 500 on the UNAUTHENTICATED passkey-login
+     * route, and by then `FinishPasskeyLogin` has already burned the ceremony's single-use challenge:
+     * every attempt cost one challenge and returned a server error, so a passkey-only account was
+     * hard-locked out with no usable signal. `ChallengeTwoFactor::secretOf()` already guards exactly
+     * this for the TOTP secret; the passkey path did not. An unreadable credential is treated as one
+     * that does not match, which is the outcome the caller already handles (422).
+     */
+    private function toRecord(Passkey $row): ?PasskeyRecord
     {
+        try {
+            $publicKey = Crypt::decryptString($row->public_key);
+        } catch (\Throwable) {
+            return null;
+        }
+
         return new PasskeyRecord(
             credentialId: $row->credential_id,
             userId: $row->user_id,
-            publicKey: Crypt::decryptString($row->public_key),
+            publicKey: $publicKey,
             // The model already casts `sign_count` to an integer; this only states it.
             signCount: (int) $row->sign_count, // @pest-mutate-ignore: RemoveIntegerCast
             transports: $row->transports ?? [],

@@ -227,11 +227,15 @@ it('answers a 401 with the WWW-Authenticate challenge RFC 6750 §3 requires', fu
     }
 });
 
-it('revokes nothing for a bearer that names no session — it would otherwise mean "every one"', function () {
+it('refuses, rather than answering 204, for a bearer that names no session', function () {
     // A co-issuer sharing the secret mints tokens with no `fid`. "Others" is defined relative to THIS
     // session, and with no family to except, the call has no way to spare the caller's own: forcing the
     // guard true hands `RevokeOtherSessions` an empty family id, and every session goes — including the
-    // one making the request. The route answers 204 either way, so only the sessions tell them apart.
+    // one making the request. So revoking nothing stays right.
+    //
+    // Answering 204 for it did not: the user asked to log out their other devices, the client read
+    // success, and an attacker's session stayed live for the rest of its refresh_ttl with nothing
+    // saying otherwise. 409 tells the caller the truth and names the route that can sweep them.
     $user = User::factory()->create();
     $kept = $user->startSession();
     $cfg = Lukk::guardConfig();
@@ -240,7 +244,7 @@ it('revokes nothing for a bearer that names no session — it would otherwise me
         'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
     ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
 
-    $this->withToken($token)->deleteJson('/auth/sessions/others')->assertNoContent();
+    $this->withToken($token)->deleteJson('/auth/sessions/others')->assertStatus(409);
 
     expect(RefreshToken::whereNull('revoked_at')->count())->toBe(1);
     app('auth')->forgetGuards();

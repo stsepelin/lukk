@@ -34,6 +34,29 @@ trait DeterminesSessionOutcome
             && $user->hasEnabledTwoFactor();
     }
 
+    /**
+     * Does a passkey assertion stand in for the user's second factor?
+     *
+     * Only when user verification is REQUIRED. WebAuthn with UV is two factors in one gesture —
+     * possession of the authenticator plus the PIN or biometric that unlocks it — which is why
+     * passkey login may skip a confirmed TOTP at all. Below `required` it is possession alone:
+     * `web-auth/webauthn-lib`'s `CheckUserVerification` returns early unless the requirement is
+     * exactly `required`, so the UV flag on the assertion is never even looked at.
+     *
+     * The skip used to be unconditional, and `config/lukk.php` offers `preferred` as a supported
+     * setting. On such an install, whoever held the authenticator got a full session without the
+     * TOTP the user had deliberately enrolled — and, because step-up by passkey is governed by the
+     * same setting, could then spend that session on `DELETE /auth/two-factor` and remove it. The
+     * premise was sound and nothing enforced it; now something does.
+     */
+    private function passkeyIsSecondFactor(): bool
+    {
+        $config = Lukk::guardConfig();
+
+        // Fails CLOSED: an unset or unrecognised value is not `required`, so the challenge still runs.
+        return ($config['passkeys']['user_verification'] ?? 'required') === 'required';
+    }
+
     private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens): TwoFactorChallengeResponse
     {
         return app(TwoFactorChallengeResponse::class, ['challenge' => $challengeTokens->issue(

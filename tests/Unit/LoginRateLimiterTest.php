@@ -33,8 +33,27 @@ it('composes both bucket keys from the guard, the identifier and — for the IP 
     $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 5, 'email', 'admin');
     $request = loginRequest();
 
-    expect($limiter->key($request))->toBe('admin|ada@example.test|'.Lukk\Lukk::rateLimitKey($request))
-        ->and($limiter->accountKey($request))->toBe('acct|admin|ada@example.test');
+    $digest = hash('sha256', 'ada@example.test');
+
+    expect($limiter->key($request))->toBe('admin|'.$digest.'|'.Lukk\Lukk::rateLimitKey($request))
+        ->and($limiter->accountKey($request))->toBe('acct|admin|'.$digest);
+});
+
+it('does not let two identifiers that HTML-entity-fold together share a bucket', function () {
+    // These keys go to `Illuminate\Cache\RateLimiter` directly, so they never get the md5 that
+    // `ThrottleRequests` applies — only `cleanRateLimiterKey`, which is `htmlentities()` plus an
+    // entity-shortening regex, and that is a many-to-one fold: `a&b@x.com` and `aab@x.com` are both
+    // valid addresses and both cleaned to `aab@x.com`. Sharing the bucket would be a nuisance; what
+    // made it a hole is `clear()`, which cleans the key the same way — so signing in successfully as
+    // the look-alike reset the VICTIM's per-account counter, the IP-independent backstop that exists
+    // so a distributed attacker cannot get `max_attempts` guesses per IP against one account.
+    $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 5, 'email', 'web');
+    $clean = fn (string $key) => preg_replace('/&([a-z])[a-z]+;/i', '$1', htmlentities($key));
+
+    $victim = $clean($limiter->accountKey(loginRequest('aab@x.com')));
+    $lookalike = $clean($limiter->accountKey(loginRequest('a&b@x.com')));
+
+    expect($lookalike)->not->toBe($victim);
 });
 
 it('clears both buckets on a successful sign-in', function () {

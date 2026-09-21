@@ -354,7 +354,8 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ConfirmPasswordUnchanged::class, fn ($app) => new ConfirmPasswordUnchanged(
-            $this->userProviderFor(Lukk::currentGuard()), $app->make(RefreshTokenRepository::class), $app->make(RevokeSession::class)));
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(RefreshTokenRepository::class),
+            $app->make(RevokeSession::class), $app->make(TokenIssuer::class)));
         $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
             $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));
@@ -456,11 +457,23 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
+        // The per-key fallbacks MIRROR config/lukk.php. A single shared `?? 30` was 6x looser than the
+        // shipped value on `confirm` (5), `email_verification` (6) and `password_reset` (6) — so a
+        // degraded config RELAXED the controls instead of preserving them, worst of all on step-up
+        // confirmation, which CHANGELOG 0.5.0 calls "an unmetered password oracle". That is reachable,
+        // not hypothetical: `rate_limits.confirm` only arrived in 0.5.0, and an app that ran
+        // `config:cache` before then gets no backfill at all (`mergeConfigDeep` early-returns when the
+        // configuration is cached). Keep this table in step with the config file.
+        $shipped = [
+            'refresh' => 30, 'passkeys' => 30, 'two_factor' => 5, 'email_verification' => 6,
+            'password_reset' => 6, 'registration' => 10, 'confirm' => 5,
+        ];
+
         foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'] as $key => $name) {
-            $limiter->for($name, function ($request) use ($key, $name) {
+            $limiter->for($name, function ($request) use ($key, $name, $shipped) {
                 // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []); // @pest-mutate-ignore: RemoveArrayCast
-                $max = (int) ($limit['max_attempts'] ?? 30);
+                $max = (int) ($limit['max_attempts'] ?? $shipped[$key]);
                 $decay = (int) ($limit['decay_seconds'] ?? 60);
 
                 $limits = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
@@ -659,7 +672,12 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function config(): array
     {
-        return $this->app->make('config')->get('lukk');
+        // Defaulted, and cast, because the whole `lukk` block is not guaranteed to exist: install the
+        // package into an app that has already run `config:cache` and `mergeConfigDeep` early-returns,
+        // so nothing backfills it. Without the default this returns null into an `array` return type —
+        // a TypeError thrown from `boot()`, which takes the entire application down rather than just
+        // the auth routes. `Lukk::guardConfig()` is null-safe for the same reason.
+        return (array) ($this->app->make('config')->get('lukk') ?? []);
     }
 
     private function appName(): string

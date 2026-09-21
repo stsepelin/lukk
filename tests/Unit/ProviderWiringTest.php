@@ -47,13 +47,34 @@ describe('the default guard\'s named limiters', function () {
         expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([7, 71]);
     })->with(array_map(null, array_keys($named), array_values($named)));
 
-    it('falls back to 30 per 60s when a block is missing, or is not a block at all', function (string $key, string $name) {
+    it('falls back to the SHIPPED limit for that key when a block is missing, or is not a block at all', function (string $key, string $name) {
+        // Per key, not one shared number. A single `?? 30` was 6x looser than the shipped value on
+        // `confirm` (5), `email_verification` (6) and `password_reset` (6), so a degraded config
+        // RELAXED those controls — worst of all on step-up confirmation, which the 0.5.0 changelog
+        // calls an unmetered password oracle. And it is reachable: `rate_limits.confirm` only arrived
+        // in 0.5.0, and an app that ran `config:cache` before then gets no backfill at all, because
+        // `mergeConfigDeep` early-returns when the configuration is cached.
+        $shipped = ['refresh' => 30, 'passkeys' => 30, 'two_factor' => 5, 'email_verification' => 6,
+            'password_reset' => 6, 'registration' => 10, 'confirm' => 5];
+
         foreach ([null, 'garbage'] as $block) {
             config(["lukk.rate_limits.{$key}" => $block]);
             [$limit] = limits($name);
 
-            expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([30, 60]);
+            expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([$shipped[$key], 60]);
         }
+    })->with(array_map(null, array_keys($named), array_values($named)));
+
+    it('never degrades to a LOOSER limit than the one config/lukk.php ships', function (string $key, string $name) {
+        // The property behind the table above, stated so a future key cannot be added with a loose
+        // fallback: whatever the degraded default is, it may not exceed the shipped value.
+        $shippedConfig = require __DIR__.'/../../config/lukk.php';
+        $shippedMax = (int) $shippedConfig['rate_limits'][$key]['max_attempts'];
+
+        config(["lukk.rate_limits.{$key}" => null]);
+        [$limit] = limits($name);
+
+        expect($limit->maxAttempts)->toBeLessThanOrEqual($shippedMax);
     })->with(array_map(null, array_keys($named), array_values($named)));
 
     it('adds a per-user bucket on step-up and email verification, keyed to the guard and the user', function (string $name) {

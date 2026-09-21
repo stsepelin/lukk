@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\ChangePasswordRequest;
+use Lukk\Http\Requests\ConfirmPasswordRequest;
 use Lukk\Http\Requests\ForgotPasswordRequest;
 use Lukk\Http\Requests\LoginRequest;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
@@ -31,6 +32,18 @@ it('applies each change-password rule on its own', function (string $field, arra
     'new bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
     'new without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
     'new meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
+]);
+
+it('applies each step-up confirm-password rule on its own', function (string $field, array $data, string $rule) {
+    // This route used to take a bare `Request` and cast `$request->input('password')` — the only
+    // endpoint in the package doing so. `{"password":["x"]}` raised "Array to string conversion",
+    // which `HandleExceptions` promotes to an ErrorException and renders as a 500, on an
+    // ability-gated but reachable security route. `PasskeyAssertionRequest` documents the same bug.
+    expect(failedRulesFor((new ConfirmPasswordRequest)->rules(), $data, $field))->toHaveKey($rule);
+})->with([
+    'required' => ['password', [], 'Required'],
+    'a string' => ['password', ['password' => ['x']], 'String'],
+    'bounded' => ['password', ['password' => str_repeat('a', 256)], 'Max'],
 ]);
 
 it('applies each two-factor challenge rule on its own', function (string $field, array $data, string $rule) {

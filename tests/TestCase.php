@@ -125,7 +125,9 @@ class TestCase extends Orchestra
         $table->id();
         $table->string('name')->nullable();
         $table->string('email')->unique();
-        $table->string('password');
+        // Nullable because lukk ships passkeys: a passkey-only, SSO or invited-not-yet-set account
+        // has no password, and that row shape is what `LoginTimingTest` pins the equal cost of.
+        $table->string('password')->nullable();
         $table->text('two_factor_secret')->nullable();
         $table->text('two_factor_recovery_codes')->nullable();
         $table->timestamp('two_factor_confirmed_at')->nullable();

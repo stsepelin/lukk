@@ -158,7 +158,12 @@ class ChallengeToken
             // co-issuer, a topology this class exists to support — turned `(string)` into an
             // uncaught `Error` and a 500, contradicting this method's own "null on any failure"
             // contract. RFC 8725 §3.11: validate claim types before use.
-            if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))
+            // Non-EMPTY, for parity with `FirebaseTokenVerifier`, which requires the same of `sub`.
+            // `RequireConfirmation` compares the subject against `(string) $request->user()?->…`,
+            // and a null user stringifies to `''` — so an empty `sub` would satisfy that gate on any
+            // route where no user resolved. Not reachable through lukk's own routes (they all
+            // authenticate first) and minting one needs the signing key; parity, not a live hole.
+            if (! is_string($claims->sub ?? null) || $claims->sub === '' || (isset($claims->fid) && ! is_string($claims->fid))
                 || (isset($claims->pwf) && ! is_string($claims->pwf))) {
                 return null;
             }

@@ -127,39 +127,65 @@ it('returns an identical response for an unknown user and a wrong password', fun
         ->and($wrongPassword->json())->toEqual($unknownUser->json());
 });
 
-it('spends the same one password comparison on an unknown identifier as on a wrong password', function () {
-    // Constant-time by construction: the unknown-user branch verifies the submitted password
-    // against a memoized dummy hash precisely so "no such account" costs what "wrong password"
-    // costs. Deleting that comparison is invisible to a status-code assertion and visible to an
-    // attacker with a stopwatch, so the comparison itself is what's pinned here.
+/** Total key-derivation work one attempt cost, whichever primitive it went through. */
+function kdfWork(object $hasher): int
+{
+    return $hasher->makes + count($hasher->checked);
+}
+
+it('spends the same key-derivation work on every shape of failed attempt', function () {
+    // Constant-time by construction: whether the identifier resolves, resolves to a password-less
+    // account, or resolves to one with a wrong password, the attempt owes exactly ONE derivation.
+    // A wall-clock assertion would flake on a loaded runner and prove nothing; the work is the
+    // invariant, so the work is what is counted.
+    //
+    // Both earlier assertions here were written around the implementation rather than the property,
+    // and so outlived the property. One pinned `Hash::check` specifically, which the unknown-user
+    // path no longer calls; the other allowed `makes <= 1` because the dummy was memoized in a
+    // function `static` — true within one PHP process, false under PHP-FPM, where every unknown
+    // identifier paid `make` + `check` against a real account's single `check`. Measured at bcrypt
+    // cost 12 that was 472ms vs 236ms: the enumeration oracle the equalizer exists to close,
+    // running in the opposite direction. Count the work, not the primitive.
     User::factory()->create(['email' => 'real@y.com']);
+    User::factory()->create(['email' => 'passwordless@y.com', 'password' => null]);
+
+    $attempts = [
+        'unknown identifier' => 'ghost@y.com',
+        'wrong password' => 'real@y.com',
+        'account with no password' => 'passwordless@y.com',
+    ];
+
+    // Installed ONCE: the user provider is handed its hasher when the guard is first built, so a
+    // counter swapped in afterwards would see none of the work and every count would read zero.
     $hasher = countingHasher();
 
-    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
-    $unknownUser = $hasher->checked;
-
-    app('auth')->forgetGuards();
-    $hasher->checked = [];
-    $this->postJson('/auth/login', ['email' => 'real@y.com', 'password' => 'whatever'])->assertStatus(422);
-
-    expect($unknownUser)->toBe(['whatever'])
-        ->and($hasher->checked)->toBe(['whatever']);
-});
-
-it('derives the dummy hash once, so the unknown-user path does not cost an extra bcrypt', function () {
-    // Re-deriving it per attempt reopens the same oracle from the other side: `make` + `check` is
-    // measurably more work than the `check` a real account pays, so an unknown address would once
-    // again be the slow one. (`<=` rather than an exact count: the memo is process-static, so an
-    // earlier test in the same worker may already have paid for it.)
-    $hasher = countingHasher();
-
-    foreach (range(1, 2) as $i) {
+    $work = [];
+    foreach ($attempts as $label => $email) {
+        $hasher->checked = [];
+        $hasher->makes = 0;
         app('auth')->forgetGuards();
-        $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+        $this->postJson('/auth/login', ['email' => $email, 'password' => 'whatever'])->assertStatus(422);
+        $work[$label] = kdfWork($hasher);
     }
 
-    expect($hasher->checked)->toBe(['whatever', 'whatever'])
-        ->and($hasher->makes)->toBeLessThanOrEqual(1);
+    expect($work)->toBe([
+        'unknown identifier' => 1,
+        'wrong password' => 1,
+        'account with no password' => 1,
+    ]);
+});
+
+it('still refuses a password-less account rather than admitting it', function () {
+    // The equalizer must not become a way in: `null` and `''` both have to fail closed, including
+    // when the submitted password is itself empty.
+    foreach ([null, ''] as $stored) {
+        $user = User::factory()->create(['password' => $stored]);
+
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['email' => $user->email, 'password' => ''])->assertStatus(422);
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['email' => $user->email, 'password' => (string) $stored])->assertStatus(422);
+    }
 });
 
 it('names the wait in both seconds and minutes when the throttle trips', function () {

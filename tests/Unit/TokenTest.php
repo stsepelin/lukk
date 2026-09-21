@@ -187,6 +187,33 @@ it('rejects an access token whose sub is missing, empty, or not a string', funct
         ->and(verifier()->verify($arraySub))->toBeNull();
 });
 
+it('refuses a token whose jti or fid is not a scalar, rather than 500ing past the denylist', function () {
+    // `exp` and `sub` were type-checked and these were not. A co-issuer token carrying
+    // `"jti": ["a","b"]` raised "Array to string conversion" — which `HandleExceptions` promotes to
+    // an ErrorException, i.e. a 500 on every request presenting it. Worse than the 500: the cast
+    // yields the literal string `Array`, so the denylist was asked for `lukk:dl:fid:Array` and a
+    // REVOKED FAMILY stopped matching. `ChallengeToken::decode()` already hardened exactly this
+    // (RFC 8725 §3.11); the access path had not.
+    $claims = [
+        'iss' => config('lukk.issuer'),
+        'aud' => config('lukk.audience'),
+        'sub' => '1',
+        'iat' => time(),
+        'nbf' => time(),
+        'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $arrayJti = JWT::encode(['jti' => ['a', 'b']] + $claims, $secret, 'HS256', head: $head);
+    $arrayFid = JWT::encode(['jti' => 'j-ok', 'fid' => ['f']] + $claims, $secret, 'HS256', head: $head);
+    $objectFid = JWT::encode(['jti' => 'j-ok2', 'fid' => ['n' => 1]] + $claims, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($arrayJti))->toBeNull()
+        ->and(verifier()->verify($arrayFid))->toBeNull()
+        ->and(verifier()->verify($objectFid))->toBeNull();
+});
+
 // No `lukk` config key is guaranteed at runtime. `mergeConfigDeep` early-returns when the
 // application's config is CACHED (the production norm), so a key added in a later release is never
 // backfilled; and the merge that does run backfills on `array_key_exists`, so a per-guard

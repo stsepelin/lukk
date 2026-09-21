@@ -119,3 +119,17 @@ it('reads the sign count as an integer whatever the driver hands back', function
     // Some PDO drivers return integer columns as strings.
     expect((new Passkey)->forceFill(['sign_count' => '7'])->sign_count)->toBe(7);
 });
+
+it('reads an undecryptable credential as no credential, rather than throwing', function () {
+    // A rotated APP_KEY without `app.previous_keys`, or a corrupt row. The decrypt was unguarded, so
+    // it escaped as a 500 on the UNAUTHENTICATED passkey-login route — and by then
+    // `FinishPasskeyLogin` has already burned that ceremony's single-use challenge, so every attempt
+    // cost a challenge and returned a server error, hard-locking a passkey-only account out with no
+    // usable signal. `ChallengeTwoFactor::secretOf()` already guarded exactly this for the TOTP
+    // secret. An unreadable credential now reads as one that does not match — the 422 the caller
+    // already handles.
+    passkeys()->store(7, new NewPasskey('cred-rotated-key', 'COSE-PUBLIC-KEY', 0));
+    Passkey::query()->whereKey('cred-rotated-key')->update(['public_key' => 'not-a-valid-ciphertext']);
+
+    expect(passkeys()->findByCredentialId('cred-rotated-key'))->toBeNull();
+});

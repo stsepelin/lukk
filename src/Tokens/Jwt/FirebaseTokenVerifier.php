@@ -92,6 +92,20 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
+        // Scalars ONLY, before the casts. `exp` and `sub` above are type-checked for the same reason
+        // and these were not: a co-issuer token carrying `"jti": ["a","b"]` raised "Array to string
+        // conversion", which `HandleExceptions` promotes to an ErrorException — a 500 on every
+        // request presenting it. Worse than the 500, the cast yields the literal `Array`, so the
+        // lookup asks for `lukk:dl:fid:Array` and a REVOKED FAMILY stops matching. `ChallengeToken`
+        // already hardens exactly this on its own decode path (RFC 8725 §3.11); the asymmetry
+        // between the two was unintentional.
+        //
+        // Reachable only by a co-issuer holding the signing key — the topology this class exists to
+        // support. A token whose `jti`/`fid` is not a scalar is not one this package minted.
+        if ((isset($claims->jti) && ! is_scalar($claims->jti)) || (isset($claims->fid) && ! is_scalar($claims->fid))) {
+            return null;
+        }
+
         // The casts state the contract's `array<string, string>`; `CacheDenylist::hasAny()` casts as
         // well, so a claim another issuer sent as a number reaches the same key either way. The ''
         // is what keeps an absent claim out of the lookup — a placeholder would be MGET'd and miss,

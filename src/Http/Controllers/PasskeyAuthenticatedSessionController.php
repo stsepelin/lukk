@@ -7,7 +7,9 @@ namespace Lukk\Http\Controllers;
 use Illuminate\Contracts\Auth\UserProvider;
 use Lukk\Actions\FinishPasskeyLogin;
 use Lukk\Actions\StartSession;
+use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LoginResponse;
+use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Http\Controllers\Concerns\DeterminesSessionOutcome;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
 
@@ -25,7 +27,9 @@ class PasskeyAuthenticatedSessionController
         private readonly UserProvider $users,
     ) {}
 
-    public function store(PasskeyAssertionRequest $request): LoginResponse
+    // `ChallengeToken` is method-injected, like `ConfirmablePasskeyController` injects
+    // `FinishPasskeyLogin`: it is only needed on the branch that challenges.
+    public function store(PasskeyAssertionRequest $request, ChallengeToken $challengeTokens): LoginResponse|TwoFactorChallengeResponse
     {
         // `ceremony_id` is validated as a required string; the cast states it.
         $userId = ($this->finishLogin)((string) $request->input('ceremony_id'), $request->array('credential')); // @pest-mutate-ignore: RemoveStringCast
@@ -39,6 +43,15 @@ class PasskeyAuthenticatedSessionController
 
         abort_if($user === null, 401, 'Unauthenticated.');
         abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
+
+        // A passkey stands in for the second factor only when user verification is REQUIRED — see
+        // `passkeyIsSecondFactor()`. Below that it is possession alone, and skipping a confirmed TOTP
+        // for it would hand whoever holds the authenticator a full session, then let them spend it on
+        // `DELETE /auth/two-factor`. The password path has always run this gate; this one is the third
+        // gate it turned out to be missing, after `block_unverified_login` and the deleted-user check.
+        if (! $this->passkeyIsSecondFactor() && $this->twoFactorRequired($user)) {
+            return $this->twoFactorChallenge($user, $challengeTokens);
+        }
 
         return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['webauthn']])]);
     }

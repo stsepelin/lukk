@@ -297,7 +297,11 @@ it('lives for confirm.ttl, read from env as a string, and five minutes when unse
 });
 
 it('answers a confirmation attempt with no password, or a non-string one, with 422', function (array $payload) {
-    // The route reads the field directly; anything but a string must still read as a wrong password.
+    // Anything but a string must read as a wrong password. The three cases this started with were
+    // all ones a `(string)` cast handles quietly — an ARRAY is the one that does not: it raised
+    // "Array to string conversion", which `HandleExceptions` promotes to an ErrorException and
+    // renders as a 500. So the test name claimed a property its data never exercised, and this was
+    // the only endpoint in the package casting request input with no validation behind it.
     $access = User::factory()->create()->startSession()->accessToken;
 
     $this->withToken($access)->postJson('/auth/confirm-password', $payload)->assertStatus(422);
@@ -305,4 +309,7 @@ it('answers a confirmation attempt with no password, or a non-string one, with 4
     'missing' => [[]],
     'null' => [['password' => null]],
     'a number' => [['password' => 1234]],
+    'an array' => [['password' => ['x']]],
+    'a nested array' => [['password' => ['a' => ['b']]]],
+    'over 255 characters' => [['password' => str_repeat('a', 256)]],
 ]);
