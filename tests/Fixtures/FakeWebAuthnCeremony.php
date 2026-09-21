@@ -37,6 +37,14 @@ class FakeWebAuthnCeremony implements WebAuthnCeremony
         );
     }
 
+    public function verifiesUser(): bool
+    {
+        // Mirrors `SpomkyWebAuthnCeremony`, including its default. A fake that always claimed to
+        // verify would make every assurance test pass for the wrong reason — and a mock that does
+        // not follow the thing it stands in for is how a second implementation drifts.
+        return (config('lukk.passkeys.user_verification') ?? 'required') === 'required';
+    }
+
     public function authenticationOptions(string $challenge, array $allowCredentialIds): array
     {
         return ['challenge' => $challenge, 'allowCredentials' => $allowCredentialIds];

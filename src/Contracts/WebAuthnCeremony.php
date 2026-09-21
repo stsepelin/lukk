@@ -30,6 +30,19 @@ interface WebAuthnCeremony
     public function verifyRegistration(int|string $userId, array $response, string $challenge): NewPasskey;
 
     /**
+     * Does this ceremony REQUIRE user verification — a PIN or biometric, not just presence?
+     *
+     * The answer decides whether a passkey may stand in for the user's second factor: with UV it is
+     * two factors in one gesture, without it possession alone. Asked of the implementation rather
+     * than read from config because config is not the authority — the ceremony is a singleton whose
+     * setting is frozen at first resolution, and it is a swap seam, so a replacement may enforce
+     * something else entirely. Inferring it from `lukk.passkeys.user_verification` failed OPEN in
+     * both cases: the gate skipped an enrolled second factor on the strength of a `required` that
+     * nothing had applied.
+     */
+    public function verifiesUser(): bool;
+
+    /**
      * @param  array<int,string>  $allowCredentialIds
      * @return array<string,mixed> PublicKeyCredentialRequestOptions for the client
      */

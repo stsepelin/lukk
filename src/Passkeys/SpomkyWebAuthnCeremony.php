@@ -142,6 +142,13 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         );
     }
 
+    public function verifiesUser(): bool
+    {
+        // The SAME default as every other read of this key in this class, so the two cannot drift:
+        // an unset value means `required` here and there.
+        return ($this->config['user_verification'] ?? 'required') === 'required';
+    }
+
     public function authenticationOptions(string $challenge, array $allowCredentialIds): array
     {
         $options = PublicKeyCredentialRequestOptions::create(

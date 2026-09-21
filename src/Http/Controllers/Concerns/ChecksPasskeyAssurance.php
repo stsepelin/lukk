@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers\Concerns;
 
+use Lukk\Contracts\WebAuthnCeremony;
+
 /**
  * Is a passkey assertion on this install worth two factors, or one?
  *
@@ -24,20 +26,15 @@ trait ChecksPasskeyAssurance
 {
     private function passkeyIsSecondFactor(): bool
     {
-        // The GLOBAL block, deliberately — not `Lukk::guardConfig()`, which is the rule everywhere
-        // else in this package. This value is not a policy flag lukk decides; it is a question about
-        // what the CEREMONY actually enforced, and the ceremony is an application singleton built
-        // from the global block (`LukkServiceProvider::registerPasskeys()`), so a per-guard override
-        // never reaches it. Reading the per-guard value here would let a guard set `required`, skip
-        // the enrolled second factor on the strength of it, and have the ceremony run `preferred`
-        // and never look at the UV flag — fail open, which is the one direction that must not happen.
+        // Asked of the CEREMONY, not of config. Config is not the authority on what was enforced:
+        // `WebAuthnCeremony` is an application singleton, so its setting is frozen at first
+        // resolution and a later `config()` write (multi-tenant swapping, a test, an Octane worker)
+        // does not reach it; and it is a declared swap seam, so a replacement may enforce something
+        // else entirely. Both of those made a config read fail OPEN — the gate skipped an enrolled
+        // second factor on the strength of a `required` nothing had applied.
         //
-        // If `WebAuthnCeremony` is ever made guard-scoped, this read moves with it, in the same
-        // change. A test pins the two together.
-        //
-        // An UNRECOGNISED value is not `required`, so the caller's stricter path runs — fail closed.
-        // An UNSET one reads as `required`, which is safe only because `SpomkyWebAuthnCeremony`
-        // defaults the same way: those two defaults are a pair and must be changed together.
-        return (config('lukk.passkeys.user_verification') ?? 'required') === 'required';
+        // This also settles the per-guard question the previous version reasoned about at length:
+        // whatever the ceremony was built from, it is the thing that ran.
+        return app(WebAuthnCeremony::class)->verifiesUser();
     }
 }
