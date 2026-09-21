@@ -294,3 +294,39 @@ it('accepts the refresh token in a form-encoded body', function () {
 
     $this->post('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertOk();
 });
+
+it('carries amr forward across a refresh, rather than dropping it on the first one', function () {
+    // `amr` (RFC 8176) records how the SESSION was authenticated, and a refresh does not repeat that
+    // — so it has to survive rotation. It used to be stamped only by `StartSession`, so it vanished
+    // from the very first refreshed token: a route gated on it stopped working within one
+    // access_ttl, fail-closed if the gate was written tightly and fail-OPEN if it was written as
+    // `!isset($amr) || in_array(...)`. The docs presented it as durable throughout.
+    $user = User::factory()->create();
+
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+    expect(claims($login->json('access_token'))->amr)->toBe(['pwd']);
+
+    app('auth')->forgetGuards();
+    $refreshed = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd']);
+
+    // And again, so it survives a CHAIN rather than just the row the sign-in wrote.
+    app('auth')->forgetGuards();
+    $again = $this->postJson('/auth/refresh', ['refresh_token' => $refreshed->json('refresh_token')])->assertOk();
+    expect(claims($again->json('access_token'))->amr)->toBe(['pwd']);
+});
+
+it('does not let a claims hook forge or erase the session amr', function () {
+    // Reserved like `scope` and `pin`: applied after the `tokenClaimsUsing` merge, so a hook can
+    // neither invent an authentication method the session never used nor drop the real one.
+    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn'], 'role' => 'x']);
+
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    app('auth')->forgetGuards();
+    $refreshed = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd'])
+        ->and(claims($refreshed->json('access_token'))->role)->toBe('x');
+});

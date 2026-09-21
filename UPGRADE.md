@@ -22,6 +22,49 @@ but the default is safe.
 
 ## Upgrading to the next release from 0.6.x (unreleased)
 
+### A new `refresh_tokens.amr` column, and a new argument on `RefreshTokenRepository::persist()`
+
+**Medium impact — everyone republishes a migration; anyone implementing or subclassing
+`RefreshTokenRepository` must update a signature.**
+
+`amr` (RFC 8176 — how the session was authenticated: `["pwd"]`, `["pwd","otp"]`, `["webauthn"]`) was
+stamped only at sign-in, so it disappeared from the first refreshed access token. A route gated on
+it therefore stopped working roughly one `access_ttl` into every session: fail-closed if the gate was
+written tightly, **fail-open** if it was written as `!isset($amr) || in_array(...)`. It is now stored
+with the family and carried forward by every rotation.
+
+1. Republish and run the core migration:
+
+   ```bash
+   php artisan vendor:publish --tag=lukk-migrations --force
+   php artisan migrate
+   ```
+
+   The column went into the **existing** `create_refresh_tokens_table` migration, so an install that
+   has already run it has no such column until you republish. Until you do, nothing breaks — the
+   repository writes `amr` only when it has one and reads it as `null` when the attribute is absent,
+   which is exactly the pre-upgrade behaviour.
+
+2. If you implement `Lukk\Contracts\RefreshTokenRepository` yourself, or subclass
+   `DatabaseRefreshTokenRepository` and override `persist()`, add the trailing argument:
+
+   ```php
+   public function persist(
+       int|string $userId, string $familyId, ?string $previousId, string $tokenHash,
+       int $expiresAt, ?string $scope = null, ?string $amr = null,
+   ): void
+   ```
+
+   PHP raises a fatal on a mismatched signature, so this surfaces immediately rather than silently.
+   Round-trip it like `scope`: store the string given and return it on `RefreshTokenRecord::$amr`. A
+   repository that ignores it keeps the old behaviour — the claim is simply absent after the first
+   refresh.
+
+`amr` is now **reserved**, like `scope` and `pin`: it is applied after the `tokenClaimsUsing` merge,
+so a claims hook can neither forge an authentication method the session never used nor erase the
+real one.
+
+
 ### `POST /auth/logout` no longer requires a valid access token
 
 **Medium impact — if a client relies on logout answering 401, uses cookie mode, or you rebound

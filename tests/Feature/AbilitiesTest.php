@@ -1194,7 +1194,7 @@ it('refuses to mint a pinned session whose pin did not reach storage', function 
     // fills — so the remaining route is a repository that drops the argument.)
     app()->bind(RefreshTokenRepository::class, fn () => new class extends DatabaseRefreshTokenRepository
     {
-        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
         {
             parent::persist($userId, $familyId, $previousId, $tokenHash, $expiresAt);
         }

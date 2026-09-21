@@ -61,7 +61,7 @@ interface RefreshTokenRepository
      *                          the storage must keep them apart — conflating them lets the most
      *                          restricted token widen to the subject's full grant on first refresh.
      */
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void;
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void;
 
     public function markRotated(string $id): void;
 

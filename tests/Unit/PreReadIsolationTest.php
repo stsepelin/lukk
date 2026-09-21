@@ -119,7 +119,7 @@ it('refuses to mint when the pre-read disagrees with the locked read', function 
             return $this->inner->findByHashForUpdate($hash);
         }
 
-        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
         {
             $this->inner->persist($userId, $familyId, $previousId, $tokenHash, $expiresAt, $scope);
         }

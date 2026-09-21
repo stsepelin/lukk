@@ -82,6 +82,10 @@ class StartSession
             $this->issuer->hash($secret),
             $expiresAt,
             $granted === null ? null : ($granted->toScope() ?? ''),
+            // Persisted so ROTATION can carry it forward: `amr` records how this session was
+            // authenticated, and a refresh does not re-authenticate anything. Written only when the
+            // sign-in actually supplied one, so nothing lands on a path that has no answer.
+            self::encodeAmr($claims['amr'] ?? null),
         );
 
         // A pinned grant that did not reach storage is the dangerous case, not a harmless one: the
@@ -102,5 +106,28 @@ class StartSession
         $access = $this->issuer->accessToken($context, $claims, $abilities);
 
         return new TokenPair($access['token'], $secret, $access['expires_in']);
+    }
+
+    /**
+     * `amr` as it goes to storage: a JSON list, or null when there is nothing to record.
+     *
+     * Only a list of strings is accepted. The claim is lukk's own on every path that mints one
+     * (`['pwd']`, `['pwd','otp']`, `['webauthn']`), but `$claims` is a public parameter — and a
+     * value that is not a list of strings is not an `amr`. Storing one would put a shape into the
+     * family that every later mint stamps back out unexamined.
+     */
+    private static function encodeAmr(mixed $amr): ?string
+    {
+        if (! is_array($amr) || $amr === [] || ! array_is_list($amr)) {
+            return null;
+        }
+
+        foreach ($amr as $method) {
+            if (! is_string($method)) {
+                return null;
+            }
+        }
+
+        return json_encode($amr) ?: null;
     }
 }

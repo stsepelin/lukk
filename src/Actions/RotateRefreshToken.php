@@ -142,6 +142,12 @@ class RotateRefreshToken
                 $secretHash,
                 $record->expiresAt,
                 $record->scope,
+                // Carried forward with the grant, and for the same reason: `amr` describes how the
+                // SESSION was authenticated, which a refresh does not repeat. Losing it made the
+                // claim vanish from the first refreshed token, so a route gated on it stopped
+                // working within one access_ttl — fail-closed if the gate was written tightly,
+                // fail-OPEN if written as `!isset($amr) || in_array(...)`.
+                $record->amr,
             );
 
             // A concurrent family revoke is a set-based UPDATE. Under READ COMMITTED (PostgreSQL)
@@ -241,9 +247,23 @@ class RotateRefreshToken
     {
         $abilities = $this->abilitiesFor($record, $grace);
 
-        return [$abilities, $record === null || $abilities === null && $this->rejectable($record, $grace)
-            ? []
-            : Lukk::customClaimsFor($record->userId)];
+        if ($record === null || $abilities === null && $this->rejectable($record, $grace)) {
+            return [$abilities, []];
+        }
+
+        // `amr` after the consumer's claims, like `scope` and `pin`: it is the family's own record of
+        // how this session was authenticated, and a `tokenClaimsUsing` hook may neither forge one nor
+        // erase the real one.
+        $claims = Lukk::customClaimsFor($record->userId);
+        unset($claims['amr']);
+
+        $amr = $record->amr === null ? null : json_decode($record->amr, true);
+
+        if (is_array($amr) && $amr !== []) {
+            $claims['amr'] = $amr;
+        }
+
+        return [$abilities, $claims];
     }
 
     /** Whether the unlocked read already shows a token the transaction will refuse. */

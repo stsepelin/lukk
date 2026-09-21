@@ -88,6 +88,8 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
+            // `?? null` because a pre-0.8 schema has no such column — the attribute is simply absent.
+            amr: $row->amr ?? null,
             createdAt: $row->created_at?->getTimestamp(),
             // The family's original is the row `StartSession` inserted with no predecessor. Unlike
             // `scope`, this column needs no "is it there" guard: `persist()` writes `previous_id` on
@@ -96,7 +98,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         );
     }
 
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
     {
         $attributes = [
             'user_id' => $userId,
@@ -110,6 +112,12 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // hasn't published the new migration, and null is the default anyway.
         if ($scope !== null) {
             $attributes['scope'] = $scope;
+        }
+
+        // Same conditional write as `scope`, and for the same reason: a pre-0.8 schema has no such
+        // column, and null is what its absence means anyway.
+        if ($amr !== null) {
+            $attributes['amr'] = $amr;
         }
 
         // Only stamp the guard column under multi-guard; a single-guard schema has no such column.

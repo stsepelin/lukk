@@ -93,7 +93,7 @@ it('never leaves a live token behind when a revoke races the rotation', function
             parent::__construct(null);
         }
 
-        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
         {
             parent::persist($userId, $familyId, $previousId, $tokenHash, $expiresAt, $scope);
 
