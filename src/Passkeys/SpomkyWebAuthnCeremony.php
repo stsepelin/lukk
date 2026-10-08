@@ -83,7 +83,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
             user: PublicKeyCredentialUserEntity::create($userName, (string) $userId, $userName),
             challenge: $this->decode($challenge),
-            pubKeyCredParams: [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)],
+            pubKeyCredParams: $this->pubKeyCredParams(),
             // Login is usernameless (empty allowCredentials → discoverable), so the credential
             // MUST be created as a resident/discoverable key — otherwise a real authenticator
             // stores a non-discoverable credential that passwordless login can never find. UV is
@@ -97,6 +97,16 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         );
 
         return $this->toArray($options);
+    }
+
+    /**
+     * The COSE algorithms lukk advertises AND accepts — the same pair the algorithm manager is pinned to.
+     *
+     * @return list<PublicKeyCredentialParameters>
+     */
+    private function pubKeyCredParams(): array
+    {
+        return [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)];
     }
 
     public function verifyRegistration(int|string $userId, array $response, string $challenge): NewPasskey
@@ -120,6 +130,10 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 // and user-verification requirement.
                 user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
                 challenge: $this->decode($challenge),
+                // WebAuthn L3 §7.1 step 22 checks the key's alg against THESE params. Left empty, the
+                // library substitutes its own default — equal to ours today, so no test can tell, but
+                // a library change would widen what registration accepts without a line changing here.
+                pubKeyCredParams: $this->pubKeyCredParams(),
                 authenticatorSelection: AuthenticatorSelectionCriteria::create(
                     // A string from env either way; the cast only states it.
                     userVerification: (string) ($this->config['user_verification'] ?? 'required'), // @pest-mutate-ignore: RemoveStringCast
