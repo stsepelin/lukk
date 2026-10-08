@@ -77,24 +77,46 @@ trait HasTwoFactorAuthentication
      */
     public function useRecoveryCode(string $code): bool
     {
-        // Lock the row and re-read inside a transaction so two concurrent
-        // redemptions can't both spend the same single-use code.
-        return DB::transaction(function () use ($code) {
+        // Find the match BEFORE taking the lock. One password-hash derivation per stored code — up to
+        // a hundred — held the user's row under `lockForUpdate()` for seconds on every wrong guess,
+        // stalling every other write to the account. Verifying needs no lock; spending does.
+        $match = null;
+
+        foreach ($this->recoveryCodeHashes() as $hash) {
+            if (Hash::check($code, $hash)) {
+                $match = $hash;
+
+                break;
+            }
+        }
+
+        if ($match === null) {
+            return false;
+        }
+
+        // Lock, re-read and spend by VALUE: a concurrent redemption may have spent this code (or
+        // another) since the read above, so it is spent only if it is still there.
+        return DB::transaction(function () use ($match) {
             static::query()->whereKey($this->getKey())->lockForUpdate()->first();
             $this->refresh();
 
-            $hashes = json_decode($this->two_factor_recovery_codes ?? '[]', true) ?: [];
+            $hashes = $this->recoveryCodeHashes();
+            $index = array_search($match, $hashes, true);
 
-            foreach ($hashes as $index => $hash) {
-                if (Hash::check($code, $hash)) {
-                    unset($hashes[$index]);
-                    $this->forceFill(['two_factor_recovery_codes' => json_encode(array_values($hashes))])->save();
-
-                    return true;
-                }
+            if ($index === false) {
+                return false;
             }
 
-            return false;
+            unset($hashes[$index]);
+            $this->forceFill(['two_factor_recovery_codes' => json_encode(array_values($hashes))])->save();
+
+            return true;
         });
+    }
+
+    /** @return array<array-key, mixed> the stored hashes, listed or keyed */
+    private function recoveryCodeHashes(): array
+    {
+        return json_decode($this->two_factor_recovery_codes ?? '[]', true) ?: [];
     }
 }
