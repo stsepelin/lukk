@@ -140,6 +140,9 @@ class LukkServiceProvider extends ServiceProvider
             $kernel->addToMiddlewarePriorityAfter(RequireAbility::class, RequireAllAbilities::class);
             // Same reason: it reads the authenticated user, and a null one makes it a silent no-op.
             $kernel->addToMiddlewarePriorityAfter(RequireAllAbilities::class, RequirePinnedAbility::class);
+            // And the step-up gate: it reads the user and the session presenting the confirmation,
+            // so listed before `auth:{guard}` it saw neither and answered 423 to a good confirmation.
+            $kernel->addToMiddlewarePriorityAfter(RequirePinnedAbility::class, RequireConfirmation::class);
         }
 
         if ($this->config()['routes'] ?? true) {

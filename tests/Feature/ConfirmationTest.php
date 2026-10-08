@@ -313,3 +313,22 @@ it('answers a confirmation attempt with no password, or a non-string one, with 4
     'a nested array' => [['password' => ['a' => ['b']]]],
     'over 255 characters' => [['password' => str_repeat('a', 256)]],
 ]);
+
+it('confirms even when the route lists the gate before the auth middleware', function () {
+    // Middleware runs in declaration order unless the class is in the kernel's priority list, and
+    // `Authenticate` is. The gate reads the authenticated user and the presenting session, so
+    // listed first it saw no user and answered 423 to a request carrying a good confirmation —
+    // the same trap the ability gates were already sorted out of.
+    Route::middleware(['lukk.confirm', 'auth:api'])
+        ->post('/_test/sensitive-reordered', fn () => response()->json(['ok' => true]));
+    $access = User::factory()->create()->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+
+    // Earning the confirmation authenticated a request and left that user memoized, with `api` as
+    // the default guard. A real request starts from neither.
+    $this->app['auth']->forgetGuards();
+    config(['auth.defaults.guard' => 'web']);
+
+    $this->withToken($access)->withHeaders($headers)
+        ->postJson('/_test/sensitive-reordered')->assertOk();
+});
