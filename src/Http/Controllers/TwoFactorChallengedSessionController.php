@@ -11,6 +11,7 @@ use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LoginResponse;
 use Lukk\Http\Controllers\Concerns\DeterminesSessionOutcome;
 use Lukk\Http\Requests\TwoFactorChallengeRequest;
+use Lukk\Support\AuthenticationMethods;
 
 /**
  * Completes a two-factor login: `store` exchanges the challenge token plus a TOTP
@@ -38,7 +39,7 @@ class TwoFactorChallengedSessionController
         // user-verification gate was asserting a password the account may not even have, and `amr`
         // is durable now, so that would ride every rotation for the family's whole life. A challenge
         // that does not say — an older one, or a co-issuer's — is assumed to be the password path.
-        $firstFactor = $this->challengeTokens->firstFactorOf('2fa', $challenge) ?? ['pwd'];
+        $firstFactor = $this->challengeTokens->firstFactorOf('2fa', $challenge) ?? AuthenticationMethods::password();
 
         $user = ($this->verifyChallenge)(
             $challenge,
@@ -54,7 +55,7 @@ class TwoFactorChallengedSessionController
         // session for an account the policy says must not have one.
         abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
 
-        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => [...$firstFactor, 'otp']]);
+        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => AuthenticationMethods::withOneTimePassword($firstFactor)]);
 
         // The first factor was a password checked up to `challenge_ttl` ago. Changed or reset since, the
         // challenge stood in for a credential the account no longer has — see `ConfirmPasswordUnchanged`.

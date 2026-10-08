@@ -143,7 +143,7 @@ class StartSession
      * worth recording.
      *
      * The claim is lukk's own on every path that mints one (`['pwd']`, `['pwd','otp']`,
-     * `['webauthn']`), but `$claims` is a public parameter and `startSession()` lets an application
+     * `['pop','user','mfa']`), but `$claims` is a public parameter and `startSession()` lets an application
      * pass its own — so anything that is not a bounded list of strings is not an `amr`, and storing
      * it would put a shape into the family that every later mint stamps back out.
      */

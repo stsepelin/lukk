@@ -7,6 +7,7 @@ namespace Lukk\Tests\Fixtures;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Support\NewPasskey;
+use Lukk\Support\PasskeyAssertion;
 use Lukk\Support\PasskeyRecord;
 
 /**
@@ -37,25 +38,44 @@ class FakeWebAuthnCeremony implements WebAuthnCeremony
         );
     }
 
-    public function verifiesUser(): bool
+    public function authenticationOptions(string $challenge, array $allowCredentialIds, ?string $userVerification = null): array
     {
-        // Mirrors `SpomkyWebAuthnCeremony`, including its default. A fake that always claimed to
-        // verify would make every assurance test pass for the wrong reason — and a mock that does
-        // not follow the thing it stands in for is how a second implementation drifts.
-        return (config('lukk.passkeys.user_verification') ?? 'required') === 'required';
+        return [
+            'challenge' => $challenge,
+            'allowCredentials' => $allowCredentialIds,
+            'userVerification' => $userVerification ?? (config('lukk.passkeys.user_verification') ?? 'required'),
+        ];
     }
 
-    public function authenticationOptions(string $challenge, array $allowCredentialIds): array
-    {
-        return ['challenge' => $challenge, 'allowCredentials' => $allowCredentialIds];
-    }
-
-    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored): int
+    /**
+     * Mirrors the real rule (`SpomkyWebAuthnCeremony`): an assertion is multi-factor only when it
+     * carries UV AND the stored credential was already `uvInitialized` — here, stored as `PUB+uv`.
+     *
+     * An EXPLICIT `required` is enforced, as the library enforces it; the CONFIGURED requirement is
+     * not, because pinning the library's own config-level UV check is `PasskeyIntegrationTest`'s job
+     * and enforcing it here would make every flow test model a UV-capable authenticator.
+     */
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion
     {
         if (($response['challenge'] ?? null) !== $challenge || ($response['id'] ?? null) !== $stored->credentialId) {
             throw new PasskeyVerificationFailed('assertion mismatch');
         }
 
-        return (int) ($response['sign_count'] ?? $stored->signCount + 1);
+        $userVerified = ($response['uv'] ?? false) === true;
+
+        if ($userVerification === 'required' && ! $userVerified) {
+            throw new PasskeyVerificationFailed('user verification required');
+        }
+
+        return new PasskeyAssertion(
+            signCount: (int) ($response['sign_count'] ?? $stored->signCount + 1),
+            userVerified: $userVerified,
+            multiFactor: $userVerified && $this->isMultiFactor($stored),
+        );
+    }
+
+    public function isMultiFactor(PasskeyRecord $stored): bool
+    {
+        return str_ends_with($stored->publicKey, '+uv');
     }
 }

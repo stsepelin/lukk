@@ -22,27 +22,59 @@ but the default is safe.
 
 ## Upgrading to the next release from 0.6.x (unreleased)
 
-### `WebAuthnCeremony` gains `verifiesUser(): bool`
+### `amr` now uses only RFC 8176 registered values
+
+**High impact if anything reads `amr` — a gateway, a resource server, or your own `lukk.ability`-style
+gates.**
+
+| sign-in | before | now |
+|---|---|---|
+| password | `["pwd"]` | `["pwd"]` |
+| password + TOTP or recovery code | `["pwd","otp"]` | `["pwd","otp","mfa"]` |
+| passkey, user verified | `["webauthn"]` | `["pop","user","mfa"]` |
+| passkey, presence only | `["webauthn"]` | `["pop","user"]` |
+| passkey (presence only) + TOTP | `["webauthn","otp"]` | `["pop","user","otp"]` |
+
+`webauthn` was never registered, so nothing outside lukk could interpret it. Replace a check for
+`"webauthn"` with `"pop"`, and a check for "was this multi-factor" with `"mfa"`. Note the last row: a
+presence-only passkey plus a TOTP is two POSSESSION factors, which NIST SP 800-63B-4 §2.2.1 does not
+count as multi-factor, so it carries no `mfa`.
+
+### `WebAuthnCeremony`: `verifyAssertion()` returns a `PasskeyAssertion`, and two new arguments
 
 **Only if you implement `Lukk\Contracts\WebAuthnCeremony` yourself.** The shipped
-`SpomkyWebAuthnCeremony` already has it.
+`SpomkyWebAuthnCeremony` is already updated.
 
 ```php
-public function verifiesUser(): bool
-{
-    // true only when the ceremony REQUIRES user verification — a PIN or biometric, not presence.
-    return ($this->config['user_verification'] ?? 'required') === 'required';
-}
+public function authenticationOptions(string $challenge, array $allowCredentialIds, ?string $userVerification = null): array;
+
+public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion;
+
+public function isMultiFactor(PasskeyRecord $stored): bool;
 ```
 
-lukk asks this to decide whether a passkey may stand in for the user's second factor: with user
-verification a WebAuthn assertion is two factors in one gesture, without it possession alone. Answer
-truthfully — a `true` from a ceremony that does not enforce it lets a stolen authenticator skip an
-enrolled TOTP.
+- `$userVerification` is the requirement for THIS ceremony (`required`/`preferred`/`discouraged`), or
+  null for your configured one. A step-up passes `required` when the account can reach AAL2, and you
+  must enforce it on the assertion — not only put it in the options.
+- `PasskeyAssertion::$multiFactor` must be true only when the assertion carries the UV flag AND the
+  credential was already `uvInitialized` BEFORE this ceremony. Read it before verifying: a WebAuthn
+  library typically updates it from the assertion as part of verification, and WebAuthn L3 §4 forbids
+  relying on the flag in the ceremony that would set it. lukk skips an enrolled TOTP on this answer.
+- `isMultiFactor()` reports whether a stored credential has shown user verification; false when unknown.
 
-A missing method is a **fatal at class-load time**, not a catchable exception, so it appears on the
-first request that resolves your binding rather than at boot. If you deploy without running a passkey
-request in CI, check the method exists before you ship.
+A missing or mismatched method is a **fatal at class-load time**, not a catchable exception, so it
+appears on the first request that resolves your binding rather than at boot.
+
+### Passkey step-up: a new options route, and stricter rules
+
+`POST /auth/confirm-passkey/options` (authenticated) negotiates a step-up ceremony: it asks the
+authenticator for user verification when the account can reach AAL2 and lists the user's own
+credentials. Use it instead of `passkeys/login-options` for a step-up (lukk-js does).
+
+A presence-only passkey no longer earns a step-up on an account that has a password or a
+user-verifying passkey: such an account can authenticate more strongly, and a step-up mints the token
+that binds and removes authenticators (NIST SP 800-63B-4 §4.1.2.1). A password-less account whose
+credentials are all presence-only can still step up with one — it has nothing stronger.
 
 ### A new `refresh_tokens.amr` column, and a new argument on `RefreshTokenRepository::persist()`
 

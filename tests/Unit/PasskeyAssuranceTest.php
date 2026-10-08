@@ -2,114 +2,138 @@
 
 declare(strict_types=1);
 
+use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
-use Lukk\Http\Controllers\Concerns\ChecksPasskeyAssurance;
-use Lukk\Lukk;
-use Lukk\Passkeys\SpomkyWebAuthnCeremony;
+use Lukk\Passkeys\PasskeyAssurance;
+use Lukk\Support\AuthenticationMethods;
+use Lukk\Support\NewPasskey;
+use Lukk\Support\VerifiedPasskey;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
+use Lukk\Tests\Fixtures\User;
 
 uses()->group('passkeys');
 
-beforeEach(function () {
-    // The real ceremony refuses to construct without these, and this file resolves it on purpose —
-    // the gate now asks the ceremony what it enforces rather than reading config behind its back.
-    config([
-        'lukk.passkeys.rp_id' => 'example.test',
-        'lukk.passkeys.origins' => ['https://example.test'],
-    ]);
-});
+beforeEach(fn () => app()->bind(WebAuthnCeremony::class, FakeWebAuthnCeremony::class));
 
-function assurance(): object
+/** A stored credential; `$multiFactor` models WebAuthn L3's `uvInitialized` via the fake's `+uv` marker. */
+function credentialFor(User $user, string $id, bool $multiFactor): void
 {
-    return new class
-    {
-        use ChecksPasskeyAssurance;
-
-        public function secondFactor(): bool
-        {
-            return $this->passkeyIsSecondFactor();
-        }
-    };
+    app(PasskeyRepository::class)->store($user->getAuthIdentifier(), new NewPasskey($id, $multiFactor ? 'PUB+uv' : 'PUB', 0));
 }
 
-it('treats a passkey as a second factor only when user verification is required', function (mixed $configured, bool $expected) {
-    config(['lukk.passkeys.user_verification' => $configured]);
-    // The gate asks the CEREMONY, which is a singleton built from config at resolution — so the
-    // config has to be in place before it is built, exactly as it is at boot in a real application.
-    app()->forgetInstance(WebAuthnCeremony::class);
+function assurance(): PasskeyAssurance
+{
+    return app(PasskeyAssurance::class);
+}
 
-    expect(assurance()->secondFactor())->toBe($expected);
-})->with([
-    'required' => ['required', true],
-    'preferred' => ['preferred', false],
-    'discouraged' => ['discouraged', false],
-    'a typo' => ['Required', false],
-    'a non-string' => [['required'], false],
-    // Unset reads as required. Note what this actually pins: the value reaches the ceremony through
-    // `LukkServiceProvider::registerPasskeys()`, which applies its OWN `?? 'required'`, so this row
-    // moves when the provider's default moves. The ceremony's internal `??` is unreachable through
-    // the container and is pinned separately, by constructing it directly below.
-    'unset' => [null, true],
-]);
+describe('the amr values', function () {
+    // Every value REGISTERED in the IANA "Authentication Method Reference Values" registry (RFC 8176),
+    // so a standard consumer can read them. `webauthn`, which lukk used to emit, is not registered.
 
-it('reads user verification from the same place the ceremony enforces it', function () {
-    // The gate and the ceremony must never disagree. The ceremony is an application SINGLETON built
-    // from the GLOBAL block, so a per-guard override does not reach it — and a gate that read the
-    // per-guard value would skip the second factor on the strength of a `required` the ceremony
-    // never applied. That is the fail-open direction, and it is the exact shape CLAUDE.md records
-    // for `features.abilities` / `gate_auth_routes`, running the other way.
-    config([
-        'lukk.passkeys.user_verification' => 'preferred',
-        'lukk.guards.admin.passkeys.user_verification' => 'required',
-    ]);
-    app()->forgetInstance(WebAuthnCeremony::class);
+    it('names a password', function () {
+        expect(AuthenticationMethods::password())->toBe(['pwd']);
+    });
 
-    Lukk::onGuard('admin', function () {
-        expect(assurance()->secondFactor())->toBeFalse();
+    it('names a passkey as possession plus presence, and adds mfa only when it was multi-factor', function () {
+        expect(AuthenticationMethods::passkey(false))->toBe(['pop', 'user'])
+            ->and(AuthenticationMethods::passkey(true))->toBe(['pop', 'user', 'mfa']);
+    });
+
+    it('calls a password plus a one-time code multi-factor', function () {
+        // Two different categories — something you know, something you have.
+        expect(AuthenticationMethods::withOneTimePassword(['pwd']))->toBe(['pwd', 'otp', 'mfa']);
+    });
+
+    it('does not call a single-factor passkey plus a one-time code multi-factor', function () {
+        // Both are "something you have" (NIST SP 800-63B-4 §3.1.4, §3.1.6), and §2.2.1 requires a
+        // password or biometric comparison for two single-factor authenticators to reach AAL2.
+        expect(AuthenticationMethods::withOneTimePassword(['pop', 'user']))->toBe(['pop', 'user', 'otp']);
+    });
+
+    it('never carries a stray mfa from the first factor into a combination that is not', function () {
+        expect(AuthenticationMethods::withOneTimePassword(['pop', 'user', 'mfa']))->toBe(['pop', 'user', 'otp']);
     });
 });
 
-it('asks the ceremony what it enforces, so a stale singleton cannot make it lie', function () {
-    // `WebAuthnCeremony` is an application SINGLETON: its user-verification setting is frozen at
-    // first resolution, while a config read happens on every call. Change the config afterwards —
-    // which multi-tenant config swapping does per tenant, under Octane or a queue worker — and the
-    // gate would skip a confirmed second factor on the strength of a `required` the ceremony never
-    // applied. Same outcome as the per-guard divergence, reached by time instead of by guard.
-    config(['lukk.passkeys.user_verification' => 'preferred']);
-    app(WebAuthnCeremony::class); // resolve it, freezing `preferred`
+describe('the highest level an account can reach', function () {
+    // NIST SP 800-63B-4 §4.1.2.1: a step-up that binds or removes authenticators must authenticate at
+    // "the maximum AAL currently available in the subscriber account".
 
-    config(['lukk.passkeys.user_verification' => 'required']);
+    it('reaches AAL2 with a password, whatever its passkeys are', function () {
+        $user = User::factory()->create();
+        credentialFor($user, 'k', false);
 
-    expect(assurance()->secondFactor())->toBeFalse();
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue()
+            ->and(assurance()->requiredUserVerification($user))->toBe('required');
+    });
+
+    it('reaches AAL2 without a password through a multi-factor passkey', function () {
+        $user = User::factory()->create(['password' => null]);
+        credentialFor($user, 'single', false);
+        credentialFor($user, 'multi', true);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue();
+    });
+
+    it('stays at AAL1 with only single-factor passkeys and no password', function () {
+        $user = User::factory()->create(['password' => null]);
+        credentialFor($user, 'a', false);
+        credentialFor($user, 'b', false);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeFalse()
+            ->and(assurance()->requiredUserVerification($user))->toBe('preferred');
+    });
+
+    it('treats an empty password the same as none', function () {
+        $user = User::factory()->create(['password' => '']);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeFalse();
+    });
+
+    it('lists only the account\'s own credentials for a step-up', function () {
+        $user = User::factory()->create();
+        credentialFor($user, 'mine', false);
+        credentialFor(User::factory()->create(), 'theirs', false);
+
+        expect(assurance()->credentialIdsFor($user))->toBe(['mine']);
+    });
 });
 
-it('believes a rebound ceremony over the config it does not read', function () {
-    // The other half: `WebAuthnCeremony` is a declared swap seam. A replacement that does not verify
-    // the user makes `config('lukk.passkeys.user_verification')` a statement about a value nobody
-    // enforces — and it fails OPEN, which is structurally the `scope`/`pin`/`TokenIssuer` seam
-    // incident this package has already had twice.
-    config(['lukk.passkeys.user_verification' => 'required']);
-    app()->instance(WebAuthnCeremony::class, new class extends FakeWebAuthnCeremony
+describe('whether one step-up meets that level', function () {
+    it('accepts a multi-factor step-up on any account', function () {
+        $user = User::factory()->create();
+
+        expect(assurance()->permitsStepUp($user, new VerifiedPasskey($user->id, 'k', true)))->toBeTrue();
+    });
+
+    it('refuses a single-factor step-up on an account that can reach AAL2', function () {
+        $user = User::factory()->create();
+
+        expect(assurance()->permitsStepUp($user, new VerifiedPasskey($user->id, 'k', false)))->toBeFalse();
+    });
+
+    it('accepts a single-factor step-up on an account with nothing stronger', function () {
+        // Refusing would strand it: no password to fall back on, and the passkey routes are the only
+        // other way to mint a confirmation.
+        $user = User::factory()->create(['password' => null]);
+        credentialFor($user, 'k', false);
+
+        expect(assurance()->permitsStepUp($user, new VerifiedPasskey($user->id, 'k', false)))->toBeTrue();
+    });
+});
+
+it('hands the client a JSON list of credential ids even from a repository that keeps its keys', function () {
+    // `PasskeyRepository::credentialIdsFor()` promises `array<int,string>`, not a list. A replacement
+    // repository returning `[3 => 'a', 7 => 'b']` JSON-encodes as an OBJECT, and `allowCredentials`
+    // stops being the array the WebAuthn client requires.
+    $user = User::factory()->create();
+    app()->instance(PasskeyRepository::class, new class extends Lukk\Passkeys\DatabasePasskeyRepository
     {
-        public function verifiesUser(): bool
+        public function credentialIdsFor(int|string $userId): array
         {
-            return false;
+            return [3 => 'a', 7 => 'b'];
         }
     });
 
-    expect(assurance()->secondFactor())->toBeFalse();
-});
-
-it('defaults to requiring user verification when constructed with no such key', function () {
-    // The ceremony's OWN default, reached by construction rather than through the container — where
-    // the provider's `?? 'required'` would answer first and mask it. The two defaults are a pair,
-    // and this is the half that was previously unpinned: flipping it left the suite green.
-    $ceremony = new SpomkyWebAuthnCeremony([
-        'rp_id' => 'example.test',
-        'rp_name' => 'Example',
-        'origins' => ['https://example.test'],
-        'challenge_ttl' => 120,
-    ]);
-
-    expect($ceremony->verifiesUser())->toBeTrue();
+    expect(json_encode(app(PasskeyAssurance::class)->credentialIdsFor($user)))->toBe('["a","b"]');
 });

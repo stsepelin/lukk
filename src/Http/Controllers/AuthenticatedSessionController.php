@@ -17,6 +17,7 @@ use Lukk\Http\Controllers\Concerns\DeterminesSessionOutcome;
 use Lukk\Http\Controllers\Concerns\ReadsLogoutCredentials;
 use Lukk\Http\Requests\LoginRequest;
 use Lukk\Lukk;
+use Lukk\Support\AuthenticationMethods;
 
 /**
  * The password-authenticated session: `store` logs in (issuing a token pair, or a
@@ -58,7 +59,7 @@ class AuthenticatedSessionController
             return $this->twoFactorChallenge($user, $this->challengeTokens);
         }
 
-        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']]);
+        $pair = ($this->start)($user->getAuthIdentifier(), ['amr' => AuthenticationMethods::password()]);
 
         // A password change or reset that landed since the check takes the session back — see
         // `ConfirmPasswordUnchanged`. Answered exactly like a wrong password: to this caller, it now is one.

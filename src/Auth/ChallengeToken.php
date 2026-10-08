@@ -36,7 +36,7 @@ class ChallengeToken
     }
 
     /**
-     * @param  list<string>|null  $firstFactor  How the FIRST factor was proved — `['pwd']`, `['webauthn']`.
+     * @param  list<string>|null  $firstFactor  How the FIRST factor was proved — `['pwd']`, `['pop','user']`.
      */
     public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null, ?array $firstFactor = null): string
     {

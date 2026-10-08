@@ -251,7 +251,7 @@ it('rejects the challenge if 2FA was disabled after it was issued', function () 
         ->assertStatus(422);
 });
 
-it('stamps amr=[pwd,otp] on the token issued after a 2FA login', function () {
+it('stamps amr=[pwd,otp,mfa] on the token issued after a 2FA login', function () {
     $user = User::factory()->create();
     $secret = confirmedTwoFactor($user);
     $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
@@ -259,7 +259,9 @@ it('stamps amr=[pwd,otp] on the token issued after a 2FA login', function () {
     $access = $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
         ->json('access_token');
 
-    expect(claims($access)->amr)->toBe(['pwd', 'otp']);
+    // `mfa` because a password and a TOTP are two different factor categories (RFC 8176's "mfa",
+    // NIST SP 800-63B-4 §2.2.1) — unlike a single-factor passkey plus a TOTP, which is not.
+    expect(claims($access)->amr)->toBe(['pwd', 'otp', 'mfa']);
 });
 
 it('throttles challenge verification per account, independent of the IP route limit', function () {
@@ -769,5 +771,5 @@ it('assumes the password path for a challenge that does not say how the first fa
         'code' => currentOtp($secret),
     ])->assertOk()->json();
 
-    expect(claims($pair['access_token'])->amr)->toBe(['pwd', 'otp']);
+    expect(claims($pair['access_token'])->amr)->toBe(['pwd', 'otp', 'mfa']);
 });

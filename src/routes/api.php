@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Route;
 use Lukk\Http\Controllers\AccountController;
 use Lukk\Http\Controllers\AuthenticatedSessionController;
 use Lukk\Http\Controllers\ConfirmablePasskeyController;
+use Lukk\Http\Controllers\ConfirmablePasskeyOptionsController;
 use Lukk\Http\Controllers\ConfirmablePasswordController;
 use Lukk\Http\Controllers\ConfirmedTwoFactorAuthenticationController;
 use Lukk\Http\Controllers\EmailVerificationNotificationController;
@@ -217,6 +218,11 @@ Route::domain(config('lukk.domain'))
             // step-up, so leaving it open would make the password gate decorative.
             Route::post('confirm-passkey', [ConfirmablePasskeyController::class, 'store'])
                 ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT, 'throttle:lukk-confirm']);
+            // The step-up's own options: authenticated, so they can ask for user verification exactly
+            // when the account can reach AAL2 and list the user's credentials. Same gates as the
+            // route it negotiates for, and the passkey budget, since it costs a challenge write.
+            Route::post('confirm-passkey/options', ConfirmablePasskeyOptionsController::class)
+                ->middleware([$guard, RequirePinnedAbility::class.':'.Abilities::ACCOUNT, 'throttle:lukk-passkeys']);
             // Same: it enumerates the account's second factors — credential ids, the human-chosen
             // device names, last-use timestamps. Target selection for a social-engineering step.
             Route::get('passkeys', [PasskeyController::class, 'index'])

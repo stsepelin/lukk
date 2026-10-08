@@ -10,6 +10,7 @@ use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Lukk;
+use Lukk\Support\AuthenticationMethods;
 
 /**
  * Post-authentication branching shared by the login + registration controllers: whether the
@@ -24,8 +25,6 @@ use Lukk\Lukk;
  */
 trait DeterminesSessionOutcome
 {
-    use ChecksPasskeyAssurance;
-
     private function twoFactorRequired(Authenticatable $user): bool
     {
         // `Lukk::guardConfig()`, never the global block — the same rule CLAUDE.md records for
@@ -40,7 +39,7 @@ trait DeterminesSessionOutcome
      * @param  list<string>  $firstFactor  How the first factor was proved, carried into the challenge
      *                                     so redemption can record it truthfully.
      */
-    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens, array $firstFactor = ['pwd']): TwoFactorChallengeResponse
+    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens, array $firstFactor = [AuthenticationMethods::PASSWORD]): TwoFactorChallengeResponse
     {
         return app(TwoFactorChallengeResponse::class, ['challenge' => $challengeTokens->issue(
             // `config($key, $default)` does NOT cover an explicit null — `Arr::get` returns the

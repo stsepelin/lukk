@@ -12,6 +12,7 @@ use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Support\PasskeyRecord;
+use Lukk\Support\VerifiedPasskey;
 
 /**
  * Verify an assertion against the pending challenge + the stored credential, run
@@ -28,8 +29,11 @@ class FinishPasskeyLogin
         private readonly ?string $guard = null,
     ) {}
 
-    /** @param  array<string, mixed>  $response */
-    public function __invoke(string $ceremonyId, array $response): int|string
+    /**
+     * @param  array<string, mixed>  $response
+     * @param  string|null  $userVerification  enforced for THIS ceremony; null for the configured one
+     */
+    public function __invoke(string $ceremonyId, array $response, ?string $userVerification = null): VerifiedPasskey
     {
         $challenge = $this->challenges->pullForCeremony($ceremonyId);
 
@@ -45,11 +49,12 @@ class FinishPasskeyLogin
         }
 
         try {
-            $newSignCount = $this->ceremony->verifyAssertion($response, $challenge, $stored);
+            $assertion = $this->ceremony->verifyAssertion($response, $challenge, $stored, $userVerification);
         } catch (PasskeyVerificationFailed) {
             $this->fail();
         }
 
+        $newSignCount = $assertion->signCount;
         $this->guardAgainstClone($stored, $newSignCount);
 
         // A successful assertion ends the run, the same way a successful password does. Without
@@ -61,7 +66,7 @@ class FinishPasskeyLogin
         // belt-and-braces — but a rebound ceremony must not be able to walk the counter backwards.
         $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount));
 
-        return $stored->userId;
+        return new VerifiedPasskey($stored->userId, $stored->credentialId, $assertion->multiFactor);
     }
 
     /**

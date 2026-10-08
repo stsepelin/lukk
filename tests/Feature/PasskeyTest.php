@@ -28,9 +28,35 @@ uses()->group('passkeys');
 
 beforeEach(fn () => app()->bind(WebAuthnCeremony::class, FakeWebAuthnCeremony::class));
 
-function storePasskey(int|string $userId, string $credentialId, int $signCount = 0): void
+/**
+ * `$uvInitialized` models WebAuthn L3's credential-record flag: TRUE once the credential has shown
+ * user verification to this RP. Only then may an assertion's UV flag count as a second factor (§4).
+ */
+function storePasskey(int|string $userId, string $credentialId, int $signCount = 0, bool $uvInitialized = false): void
 {
-    app(PasskeyRepository::class)->store($userId, new NewPasskey($credentialId, 'PUB', $signCount));
+    app(PasskeyRepository::class)->store($userId, new NewPasskey($credentialId, $uvInitialized ? 'PUB+uv' : 'PUB', $signCount));
+}
+
+/** Run a passkey login ceremony with the fake authenticator, optionally reporting user verification. */
+function passkeyLogin(object $test, string $credentialId, bool $uv, int $signCount = 1): TestResponse
+{
+    $start = $test->postJson('/auth/passkeys/login-options')->assertOk()->json();
+
+    return $test->postJson('/auth/passkeys/login', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => $credentialId, 'sign_count' => $signCount, 'uv' => $uv],
+    ]);
+}
+
+/** Run a passkey STEP-UP ceremony through its own options route, as the client is expected to. */
+function passkeyStepUp(object $test, string $access, string $credentialId, bool $uv, int $signCount = 1): TestResponse
+{
+    $start = $test->withToken($access)->postJson('/auth/confirm-passkey/options')->assertOk()->json();
+
+    return $test->withToken($access)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => $credentialId, 'sign_count' => $signCount, 'uv' => $uv],
+    ]);
 }
 
 it('registers a passkey (auth + confirmation)', function () {
@@ -88,7 +114,7 @@ it('rejects registration with no pending challenge', function () {
     ])->assertStatus(422);
 });
 
-it('logs in passwordlessly with a passkey and stamps amr=webauthn', function () {
+it('logs in passwordlessly with a passkey and stamps the registered amr for it', function () {
     $user = User::factory()->create();
     storePasskey($user->id, 'cred-1', 0);
 
@@ -99,11 +125,13 @@ it('logs in passwordlessly with a passkey and stamps amr=webauthn', function () 
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1],
     ])->assertOk()->json('access_token');
 
-    expect(claims($access)->amr)->toBe(['webauthn'])
+    // RFC 8176 registered values: proof of possession of a key, plus the user-presence test every
+    // assertion passes. `webauthn` was never a registered value, so no standard consumer could read it.
+    expect(claims($access)->amr)->toBe(['pop', 'user'])
         ->and(claims($access)->sub)->toBe((string) $user->id);
 });
 
-it('keeps amr=webauthn across a refresh, rather than downgrading it to pwd', function () {
+it('keeps a passkey amr across refreshes, rather than downgrading it to pwd', function () {
     // The `['pwd']` assertions elsewhere cannot see a rotation that stamps a CONSTANT: every one of
     // them survives a refresh that hardcodes `['pwd']`, which is the fail-open direction — a
     // phishing-resistant session silently re-described as a password one, and now durable for the
@@ -120,14 +148,14 @@ it('keeps amr=webauthn across a refresh, rather than downgrading it to pwd', fun
     app('auth')->forgetGuards();
     $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $pair['refresh_token']])->assertOk();
 
-    expect(claims($rotated->json('access_token'))->amr)->toBe(['webauthn']);
+    expect(claims($rotated->json('access_token'))->amr)->toBe(['pop', 'user']);
 
     // TWICE. The first refreshed token's claim comes from the row being consumed, so a rotation that
     // never PERSISTS `amr` still looks right after one hop and only shows up on the second.
     app('auth')->forgetGuards();
     $again = $this->postJson('/auth/refresh', ['refresh_token' => $rotated->json('refresh_token')])->assertOk();
 
-    expect(claims($again->json('access_token'))->amr)->toBe(['webauthn']);
+    expect(claims($again->json('access_token'))->amr)->toBe(['pop', 'user']);
 });
 
 it('rejects a replayed assertion (the challenge is single-use)', function () {
@@ -186,15 +214,18 @@ it('does not flag a zero sign count (synced passkeys)', function () {
 });
 
 it('earns a step-up confirmation with a passkey', function () {
+    // A MULTI-FACTOR passkey: this account has a password, so AAL2 is within its reach and a
+    // single-factor step-up is refused (NIST SP 800-63B-4 §4.1.2.1). The property pinned here — an
+    // earned token satisfies the confirm gate — is unchanged; only the precondition was made honest.
     $user = User::factory()->create();
-    storePasskey($user->id, 'cred-1', 0);
+    storePasskey($user->id, 'cred-1', 0, uvInitialized: true);
     $access = $user->startSession()->accessToken;
 
     $start = $this->postJson('/auth/passkeys/login-options')->json();
 
     $confirmation = $this->withToken($access)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1, 'uv' => true],
     ])->assertOk()->json('confirmation_token');
 
     // The earned token satisfies the confirm gate on a sensitive route.
@@ -203,15 +234,18 @@ it('earns a step-up confirmation with a passkey', function () {
 });
 
 it('rejects a passkey confirmation with another user’s passkey', function () {
+    // Multi-factor, so the assertion itself verifies and the OWNERSHIP check is what refuses it —
+    // with a single-factor key the user-verification requirement would refuse it first, and this
+    // test would pass without ever reaching the check it exists for.
     $owner = User::factory()->create();
-    storePasskey($owner->id, 'cred-1', 0);
+    storePasskey($owner->id, 'cred-1', 0, uvInitialized: true);
     $access = User::factory()->create()->startSession()->accessToken;
 
     $start = $this->postJson('/auth/passkeys/login-options')->json();
 
     $this->withToken($access)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-1', 'sign_count' => 1, 'uv' => true],
     ])->assertStatus(422)->assertJsonValidationErrors(['credential' => 'That passkey does not belong to you.']);
 });
 
@@ -540,23 +574,6 @@ it('challenges for the second factor when user verification is not required', fu
     $response->assertJsonStructure(['two_factor', 'challenge_token'])->assertJsonMissingPath('access_token');
 });
 
-it('still skips the second factor when user verification is required', function () {
-    // The default, and the case the skip was designed for — it must keep working.
-    config(['lukk.passkeys.user_verification' => 'required']);
-    $user = User::factory()->create();
-    $user->forceFill([
-        'two_factor_secret' => Crypt::encryptString('SECRETSECRETSECR'),
-        'two_factor_confirmed_at' => now(),
-    ])->save();
-    storePasskey($user->id, 'cred-uv', 0);
-
-    $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
-    $this->postJson('/auth/passkeys/login', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-uv', 'sign_count' => 1],
-    ])->assertOk()->assertJsonStructure(['access_token']);
-});
-
 /** Enrol and confirm a real second factor. Named apart from the multi-guard suite's own helper. */
 function confirmSecondFactorFor(object $model): string
 {
@@ -570,39 +587,7 @@ function confirmSecondFactorFor(object $model): string
     return $secret;
 }
 
-it('refuses passkey step-up when user verification is not required', function () {
-    // The login gate alone makes the rest decorative. Under `preferred` an assertion proves
-    // POSSESSION only — `CheckUserVerification` returns before reading the UV flag — yet this route
-    // mints the same `confirmation_token` the password path does, and `routes/api.php` calls it "the
-    // OTHER way to reach step-up". So whoever holds the authenticator, without its PIN, can earn a
-    // step-up and spend it on `DELETE /auth/two-factor` or on enrolling their own key: binding and
-    // removing an authenticator below the account's own assurance level (NIST SP 800-63B §5.2.1).
-    config(['lukk.passkeys.user_verification' => 'preferred']);
-    $user = User::factory()->create();
-    $pair = $user->startSession();
-    storePasskey($user->id, 'cred-stepup', 0);
-
-    $start = $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
-    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup', 'sign_count' => 1],
-    ])->assertStatus(403)->assertJsonMissingPath('confirmation_token');
-});
-
-it('still allows passkey step-up when user verification is required', function () {
-    config(['lukk.passkeys.user_verification' => 'required']);
-    $user = User::factory()->create();
-    $pair = $user->startSession();
-    storePasskey($user->id, 'cred-stepup-ok', 0);
-
-    $start = $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
-    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-ok', 'sign_count' => 1],
-    ])->assertOk()->assertJsonStructure(['confirmation_token']);
-});
-
-it('records amr=webauthn, not pwd, when a passkey login completes a second factor', function () {
+it('records the passkey, not a password, when a passkey login completes a second factor', function () {
     // The challenge branch hands a WebAuthn login to the 2FA controller, which hardcoded
     // `['pwd','otp']` — so a passkey login was recorded as a password one. On a PASSWORDLESS account
     // that asserts a credential the account does not have, and the same release makes `amr` durable,
@@ -626,12 +611,13 @@ it('records amr=webauthn, not pwd, when a passkey login completes a second facto
         'code' => app(Google2FA::class)->getCurrentOtp($secret),
     ])->assertOk()->json();
 
-    expect(claims($pair['access_token'])->amr)->toBe(['webauthn', 'otp']);
+    // `pop user otp` and NOT `mfa`: two possession factors (NIST SP 800-63B-4 §2.2.1).
+    expect(claims($pair['access_token'])->amr)->toBe(['pop', 'user', 'otp']);
 
     // And it survives rotation, like every other amr.
     app('auth')->forgetGuards();
     $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $pair['refresh_token']])->assertOk();
-    expect(claims($rotated->json('access_token'))->amr)->toBe(['webauthn', 'otp']);
+    expect(claims($rotated->json('access_token'))->amr)->toBe(['pop', 'user', 'otp']);
 });
 
 it('leaves a password-less account a way to step up under preferred', function () {
@@ -655,35 +641,168 @@ it('leaves a password-less account a way to step up under preferred', function (
     ])->assertOk()->assertJsonStructure(['confirmation_token']);
 });
 
-it('will not let a non-UV passkey defeat the second factor the login demanded', function () {
-    // The step-up must not be weaker than the login it guards. On `preferred` a passwordless account
-    // with confirmed TOTP is challenged at login — but `confirm-passkey` accepted possession alone
-    // and the resulting token unlocked `DELETE /auth/two-factor`. Whoever held the authenticator,
-    // without its PIN, could therefore remove the factor the user deliberately enrolled.
-    //
-    // Refusing outright would strand the account (no password to fall back on), so the assertion now
-    // carries the second factor alongside it. Nobody is stranded and the gap closes: the user has a
-    // working factor by definition, or they could not have been challenged at login.
-    config(['lukk.passkeys.user_verification' => 'preferred']);
+/*
+ * Per-ASSERTION assurance (WebAuthn L3 §4 `uvInitialized`, §6.2.3; NIST SP 800-63B-4 §2.2.1, §4.1.2.1).
+ *
+ * An assertion is two factors in one gesture only when its UV flag is set AND the stored credential
+ * is already `uvInitialized` — "When this is FALSE, including an authentication ceremony where it
+ * would be updated to TRUE, the UV flag MUST NOT be relied upon as an authentication factor." Not
+ * when CONFIG says `required`: config describes what was asked for, the assertion is what happened.
+ */
+
+it('skips an enrolled second factor for a multi-factor assertion', function () {
+    $user = User::factory()->create();
+    confirmSecondFactorFor($user);
+    storePasskey($user->id, 'cred-mfa', 0, uvInitialized: true);
+
+    $pair = passkeyLogin($this, 'cred-mfa', uv: true)->assertOk()->json();
+
+    expect($pair)->toHaveKey('access_token')
+        ->and(claims($pair['access_token'])->amr)->toBe(['pop', 'user', 'mfa']);
+});
+
+it('does not trust the UV flag of a credential that has never shown user verification', function () {
+    // The attack the spec's rule exists for: steal a key that had no PIN, set a PIN on it yourself,
+    // and every assertion now carries UV. The credential was registered without it, so it is not
+    // `uvInitialized`, and that UV flag is worth nothing — the enrolled TOTP must still be asked for.
+    $user = User::factory()->create();
+    confirmSecondFactorFor($user);
+    storePasskey($user->id, 'cred-pin-added-later', 0, uvInitialized: false);
+
+    passkeyLogin($this, 'cred-pin-added-later', uv: true)
+        ->assertOk()->assertJsonStructure(['two_factor', 'challenge_token'])->assertJsonMissingPath('access_token');
+});
+
+it('challenges for the second factor when this assertion did not verify the user', function () {
+    $user = User::factory()->create();
+    confirmSecondFactorFor($user);
+    storePasskey($user->id, 'cred-no-uv-now', 0, uvInitialized: true);
+
+    passkeyLogin($this, 'cred-no-uv-now', uv: false)
+        ->assertOk()->assertJsonStructure(['two_factor', 'challenge_token'])->assertJsonMissingPath('access_token');
+});
+
+it('records a single-factor passkey as possession and presence only', function () {
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-sf', 0);
+
+    $access = passkeyLogin($this, 'cred-sf', uv: false)->assertOk()->json('access_token');
+
+    expect(claims($access)->amr)->toBe(['pop', 'user']);
+});
+
+it('does not call a single-factor passkey plus a TOTP multi-factor', function () {
+    // Both are "something you have" (NIST SP 800-63B-4 §3.1.4, §3.1.6), and §2.2.1 requires two
+    // single-factor authenticators to include a password or biometric comparison to reach AAL2. So
+    // no `mfa`: an RP gating on it must not be told this session cleared a bar it did not.
     $user = User::factory()->create(['password' => null]);
     $secret = confirmSecondFactorFor($user);
-    $pair = $user->startSession();
-    storePasskey($user->id, 'cred-stepup-2fa', 0);
+    storePasskey($user->id, 'cred-sf-otp', 0);
 
-    $options = fn () => $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
+    $challenge = passkeyLogin($this, 'cred-sf-otp', uv: false)->assertOk()->json('challenge_token');
 
-    // Possession alone is not enough.
-    $start = $options();
-    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-2fa', 'sign_count' => 1],
-    ])->assertStatus(422)->assertJsonMissingPath('confirmation_token');
-
-    // With the second factor, it is.
-    $start = $options();
-    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-2fa', 'sign_count' => 2],
+    app('auth')->forgetGuards();
+    $access = $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge,
         'code' => app(Google2FA::class)->getCurrentOtp($secret),
-    ])->assertOk()->assertJsonStructure(['confirmation_token']);
+    ])->assertOk()->json('access_token');
+
+    expect(claims($access)->amr)->toBe(['pop', 'user', 'otp']);
+});
+
+it('accepts a multi-factor passkey step-up on any account', function () {
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-step-mfa', 0, uvInitialized: true);
+
+    passkeyStepUp($this, $access, 'cred-step-mfa', uv: true)->assertOk()->assertJsonStructure(['confirmation_token']);
+});
+
+it('refuses a single-factor passkey step-up when the account can reach a higher assurance level', function () {
+    // NIST SP 800-63B-4 §4.1.2.1: binding an authenticator requires authentication at "the maximum
+    // AAL currently available in the subscriber account". A password puts AAL2 within reach, so a
+    // possession-only step-up is below the account's own level — and the token it would mint
+    // unlocks binding and removing authenticators.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-step-sf', 0);
+
+    // The ceremony enforces the `required` it asked for, so a non-UV assertion fails verification.
+    passkeyStepUp($this, $access, 'cred-step-sf', uv: false)->assertStatus(422)->assertJsonMissingPath('confirmation_token');
+});
+
+it('refuses a step-up whose UV flag comes from a credential that never showed user verification', function () {
+    // The case only lukk's own check can catch: the authenticator DID report UV, so the ceremony's
+    // `required` is satisfied — but the credential is not `uvInitialized`, so per WebAuthn L3 §4 the
+    // flag "MUST NOT be relied upon". A stolen no-PIN key with a PIN set by the thief looks like this.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-pin-later', 0, uvInitialized: false);
+
+    passkeyStepUp($this, $access, 'cred-pin-later', uv: true)->assertStatus(403)->assertJsonMissingPath('confirmation_token');
+});
+
+it('refuses a single-factor step-up when another of the account\'s passkeys is multi-factor', function () {
+    // Password-less, but a phone passkey with user verification puts AAL2 within reach — so a stolen
+    // backup key with no PIN, plus a stolen session, must not be enough to bind the thief's own key.
+    $user = User::factory()->create(['password' => null]);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-phone', 0, uvInitialized: true);
+    storePasskey($user->id, 'cred-backup-key', 0, uvInitialized: false);
+
+    // AAL2 is within reach via the phone passkey, so `required` is asked for and enforced.
+    passkeyStepUp($this, $access, 'cred-backup-key', uv: false)->assertStatus(422);
+});
+
+it('accepts a single-factor step-up when the account has nothing stronger', function () {
+    // Password-less with only single-factor credentials: the account's maximum AAL is AAL1, which is
+    // what this assertion proves. Refusing would strand it — no password to fall back on, and these
+    // are the only routes that mint a confirmation token — while protecting nothing the account has.
+    $user = User::factory()->create(['password' => null]);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-only', 0, uvInitialized: false);
+
+    passkeyStepUp($this, $access, 'cred-only', uv: false)->assertOk()->assertJsonStructure(['confirmation_token']);
+});
+
+it('does not let an enrolled TOTP raise a single-factor step-up, and takes no code here at all', function () {
+    // A TOTP is also possession, so it cannot lift a single-factor step-up to AAL2 — and accepting
+    // codes on this route opened a second, unthrottled TOTP oracle that ignored the 2FA lockout.
+    // The account is password-less with only single-factor credentials, so its maximum is AAL1 and
+    // the passkey alone suffices; a `code` sent alongside is simply not read.
+    $user = User::factory()->create(['password' => null]);
+    confirmSecondFactorFor($user);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-sf-2fa', 0, uvInitialized: false);
+
+    $start = $this->withToken($access)->postJson('/auth/confirm-passkey/options')->assertOk()->json();
+    $this->withToken($access)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-sf-2fa', 'sign_count' => 1, 'uv' => false],
+        'code' => '000000',
+    ])->assertOk();
+});
+
+it('asks the authenticator to verify the user only when the account needs it', function () {
+    // WebAuthn L3 §5.8.6: an RP that needs user verification sets `required`. When the account can
+    // reach AAL2 the step-up needs it; otherwise asking would just fail keys that cannot do it.
+    $withPassword = User::factory()->create();
+    storePasskey($withPassword->id, 'cred-a', 0);
+    $options = $this->withToken($withPassword->startSession()->accessToken)
+        ->postJson('/auth/confirm-passkey/options')->assertOk()->json('options');
+
+    expect($options['userVerification'])->toBe('required')
+        ->and($options['allowCredentials'])->toBe(['cred-a']);
+
+    app('auth')->forgetGuards();
+    $passwordless = User::factory()->create(['password' => null]);
+    storePasskey($passwordless->id, 'cred-b', 0);
+    $options = $this->withToken($passwordless->startSession()->accessToken)
+        ->postJson('/auth/confirm-passkey/options')->assertOk()->json('options');
+
+    expect($options['userVerification'])->toBe('preferred');
+});
+
+it('requires authentication to ask for step-up options', function () {
+    $this->postJson('/auth/confirm-passkey/options')->assertStatus(401);
 });
