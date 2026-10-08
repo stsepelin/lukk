@@ -139,3 +139,24 @@ it('reads a configured identifier column as it is', function () {
 
     expect(Lukk::usernameField())->toBe('username');
 });
+
+it('refuses an identifier column that cannot work as one, naming the fix', function (string $field) {
+    // `EloquentUserProvider::retrieveByCredentials()` drops every key containing "password", so such a
+    // column looks nothing up and every sign-in fails with an ordinary 422. A dot reads nested
+    // request input and becomes a table-qualified column. Neither is a typo the app would notice.
+    config(['lukk.username' => $field]);
+
+    expect(fn () => Lukk::usernameField())->toThrow(InvalidArgumentException::class, 'lukk.username');
+})->with([
+    'a password column' => ['password'],
+    'one containing password' => ['backup_Password_hint'],
+    'a dotted path' => ['profile.email'],
+    'whitespace' => ['user name'],
+    'a leading digit' => ['1email'],
+]);
+
+it('accepts any plain column name', function (string $field) {
+    config(['lukk.username' => $field]);
+
+    expect(Lukk::usernameField())->toBe($field);
+})->with(['phone', 'user_name', '_login', 'Email2']);

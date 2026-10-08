@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Enumerable;
+use InvalidArgumentException;
 use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
 use Lukk\Support\Abilities;
@@ -489,7 +490,18 @@ class Lukk
     {
         $field = config('lukk.username');
 
-        return is_string($field) && $field !== '' ? $field : 'email';
+        if (! is_string($field) || $field === '') {
+            return 'email';
+        }
+
+        // Loud, because neither failure is: `EloquentUserProvider::retrieveByCredentials()` drops every
+        // key containing "password", so such a column looks nothing up and every sign-in is an ordinary
+        // 422; and a dot reads nested request input and becomes a table-qualified column.
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $field) !== 1 || stripos($field, 'password') !== false) {
+            throw new InvalidArgumentException("lukk.username must name a plain column on your users table (letters, digits, underscores) that does not contain \"password\"; got \"{$field}\".");
+        }
+
+        return $field;
     }
 
     /**
