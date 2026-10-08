@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Timebox;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
@@ -449,4 +450,70 @@ it('answers 422, not 500, for an account whose stored hash the driver cannot rea
     $this->postJson('/auth/login', ['email' => 'imported@y.com', 'password' => 'whatever'])->assertStatus(422);
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+});
+
+it('spends the same wall-clock budget on every shape of failed attempt, not just the same number of hashes', function () {
+    // Counting derivations was the WRONG property, and the test that counted them said so out loud:
+    // it asserted the unknown path runs `makes:1, checks:0` and a real account `makes:0, checks:1`,
+    // i.e. that the two run DIFFERENT primitives at different costs, and called that equal work.
+    // A stopwatch reads cost, not count. Measured at bcrypt cost 11: an unknown identifier hashes at
+    // the CONFIGURED cost (118 ms) while `Hash::check` runs at the cost embedded in the STORED hash
+    // — 15 ms for a row left at cost 8 by a `BCRYPT_ROUNDS` bump (Laravel 11 raised the default from
+    // 10 to 12, and lukk never calls `rehashPasswordIfRequired`, so those rows stay), and ~0 ms for
+    // the `!`/`*` placeholder an import leaves behind. 8x and effectively infinite, one request each.
+    //
+    // A `Timebox` fixes it regardless of which primitive ran or what the row cost — the framework's
+    // own answer, and the one the password broker uses. Pinned through the mechanism rather than the
+    // clock: a wall-clock assertion flakes on a loaded runner, and at the suite's bcrypt cost of 4
+    // the differences are too small to measure anyway.
+    $budgets = [];
+    app()->instance(Timebox::class, new class($budgets) extends Timebox
+    {
+        public function __construct(public array &$seen) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->seen[] = $microseconds;
+
+            return $callback($this);
+        }
+    });
+
+    User::factory()->create(['email' => 'real@y.com']);
+    User::factory()->create(['email' => 'nopassword@y.com', 'password' => null]);
+    User::factory()->create(['email' => 'imported@y.com', 'password' => '!']);
+
+    foreach (['ghost@y.com', 'real@y.com', 'nopassword@y.com', 'imported@y.com'] as $email) {
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['email' => $email, 'password' => 'whatever'])->assertStatus(422);
+    }
+
+    // One budget per attempt, all identical — the point is that no shape escapes the box.
+    expect($budgets)->toHaveCount(4)
+        ->and(array_unique($budgets))->toHaveCount(1)
+        ->and($budgets[0])->toBeGreaterThan(0);
+});
+
+it('keeps a real sign-in budget when the config key is missing entirely', function () {
+    // A degraded config must not switch the equalizer OFF. `config:cache` run before this key
+    // existed leaves it unset forever, and a Timebox of 0 is no Timebox — the timing oracle back
+    // exactly where it was, silently, on the install least likely to notice.
+    config(['lukk.login_timebox_micros' => null]);
+
+    $budgets = [];
+    app()->instance(Timebox::class, new class($budgets) extends Timebox
+    {
+        public function __construct(public array &$seen) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->seen[] = $microseconds;
+
+            return $callback($this);
+        }
+    });
+
+    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+
+    expect($budgets)->toBe([250_000]);
 });

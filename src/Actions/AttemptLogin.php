@@ -11,6 +11,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Timebox;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
@@ -117,6 +118,24 @@ class AttemptLogin
     }
 
     private function resolve(Request $request): Authenticatable
+    {
+        // Every failure costs the same WALL CLOCK, not merely the same number of key derivations.
+        // Counting derivations was the wrong invariant: an unknown identifier hashes at the
+        // CONFIGURED cost while a real account is checked at the cost embedded in its stored hash,
+        // so a row left behind by a `BCRYPT_ROUNDS` bump answers several times faster and an
+        // unreadable one (`!`, `*`, an import) answers instantly — a single-request account oracle,
+        // which is exactly what the equalizer exists to close.
+        //
+        // A Timebox pads a fast path up to the budget and never shortens a slow one, so a budget set
+        // below the real hashing cost is ineffective rather than harmful — and `throw`s still
+        // propagate, after the padding, so `fail()` keeps its timing too.
+        return app(Timebox::class)->call(
+            fn () => $this->resolveWithin($request),
+            max(0, (int) (Lukk::guardConfig()['login_timebox_micros'] ?? 250_000)),
+        );
+    }
+
+    private function resolveWithin(Request $request): Authenticatable
     {
         if (Lukk::$authenticateUsing !== null) {
             $user = (Lukk::$authenticateUsing)($request);

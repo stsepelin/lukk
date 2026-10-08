@@ -3,6 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Lukk\Refresh\DatabaseRefreshTokenRepository;
+use Lukk\Tests\Fixtures\TenantBRefreshToken;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -52,4 +55,42 @@ it('never asks the schema a question while holding the rotation row lock', funct
     $this->postJson('/auth/refresh', ['refresh_token' => $refresh])->assertOk();
 
     expect($insideTransaction)->toBe([]);
+});
+
+it('answers per connection, not once for the whole application', function () {
+    // One application serving two connections — a migrated tenant and one that has not run the 0.8
+    // migration — must not get the first one's answer for the second. A globally keyed memo did, and
+    // the failing INSERT then lands INSIDE the rotate transaction, which on PostgreSQL aborts it:
+    // every later statement errors 25P02 and COMMIT silently becomes ROLLBACK. That is the precise
+    // failure the probe exists to prevent, reintroduced by the memo.
+    config(['database.connections.tenant_b' => array_merge(
+        config('database.connections.testing'), ['database' => ':memory:']
+    )]);
+
+    // The default connection has the column; tenant_b is an older schema without it.
+    DB::connection('tenant_b')->getSchemaBuilder()->create('refresh_tokens', function ($table) {
+        $table->ulid('id')->primary();
+        $table->unsignedBigInteger('user_id')->index();
+        $table->string('guard')->nullable();
+        $table->uuid('family_id')->index();
+        $table->char('token_hash', 64)->unique();
+        $table->ulid('previous_id')->nullable();
+        $table->text('scope')->nullable();
+        $table->timestamp('rotated_at')->nullable();
+        $table->timestamp('revoked_at')->nullable();
+        $table->timestamp('expires_at');
+        $table->timestamps();
+    });
+
+    // Warm the memo on the DEFAULT connection, which does have `amr`.
+    $user = User::factory()->create();
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    // Now persist against the other connection. A global memo would say "the column exists".
+    Lukk\Lukk::useRefreshTokenModel(TenantBRefreshToken::class);
+    $repository = new DatabaseRefreshTokenRepository;
+
+    expectNoThrow(fn () => $repository->persist(
+        1, (string) Str::uuid(), null, str_repeat('a', 64), time() + 600, null, '["pwd"]'
+    ));
 });

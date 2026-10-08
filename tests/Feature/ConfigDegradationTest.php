@@ -62,6 +62,9 @@ function coreKeys(): array
         'username', 'user_provider', 'guard', 'guards', 'routes', 'denylist_store', 'fork_threshold',
         'rate_limits.login', 'rate_limits.login.max_attempts', 'rate_limits.login.decay_seconds',
         'rate_limits.login.account_max_attempts', 'rate_limits.refresh',
+        // Unset means the sign-in equalizer falls back to its documented budget, not to none: a
+        // Timebox of 0 is off, which is precisely the timing oracle the key exists to close.
+        'login_timebox_micros',
     ];
 }
 

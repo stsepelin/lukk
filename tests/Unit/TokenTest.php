@@ -394,3 +394,17 @@ it('keeps accepting an ordinary string and list aud', function () {
     expect(verifier()->verify($asString))->not->toBeNull()
         ->and(verifier()->verify($asList))->not->toBeNull();
 });
+
+it('reads an aud another issuer encoded as a number', function () {
+    // `is_scalar`, not `is_string` — the permissive half, pinned the way the sibling `jti`/`fid`
+    // guard already pins it. Narrowing it would refuse a co-issuer that encodes its audience as a
+    // number, which is the topology this verifier exists to support.
+    config(['lukk.audience' => [7]]);
+
+    $token = JWT::encode([
+        'iss' => config('lukk.issuer'), 'aud' => 7, 'sub' => '1', 'jti' => 'j-aud-num',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ], config('lukk.secret'), 'HS256', head: ['typ' => 'at+jwt']);
+
+    expect(verifier()->verify($token))->not->toBeNull();
+});

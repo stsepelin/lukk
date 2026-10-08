@@ -121,6 +121,13 @@ it('keeps amr=webauthn across a refresh, rather than downgrading it to pwd', fun
     $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $pair['refresh_token']])->assertOk();
 
     expect(claims($rotated->json('access_token'))->amr)->toBe(['webauthn']);
+
+    // TWICE. The first refreshed token's claim comes from the row being consumed, so a rotation that
+    // never PERSISTS `amr` still looks right after one hop and only shows up on the second.
+    app('auth')->forgetGuards();
+    $again = $this->postJson('/auth/refresh', ['refresh_token' => $rotated->json('refresh_token')])->assertOk();
+
+    expect(claims($again->json('access_token'))->amr)->toBe(['webauthn']);
 });
 
 it('rejects a replayed assertion (the challenge is single-use)', function () {
@@ -645,5 +652,38 @@ it('leaves a password-less account a way to step up under preferred', function (
     $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
         'ceremony_id' => $start['ceremony_id'],
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-only-way', 'sign_count' => 1],
+    ])->assertOk()->assertJsonStructure(['confirmation_token']);
+});
+
+it('will not let a non-UV passkey defeat the second factor the login demanded', function () {
+    // The step-up must not be weaker than the login it guards. On `preferred` a passwordless account
+    // with confirmed TOTP is challenged at login — but `confirm-passkey` accepted possession alone
+    // and the resulting token unlocked `DELETE /auth/two-factor`. Whoever held the authenticator,
+    // without its PIN, could therefore remove the factor the user deliberately enrolled.
+    //
+    // Refusing outright would strand the account (no password to fall back on), so the assertion now
+    // carries the second factor alongside it. Nobody is stranded and the gap closes: the user has a
+    // working factor by definition, or they could not have been challenged at login.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create(['password' => null]);
+    $secret = confirmSecondFactorFor($user);
+    $pair = $user->startSession();
+    storePasskey($user->id, 'cred-stepup-2fa', 0);
+
+    $options = fn () => $this->withToken($pair->accessToken)->postJson('/auth/passkeys/login-options')->assertOk()->json();
+
+    // Possession alone is not enough.
+    $start = $options();
+    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-2fa', 'sign_count' => 1],
+    ])->assertStatus(422)->assertJsonMissingPath('confirmation_token');
+
+    // With the second factor, it is.
+    $start = $options();
+    $this->withToken($pair->accessToken)->postJson('/auth/confirm-passkey', [
+        'ceremony_id' => $start['ceremony_id'],
+        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-stepup-2fa', 'sign_count' => 2],
+        'code' => app(Google2FA::class)->getCurrentOtp($secret),
     ])->assertOk()->assertJsonStructure(['confirmation_token']);
 });

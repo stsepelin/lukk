@@ -319,9 +319,12 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         $model = $this->query()->newModelInstance();
 
         try {
-            return $this->rememberAmrSupport(
+            // No `?? false`: `rememberAmrSupport()` returns null only when it was PASSED null, and
+            // this passes a bool. The mutation run flagged the coalesce as unreachable, and the
+            // repo's rule is to delete an equivalent rather than test it.
+            return (bool) $this->rememberAmrSupport(
                 Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'amr')
-            ) ?? false;
+            );
         } catch (\Throwable) {
             // A transient probe failure — a blip, a deadlock, a statement timeout — must NOT be
             // cached: doing so disabled `amr` for the life of the application instance, silently.
@@ -342,7 +345,8 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         $app = app();
 
         if ($supported === null) {
-            return $app->bound($key) ? (bool) $app->make($key) : null;
+            // The memo only ever stores a bool, so no cast: an equivalent mutant otherwise.
+            return $app->bound($key) ? $app->make($key) : null;
         }
 
         $app->instance($key, $supported);

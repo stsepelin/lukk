@@ -162,6 +162,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Sign-in Timebox
+    |--------------------------------------------------------------------------
+    |
+    | How long a FAILED sign-in takes, in microseconds, regardless of why it
+    | failed. Equal hashing work is not equal TIME: an unknown identifier hashes
+    | at the configured cost, while checking a real account runs at the cost
+    | embedded in that row's stored hash. A row left at cost 8 by a
+    | `BCRYPT_ROUNDS` bump answers ~8x faster, and an unreadable hash (the `!`
+    | or `*` placeholder an import leaves) answers instantly — so a stopwatch
+    | tells an attacker which addresses have accounts, in one request each.
+    |
+    | Set this ABOVE your slowest hash. Too low is not dangerous, only
+    | ineffective: a Timebox pads a fast path up to the budget and never
+    | shortens a slow one, so an under-set budget simply leaves the timing as
+    | it was. 250 ms covers bcrypt cost 12 on typical hardware; measure yours.
+    | Zero switches it off.
+    |
+    */
+
+    'login_timebox_micros' => (int) env('LUKK_LOGIN_TIMEBOX_MICROS', 250_000),
+
+    /*
+    |--------------------------------------------------------------------------
     | Rate Limits
     |--------------------------------------------------------------------------
     |

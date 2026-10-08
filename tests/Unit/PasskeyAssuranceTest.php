@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Http\Controllers\Concerns\ChecksPasskeyAssurance;
 use Lukk\Lukk;
+use Lukk\Passkeys\SpomkyWebAuthnCeremony;
 use Lukk\Tests\Fixtures\FakeWebAuthnCeremony;
 
 uses()->group('passkeys');
@@ -44,8 +45,10 @@ it('treats a passkey as a second factor only when user verification is required'
     'discouraged' => ['discouraged', false],
     'a typo' => ['Required', false],
     'a non-string' => [['required'], false],
-    // Unset reads as required, matching what `SpomkyWebAuthnCeremony` itself defaults to. The two
-    // defaults are a pair; a test pins that so they cannot drift apart unnoticed.
+    // Unset reads as required. Note what this actually pins: the value reaches the ceremony through
+    // `LukkServiceProvider::registerPasskeys()`, which applies its OWN `?? 'required'`, so this row
+    // moves when the provider's default moves. The ceremony's internal `??` is unreachable through
+    // the container and is pinned separately, by constructing it directly below.
     'unset' => [null, true],
 ]);
 
@@ -95,4 +98,18 @@ it('believes a rebound ceremony over the config it does not read', function () {
     });
 
     expect(assurance()->secondFactor())->toBeFalse();
+});
+
+it('defaults to requiring user verification when constructed with no such key', function () {
+    // The ceremony's OWN default, reached by construction rather than through the container — where
+    // the provider's `?? 'required'` would answer first and mask it. The two defaults are a pair,
+    // and this is the half that was previously unpinned: flipping it left the suite green.
+    $ceremony = new SpomkyWebAuthnCeremony([
+        'rp_id' => 'example.test',
+        'rp_name' => 'Example',
+        'origins' => ['https://example.test'],
+        'challenge_ttl' => 120,
+    ]);
+
+    expect($ceremony->verifiesUser())->toBeTrue();
 });

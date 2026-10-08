@@ -22,6 +22,28 @@ but the default is safe.
 
 ## Upgrading to the next release from 0.6.x (unreleased)
 
+### `WebAuthnCeremony` gains `verifiesUser(): bool`
+
+**Only if you implement `Lukk\Contracts\WebAuthnCeremony` yourself.** The shipped
+`SpomkyWebAuthnCeremony` already has it.
+
+```php
+public function verifiesUser(): bool
+{
+    // true only when the ceremony REQUIRES user verification — a PIN or biometric, not presence.
+    return ($this->config['user_verification'] ?? 'required') === 'required';
+}
+```
+
+lukk asks this to decide whether a passkey may stand in for the user's second factor: with user
+verification a WebAuthn assertion is two factors in one gesture, without it possession alone. Answer
+truthfully — a `true` from a ceremony that does not enforce it lets a stolen authenticator skip an
+enrolled TOTP.
+
+A missing method is a **fatal at class-load time**, not a catchable exception, so it appears on the
+first request that resolves your binding rather than at boot. If you deploy without running a passkey
+request in CI, check the method exists before you ship.
+
 ### A new `refresh_tokens.amr` column, and a new argument on `RefreshTokenRepository::persist()`
 
 **Medium impact — everyone republishes a migration; anyone implementing or subclassing

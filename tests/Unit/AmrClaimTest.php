@@ -2,7 +2,11 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
+use Illuminate\Support\Str;
 use Lukk\Actions\StartSession;
+use Lukk\Auth\ChallengeToken;
+use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
 
@@ -63,3 +67,33 @@ it('bounds a method and the whole claim at exactly the documented sizes', functi
         ->and($encode($atLimit))->not->toBeNull()
         ->and($encode([...$methods, str_repeat('z', $last + 1)]))->toBeNull();
 });
+
+it('re-validates a challenge amr instead of widening it', function (mixed $claimed) {
+    // `firstFactorOf()` reads a claim from a token this process signed, but `decode()` does not
+    // type-check it and a co-issuer sharing the secret can mint any shape. A `(array)` cast WIDENS
+    // rather than validates — it promotes a bare string to `["pwd"]` and a numeric-keyed object to a
+    // list — so shapes `encodeAmr` refuses everywhere else would have been accepted here and stamped
+    // into a real session's `amr`. Both the guard and the round-trip were prose until now.
+    //
+    // (A JSON object with numeric keys is NOT among these: PHP decodes `{"0":"pwd"}` to the list
+    // `['pwd']`, so it is indistinguishable from one and accepting it is correct.)
+    $user = User::factory()->create();
+    $tokens = app(ChallengeToken::class);
+
+    // Mint by hand, so the claim carries a shape `issue()` would itself refuse to write.
+    $cfg = Lukk\Lukk::guardConfig();
+    $now = time();
+    $challenge = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => (string) Str::uuid(), 'iat' => $now, 'nbf' => $now, 'exp' => $now + 300,
+        'gid' => 'api', 'amr' => $claimed,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => '2fa+challenge']);
+
+    expect($tokens->firstFactorOf('2fa', $challenge))->toBeNull();
+})->with([
+    'a bare string' => ['pwd'],
+    'an object' => [['role' => 'admin']],
+    'a number' => [7],
+    'a nested list' => [[['pwd']]],
+    'oversized' => [array_fill(0, 40, 'webauthn')],
+]);

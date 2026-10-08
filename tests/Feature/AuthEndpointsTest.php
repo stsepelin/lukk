@@ -365,8 +365,11 @@ it('still signs in and rotates against a pre-0.8 schema with no amr column', fun
     app('auth')->forgetGuards();
     $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
 
-    // The claim is simply absent, which is exactly the pre-0.8 behaviour.
-    expect($rotated->json('access_token'))->not->toBeNull();
+    // The claim is ABSENT — the stated property. Asserting only that a token came back left a
+    // rotation that forges one (`?? ['forged']`) green, so the comment promised more than the test.
+    expect($rotated->json('access_token'))->not->toBeNull()
+        ->and(claims($rotated->json('access_token'))->amr ?? null)->toBeNull()
+        ->and(claims($login->json('access_token'))->amr)->toBe(['pwd']);
 });
 
 it('refuses a malformed or oversized stored amr instead of stamping it into a token', function (string $stored) {
