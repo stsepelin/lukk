@@ -361,7 +361,11 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
             $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
-        $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
+        $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink(
+            $this->config()['password_reset']['broker'] ?? null,
+            // Cast: a published config can carry an uncast `env()`, and the action takes an int.
+            (int) ($this->config()['password_reset']['timebox_micros'] ?? 1_000_000),
+        ));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
             $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(

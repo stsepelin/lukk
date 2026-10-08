@@ -173,15 +173,19 @@ return [
     | or `*` placeholder an import leaves) answers instantly — so a stopwatch
     | tells an attacker which addresses have accounts, in one request each.
     |
-    | Set this ABOVE your slowest hash. Too low is not dangerous, only
-    | ineffective: a Timebox pads a fast path up to the budget and never
-    | shortens a slow one, so an under-set budget simply leaves the timing as
-    | it was. 250 ms covers bcrypt cost 12 on typical hardware; measure yours.
-    | Zero switches it off.
+    | lukk equalizes the WORK first: a failed check against a weaker or
+    | unreadable stored hash also derives once at the configured cost, and a
+    | successful sign-in rehashes a weaker row (`hashing.rehash_on_login`). The
+    | box hides what is left. Set it above one derivation at your configured
+    | cost PLUS one at the oldest cost still stored — measure it on your own
+    | hardware (`php -r 'password_hash("x", PASSWORD_BCRYPT, ["cost"=>12]);'`).
+    | Too low is ineffective, not harmful: a Timebox pads a fast path and never
+    | shortens a slow one. A SUCCESSFUL sign-in leaves the box at once — its
+    | status code already says it succeeded. Zero switches it off.
     |
     */
 
-    'login_timebox_micros' => (int) env('LUKK_LOGIN_TIMEBOX_MICROS', 250_000),
+    'login_timebox_micros' => (int) env('LUKK_LOGIN_TIMEBOX_MICROS', 500_000),
 
     /*
     |--------------------------------------------------------------------------
@@ -767,6 +771,24 @@ return [
         */
 
         'revoke_sessions' => (bool) env('LUKK_RESET_REVOKE_SESSIONS', true),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Forgot-password Timebox
+        |--------------------------------------------------------------------------
+        |
+        | How long every `forgot-password` request takes, in microseconds, whether
+        | or not the address has an account. A hit hashes the reset token and
+        | dispatches the notification; a miss does neither, so without this the
+        | response time says which addresses exist. Set it ABOVE the broker's own
+        | box (`auth.timebox_duration`, 200 ms by default) plus one bcrypt
+        | derivation at your cost plus the notification dispatch. Queue the
+        | notification: a synchronous SMTP transport can overrun any budget, and
+        | a Timebox only pads — it never shortens. Zero switches it off.
+        |
+        */
+
+        'timebox_micros' => (int) env('LUKK_RESET_TIMEBOX_MICROS', 1_000_000),
 
         /*
         |--------------------------------------------------------------------------

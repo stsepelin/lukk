@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyAssurance;
 use Lukk\Support\AuthenticationMethods;
 use Lukk\Support\NewPasskey;
@@ -127,7 +128,7 @@ it('hands the client a JSON list of credential ids even from a repository that k
     // repository returning `[3 => 'a', 7 => 'b']` JSON-encodes as an OBJECT, and `allowCredentials`
     // stops being the array the WebAuthn client requires.
     $user = User::factory()->create();
-    app()->instance(PasskeyRepository::class, new class extends Lukk\Passkeys\DatabasePasskeyRepository
+    app()->instance(PasskeyRepository::class, new class extends DatabasePasskeyRepository
     {
         public function credentialIdsFor(int|string $userId): array
         {

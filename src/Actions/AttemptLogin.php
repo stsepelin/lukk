@@ -129,10 +129,18 @@ class AttemptLogin
         // A Timebox pads a fast path up to the budget and never shortens a slow one, so a budget set
         // below the real hashing cost is ineffective rather than harmful — and `throw`s still
         // propagate, after the padding, so `fail()` keeps its timing too.
-        return app(Timebox::class)->call(
-            fn () => $this->resolveWithin($request),
-            max(0, (int) (Lukk::guardConfig()['login_timebox_micros'] ?? 250_000)),
-        );
+        return app(Timebox::class)->call(function (Timebox $timebox) use ($request) {
+            $user = $this->resolveWithin($request);
+
+            // A success announces itself in its status code, so padding it hides nothing and only
+            // taxes every legitimate sign-in. The box is for telling FAILURES apart.
+            $timebox->returnEarly();
+
+            return $user;
+            // No `max(0, …)`: a Timebox only sleeps a positive remainder, so a negative budget is
+            // already no box. The cast is load-bearing — a string from an uncast `env()` would be a
+            // TypeError under strict types.
+        }, (int) (Lukk::guardConfig()['login_timebox_micros'] ?? 500_000));
     }
 
     private function resolveWithin(Request $request): Authenticatable
@@ -168,12 +176,7 @@ class AttemptLogin
         // enumeration oracle, inverted from the one being defended against but just as usable. The
         // memo is also why no test could see it: one process, every request after the first cheap.
         //
-        // The second branch is the password-LESS account (passkey-only, SSO, invited-not-yet-set).
-        // `EloquentUserProvider::validateCredentials` returns false before hashing when the column
-        // is null, and `AbstractHasher::check` does the same for `''` — zero KDF, ~0ms, a single
-        // request. That answer identified exactly the accounts worth pivoting to a passkey or a
-        // password-reset phish, and this package ships passkeys, so it creates that row shape.
-        if ($user === null || ! $this->hasUsablePassword($user)) {
+        if ($user === null) {
             // The equalizer must never be able to THROW on attacker-controlled input, whatever the
             // hasher is. `password_hash` raises `ValueError` on a NUL byte where `password_verify`
             // only returns false, which turned this branch into a 500 while a real account still got
@@ -203,10 +206,54 @@ class AttemptLogin
         }
 
         if (! $valid) {
+            // Equalize the COST, not just the count. `Hash::check` runs at the cost embedded in the
+            // stored hash; `Hash::make` above runs at the configured one. A row left behind by a
+            // `BCRYPT_ROUNDS` bump — Laravel 11 raised the default from 10 to 12 — was checked several
+            // times faster than an unknown identifier was equalized (15 ms against 118 ms at cost 11),
+            // and an unreadable value (`!`, `*`, an import) answered at once. A Timebox shorter than the
+            // hash pads none of that, so these also pay one derivation at the configured cost.
+            //
+            // That includes the password-LESS account — passkey-only, SSO, invited-not-yet-set. The
+            // framework answers a null or empty column without deriving anything, which made those
+            // the fastest response of all and pointed an attacker at exactly the accounts worth
+            // phishing a passkey or a reset link out of. `needsRehash` says yes for both, so the same
+            // line covers them; a separate branch for them used to sit above and is no longer needed.
+            if ($this->storedHashIsWeak($user)) {
+                try {
+                    Hash::make($credentials['password']);
+                } catch (\Throwable) {
+                    // As above: the work is the point; the failure below is the answer.
+                }
+            }
+
             $this->fail();
         }
 
+        // What Laravel's own `SessionGuard` does on every successful login, and lukk never did: bring
+        // a weaker stored hash up to the configured cost, so rows written before a cost increase stop
+        // being both weaker and distinguishable. Off when the application turned it off.
+        if (config('hashing.rehash_on_login', true)) {
+            try {
+                $this->users->rehashPasswordIfRequired($user, $credentials);
+            } catch (\Throwable $e) {
+                // A failed upgrade must not fail a correct sign-in; the next one tries again.
+                report($e);
+            }
+        }
+
         return $user;
+    }
+
+    /** Would the hasher rehash this stored value — weaker than configured, or not one it can read? */
+    private function storedHashIsWeak(Authenticatable $user): bool
+    {
+        try {
+            // A password-less row arrives here as null. Without the cast PHP still answers true, but
+            // logs a null-to-string deprecation on every such attempt — noise, not behaviour.
+            return Hash::needsRehash((string) $user->getAuthPassword()); // @pest-mutate-ignore: RemoveStringCast
+        } catch (\Throwable) {
+            return true;
+        }
     }
 
     private function ensureIsNotThrottled(Request $request): void
@@ -305,25 +352,6 @@ class AttemptLogin
     private function field(): string
     {
         return Lukk::usernameField();
-    }
-
-    /**
-     * Whether this user carries a password the hasher would actually do work on.
-     *
-     * Deliberately only "a non-empty string" — the two states the framework short-circuits on. A
-     * stricter test (`Hash::info()` reporting a known algorithm) would also catch a corrupt or
-     * foreign hash, but it would lock out every install running a custom hasher whose output
-     * `password_get_info` cannot name, which is a far worse failure than the timing it closes.
-     */
-    private function hasUsablePassword(Authenticatable $user): bool
-    {
-        // The cast NORMALIZES rather than silences: `Authenticatable::getAuthPassword()` is
-        // documented `string`, but the framework does not believe its own docblock —
-        // `EloquentUserProvider::validateCredentials()` returns false on `is_null($hashed)` and
-        // `AbstractHasher::check()` on `(string) $hashedValue === ''`. Both of those states mean the
-        // same thing here (nothing to derive against), and `(string) null` is `''`, so one comparison
-        // covers both.
-        return (string) $user->getAuthPassword() !== '';
     }
 
     private function lockoutGuard(): string

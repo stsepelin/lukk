@@ -56,7 +56,12 @@ function countingHasher(): object
 
         public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
         {
-            $this->checked[] = (string) $value;
+            // Count only a check that DERIVES something. `AbstractHasher::check` returns false at once
+            // for a null or empty stored value, so counting that call would report work that never
+            // happened — and hide exactly the zero-work answer these tests exist to catch.
+            if ((string) $hashedValue !== '') {
+                $this->checked[] = (string) $value;
+            }
 
             return $this->inner->check($value, $hashedValue, $options);
         }
@@ -172,9 +177,9 @@ it('spends the same key-derivation work on every shape of failed attempt', funct
         $work[$label] = kdfWork($hasher);
     }
 
-    // One derivation each, and the no-usable-password shapes must all take the SAME branch as an
-    // unknown identifier — `password is empty` is the one that catches narrowing the guard to a
-    // bare `!== null`, which leaves `''` to reach the hasher and derive nothing.
+    // One derivation each, and the no-usable-password shapes must cost what an unknown identifier
+    // costs — one `make` at the configured cost. `password is empty` is the row that catches a guard
+    // treating only null as unusable, which leaves `''` to reach the hasher and derive nothing.
     expect($work)->toBe([
         'unknown identifier' => ['makes' => 1, 'checks' => 0],
         'wrong password' => ['makes' => 0, 'checks' => 1],
@@ -466,6 +471,9 @@ it('spends the same wall-clock budget on every shape of failed attempt, not just
     // own answer, and the one the password broker uses. Pinned through the mechanism rather than the
     // clock: a wall-clock assertion flakes on a loaded runner, and at the suite's bcrypt cost of 4
     // the differences are too small to measure anyway.
+    //
+    // The suite runs with no box at all (`TestCase`), so this test sets a budget of its own.
+    config(['lukk.login_timebox_micros' => 250_000]);
     $budgets = [];
     app()->instance(Timebox::class, new class($budgets) extends Timebox
     {
@@ -515,5 +523,136 @@ it('keeps a real sign-in budget when the config key is missing entirely', functi
 
     $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
 
-    expect($budgets)->toBe([250_000]);
+    // 500 ms, not the 250 ms this started at: 250 ms was measured BELOW a single bcrypt derivation
+    // at cost 12 (243–358 ms), and a box shorter than the work pads nothing.
+    expect($budgets)->toBe([500_000]);
+});
+
+/** Configure a bcrypt cost ABOVE the one a row was stored at, and rebuild the hasher with it. */
+function raiseBcryptCostTo(int $rounds): void
+{
+    config(['hashing.bcrypt.rounds' => $rounds]);
+    app('hash')->forgetDrivers();
+}
+
+it('also derives at the configured cost when the stored hash is weaker than it', function () {
+    // `Hash::check` runs at the cost embedded in the STORED hash, `Hash::make` at the configured one.
+    // A row left at cost 10 by a `BCRYPT_ROUNDS` bump (Laravel 11 raised the default from 10 to 12)
+    // was therefore checked several times faster than an unknown identifier was equalized — measured
+    // 15 ms against 118 ms at cost 11 — and a Timebox shorter than the hash pads nothing. So a failed
+    // check against a hash the hasher wants to rehash also pays one derivation at the configured cost.
+    User::factory()->create(['email' => 'legacy@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    $hasher = countingHasher();
+
+    $this->postJson('/auth/login', ['email' => 'legacy@y.com', 'password' => 'wrong'])->assertStatus(422);
+
+    expect(kdfWork($hasher))->toBe(['makes' => 1, 'checks' => 1]);
+});
+
+it('also derives at the configured cost for a stored value the hasher cannot read', function () {
+    // The `!`/`*` "unusable password" placeholder, or a row imported from another system: the check
+    // returns or throws before deriving anything, so on its own it answered in ~0 ms.
+    User::factory()->create(['email' => 'imported@y.com', 'password' => '!']);
+    $hasher = countingHasher();
+
+    $this->postJson('/auth/login', ['email' => 'imported@y.com', 'password' => 'wrong'])->assertStatus(422);
+
+    expect($hasher->makes)->toBe(1);
+});
+
+it('rehashes a weaker stored password once the user signs in with it', function () {
+    // Laravel's own `SessionGuard` does this on every successful login (`hashing.rehash_on_login`,
+    // default true); lukk never did, so rows hashed before a cost increase stayed weaker — and
+    // distinguishable by timing — for as long as their owners kept signing in.
+    $user = User::factory()->create(['password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect(password_get_info($user->refresh()->password)['options']['cost'])->toBe(5);
+});
+
+it('leaves the password alone when the application turned rehash-on-login off', function () {
+    config(['hashing.rehash_on_login' => false]);
+    $user = User::factory()->create(['password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect(password_get_info($user->refresh()->password)['options']['cost'])->toBe(4);
+});
+
+it('does not hold a successful sign-in for the rest of the box', function () {
+    // The box exists to hide WHICH failure happened. A success announces itself in its status code,
+    // so padding it only taxes every legitimate login.
+    config(['lukk.login_timebox_micros' => 250_000]);
+    $returnedEarly = [];
+    app()->instance(Timebox::class, new class($returnedEarly) extends Timebox
+    {
+        public function __construct(public array &$early) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            try {
+                return $callback($this);
+            } finally {
+                $this->early[] = $this->earlyReturn;
+            }
+        }
+    });
+
+    $user = User::factory()->create();
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'wrong'])->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect($returnedEarly)->toBe([false, true]);
+});
+
+it('reads a sign-in budget that arrives as a string', function () {
+    // A published config can carry `env('LUKK_LOGIN_TIMEBOX_MICROS')` without the `(int)` cast, and
+    // `Timebox::call()` takes an int — under strict types a string budget is a TypeError on every
+    // failed sign-in.
+    config(['lukk.login_timebox_micros' => '1']);
+
+    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+});
+
+it('rehashes on sign-in when the application never set rehash_on_login', function () {
+    // Laravel's own default for a missing key is TRUE (`SessionGuard`), and lukk must agree: an app
+    // whose `config/hashing.php` predates the key still expects weaker hashes to be upgraded.
+    $user = User::factory()->create(['password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    $hashing = config('hashing');
+    unset($hashing['rehash_on_login']);
+    config(['hashing' => $hashing]);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect(password_get_info($user->refresh()->password)['options']['cost'])->toBe(5);
+});
+
+it('uses the configured sign-in budget, not the fallback', function () {
+    // A mutation run surfaced this one only as a TIMEOUT: ignoring the configured value and always
+    // boxing at the 500 ms fallback made every failed test login sleep, so the run timed out and Pest
+    // scored it "caught". Re-measured serially, nothing failed. The value must actually be read.
+    config(['lukk.login_timebox_micros' => 123_456]);
+    $budgets = [];
+    app()->instance(Timebox::class, new class($budgets) extends Timebox
+    {
+        public function __construct(public array &$seen) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->seen[] = $microseconds;
+
+            return $callback($this);
+        }
+    });
+
+    $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
+
+    expect($budgets)->toBe([123_456]);
 });

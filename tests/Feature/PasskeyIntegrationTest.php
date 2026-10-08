@@ -215,7 +215,7 @@ it('enforces the step-up\'s own user-verification requirement through the real l
     $access = $user->startSession()->accessToken;
     $headers = confirmedHeaders($access);
 
-    $authenticator = new Lukk\Tests\Fixtures\UserVerifyingAuthenticator(new InMemoryRepository);
+    $authenticator = new UserVerifyingAuthenticator(new InMemoryRepository);
     $authenticator->verifies = false;
     $options = $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json();
     $this->withToken($access)->withHeaders($headers)
