@@ -739,7 +739,22 @@ it('refuses a step-up whose UV flag comes from a credential that never showed us
     $access = $user->startSession()->accessToken;
     storePasskey($user->id, 'cred-pin-later', 0, uvInitialized: false);
 
-    passkeyStepUp($this, $access, 'cred-pin-later', uv: true)->assertStatus(403)->assertJsonMissingPath('confirmation_token');
+    passkeyStepUp($this, $access, 'cred-pin-later', uv: true)->assertStatus(422)->assertJsonMissingPath('confirmation_token');
+});
+
+it('refuses an insufficient passkey step-up as a bad credential, never as a forbidden token', function () {
+    // 403 on a step-up route is the contract for "this TOKEN may never earn a confirmation" (a pinned
+    // grant without `lukk.account`), and clients abandon the pending step-up on it. Here only the
+    // CREDENTIAL fell short — the password, or another passkey, still works — so it must answer like
+    // a failed verification does: 422 on `credential`.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-not-enough', 0, uvInitialized: false);
+
+    passkeyStepUp($this, $access, 'cred-not-enough', uv: true)
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('credential')
+        ->assertJsonMissingPath('confirmation_token');
 });
 
 it('refuses a single-factor step-up when another of the account\'s passkeys is multi-factor', function () {

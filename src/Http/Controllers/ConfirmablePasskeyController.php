@@ -56,7 +56,11 @@ class ConfirmablePasskeyController
             throw ValidationException::withMessages(['credential' => [__('That passkey does not belong to you.')]]);
         }
 
-        abort_if(! $assurance->permitsStepUp($user, $passkey), 403, 'Passkey step-up requires user verification on this account.');
+        // 422, not 403: on a step-up route 403 means "this TOKEN may never confirm", and clients abandon
+        // the prompt on it. Here only the credential fell short; the password or another passkey works.
+        if (! $assurance->permitsStepUp($user, $passkey)) {
+            throw ValidationException::withMessages(['credential' => [__('This account needs a passkey that verifies you (PIN or biometric), or your password.')]]);
+        }
 
         // Bound to the session presenting it, so the confirmation cannot be replayed by another
         // token the same subject holds.
