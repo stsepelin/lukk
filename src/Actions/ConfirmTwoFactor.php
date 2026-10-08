@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Validation\ValidationException;
 use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Contracts\TwoFactorProvider;
+use Lukk\Events\TwoFactorAuthenticationConfirmed;
 
 /**
  * Activate 2FA only after the user proves a valid code from the scanned secret —
@@ -29,5 +30,7 @@ class ConfirmTwoFactor
         }
 
         $user->forceFill(['two_factor_confirmed_at' => now()])->save();
+
+        event(new TwoFactorAuthenticationConfirmed($user));
     }
 }

@@ -6,6 +6,7 @@ namespace Lukk\Actions;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Lukk\Contracts\TwoFactorAuthenticatable;
+use Lukk\Events\RecoveryCodesGenerated;
 
 /**
  * Replace the user's recovery codes with a fresh set; returns the plaintext once.
@@ -23,6 +24,10 @@ class RegenerateRecoveryCodes
      */
     public function __invoke(Authenticatable $user): array
     {
-        return $user->generateRecoveryCodes($this->recoveryCodes);
+        $codes = $user->generateRecoveryCodes($this->recoveryCodes);
+
+        event(new RecoveryCodesGenerated($user));
+
+        return $codes;
     }
 }
