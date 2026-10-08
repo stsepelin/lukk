@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
@@ -58,6 +59,20 @@ function passkeyStepUp(object $test, string $access, string $credentialId, bool 
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => $credentialId, 'sign_count' => $signCount, 'uv' => $uv],
     ]);
 }
+
+it('refuses a ceremony id lukk could never have issued before it reaches the cache', function () {
+    // lukk issues UUIDs. An arbitrary string went straight into a cache key, and on a store with a
+    // bounded key column (the database store's varchar(255) on PostgreSQL or strict MySQL) a long
+    // one raised a query exception: a 500 on an unauthenticated route instead of a 422.
+    Cache::spy();
+
+    $this->postJson('/auth/passkeys/login', [
+        'ceremony_id' => str_repeat('a', 300),
+        'credential' => ['id' => 'x'],
+    ])->assertStatus(422)->assertJsonValidationErrors('ceremony_id');
+
+    Cache::shouldNotHaveReceived('add');
+});
 
 it('registers a passkey (auth + confirmation)', function () {
     $user = User::factory()->create();

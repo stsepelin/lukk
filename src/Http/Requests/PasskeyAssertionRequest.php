@@ -24,7 +24,9 @@ class PasskeyAssertionRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'ceremony_id' => ['required', 'string'],
+            // lukk issues UUIDs (`PasskeyChallengeStore::putForCeremony`). Anything else is not found,
+            // and must not reach the cache: an unbounded key overflowed the database store's column.
+            'ceremony_id' => ['required', 'string', 'uuid'],
             'credential' => ['required', 'array'],
             // One rung deeper than `array`: `FinishPasskeyLogin` casts this to string, and an array or
             // object there raised an ErrorException — a 500 on an UNAUTHENTICATED route, against this
