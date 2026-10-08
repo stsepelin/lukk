@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Timebox;
@@ -658,26 +659,110 @@ it('uses the configured sign-in budget, not the fallback', function () {
     expect($budgets)->toBe([123_456]);
 });
 
-it('does not let a look-alike account clear another account\'s failure bucket', function () {
+it('does not let a look-alike account clear another account\'s failure count', function () {
     // With the persistent lockout off — the default — the IP-independent account bucket is the only
-    // cap on consecutive failures (NIST SP 800-63B-4 §3.2.2). It was keyed on the NORMALIZED
-    // identifier, which folds `аdmin@y.com` (Cyrillic а) onto `admin@y.com`, and a success clears
-    // it: whoever owned the look-alike could sign in to it between bursts and reset the victim's
-    // count on demand. It is now keyed on the account the identifier names.
+    // cap on consecutive failures (NIST SP 800-63B-4 §3.2.2). Keyed only on the NORMALIZED identifier,
+    // which folds `аdmin@y.com` (Cyrillic а) onto `admin@y.com`, a success by the look-alike's owner
+    // cleared it, so they could reset the victim's count between bursts. Failures now also count
+    // against the account itself, which only the account's own success clears.
     config(['lukk.rate_limits.login.max_attempts' => 100, 'lukk.rate_limits.login.account_max_attempts' => 3]);
     User::factory()->create(['email' => 'admin@y.com', 'password' => bcrypt('correct')]);
     User::factory()->create(['email' => "\u{0430}dmin@y.com", 'password' => bcrypt('correct')]);
 
-    foreach (range(1, 3) as $i) {
+    foreach (range(1, 2) as $i) {
         $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(422);
     }
-    $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(429);
 
     app('auth')->forgetGuards();
     $this->postJson('/auth/login', ['email' => "\u{0430}dmin@y.com", 'password' => 'correct'])->assertOk();
 
+    // Third failure reaches the account's cap; the look-alike's success did not reset it.
+    $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(422);
     $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(429);
 });
+
+it('throttles a spelling variant the same whether or not the account exists', function () {
+    // Keyed on the account alone, a variant spelling of an EXISTING account landed in a fresh bucket
+    // while a variant of a non-account shared the full one — 422 versus 429, an existence oracle on
+    // the default throttle. The folded bucket still gates every attempt.
+    config(['lukk.rate_limits.login.max_attempts' => 3, 'lukk.rate_limits.login.account_max_attempts' => 100]);
+    User::factory()->create(['email' => 'real@y.com', 'password' => bcrypt('correct')]);
+
+    $answers = [];
+    foreach (['real@y.com', 'ghost@y.com'] as $identifier) {
+        foreach (range(1, 3) as $i) {
+            $this->postJson('/auth/login', ['email' => $identifier, 'password' => 'wrong'])->assertStatus(422);
+        }
+        $answers[$identifier] = $this->postJson('/auth/login', ['email' => strtoupper($identifier), 'password' => 'wrong'])->status();
+    }
+
+    expect($answers)->toBe(['real@y.com' => 429, 'ghost@y.com' => 429]);
+});
+
+it('does not undo a password change that lands while a sign-in is rehashing the old one', function () {
+    // The row is read once at the start of a sign-in. If the stored hash needs upgrading and a reset
+    // commits between that read and the rehash, saving the stale model wrote `Hash::make(<old>)` over
+    // the new hash: the reset was reverted, and the session — fingerprinted from the rehashed model —
+    // survived the password-unchanged check. The upgrade must only replace the hash it checked.
+    $user = User::factory()->create(['email' => 'race@y.com', 'password' => password_hash('oldpw', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    resetLandsDuringCheck($user, 'newpw');
+
+    $this->postJson('/auth/login', ['email' => 'race@y.com', 'password' => 'oldpw'])->assertStatus(422);
+
+    $stored = (string) DB::table('users')->where('id', $user->id)->value('password');
+    expect(password_verify('newpw', $stored))->toBeTrue()
+        ->and(password_verify('oldpw', $stored))->toBeFalse();
+});
+
+it('keeps a sign-in whose rehash lost the race to another rehash of the same password', function () {
+    // Two first sign-ins after a cost bump each upgrade the hash. The loser must not revoke its own
+    // session as if the password had changed: the row still holds the password it just proved.
+    $user = User::factory()->create(['email' => 'twin@y.com', 'password' => password_hash('samepw', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    resetLandsDuringCheck($user, 'samepw');
+
+    $this->postJson('/auth/login', ['email' => 'twin@y.com', 'password' => 'samepw'])->assertOk();
+});
+
+/** A hasher whose first successful check writes `$newPassword` to the row — a concurrent change. */
+function resetLandsDuringCheck(User $user, string $newPassword): void
+{
+    $inner = app('hash')->driver();
+    $fired = false;
+    app('hash')->extend('racing', fn () => new class($inner, $user->id, $newPassword, $fired) implements Hasher
+    {
+        public function __construct(private readonly Hasher $inner, private readonly int $id, private readonly string $next, private bool &$fired) {}
+
+        public function info($hashedValue): array
+        {
+            return $this->inner->info($hashedValue);
+        }
+
+        public function make(#[SensitiveParameter] $value, array $options = []): string
+        {
+            return $this->inner->make($value, $options);
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            $ok = $this->inner->check($value, $hashedValue, $options);
+            if ($ok && ! $this->fired) {
+                $this->fired = true;
+                DB::table('users')->where('id', $this->id)->update(['password' => $this->inner->make($this->next)]);
+            }
+
+            return $ok;
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            return $this->inner->needsRehash($hashedValue, $options);
+        }
+    });
+    config(['hashing.driver' => 'racing']);
+    app('hash')->forgetDrivers();
+}
 
 it('still counts an identifier that names no account in one bucket per spelling fold', function () {
     // Without an account to key on, the bucket stays on the normalized identifier, so spreading
@@ -725,4 +810,42 @@ it('honours a custom authenticator\'s refusal even when the password would pass'
     Lukk::authenticateUsing(fn () => null);
 
     $this->postJson('/auth/login', ['email' => 'disabled@y.com', 'password' => 'correct'])->assertStatus(422);
+});
+
+it('leaves a current-cost hash exactly as it is', function () {
+    // Only a hash the hasher wants upgraded is rewritten; an unconditional write would change the
+    // stored value on every sign-in, and with it every session's password fingerprint.
+    $user = User::factory()->create(['email' => 'current@y.com']);
+    $before = (string) DB::table('users')->where('id', $user->id)->value('password');
+
+    $this->postJson('/auth/login', ['email' => 'current@y.com', 'password' => 'password'])->assertOk();
+
+    expect((string) DB::table('users')->where('id', $user->id)->value('password'))->toBe($before);
+});
+
+it('checks the password once when the upgrade wins its write', function () {
+    // The re-read and second check are for a LOST race only.
+    User::factory()->create(['email' => 'once@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    $spy = countingHasher();
+
+    $this->postJson('/auth/login', ['email' => 'once@y.com', 'password' => 'password'])->assertOk();
+
+    expect($spy->checked)->toHaveCount(1);
+});
+
+it('attempts no upgrade, and reports nothing, for a user that is not an Eloquent model', function () {
+    // The database provider returns a `GenericUser`, which offers no conditional write. lukk skips the
+    // upgrade rather than risk reverting a concurrent password change.
+    Exceptions::fake();
+    config(['auth.providers.users' => ['driver' => 'database', 'table' => 'users']]);
+    app('auth')->forgetGuards();
+    $user = User::factory()->create(['email' => 'generic@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    $before = (string) DB::table('users')->where('id', $user->id)->value('password');
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => 'generic@y.com', 'password' => 'password'])->assertOk();
+
+    Exceptions::assertNothingReported();
+    expect((string) DB::table('users')->where('id', $user->id)->value('password'))->toBe($before);
 });

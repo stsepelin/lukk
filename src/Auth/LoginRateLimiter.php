@@ -33,35 +33,60 @@ class LoginRateLimiter
     ) {}
 
     /*
-     * `$subject` is the account the identifier names — `lockoutSubject()` — when the caller has
-     * resolved it. Given one, both buckets key on IDENTITY; without, on the normalized identifier.
+     * `$subject` is the account the identifier names — `lockoutSubject()` — when the caller resolved
+     * it. Every attempt then counts in TWO pairs of buckets, and either pair trips the gate:
+     *
+     *  - the identifier FOLD (case, script), which every spelling shares whether or not an account
+     *    exists — so a variant spelling of a real account is throttled exactly like one of a
+     *    non-account, and 429 says nothing about existence;
+     *  - the ACCOUNT, which only that account's own success clears — so a look-alike account's owner,
+     *    who shares the fold and can clear it, cannot reset the victim's count.
+     *
+     * The price is the fold's: a victim's failures can briefly throttle a look-alike account too.
      */
 
     public function tooManyAttempts(Request $request, ?string $subject = null): bool
     {
-        return $this->limiter->tooManyAttempts($this->key($request, $subject), $this->maxAttempts)
-            || $this->limiter->tooManyAttempts($this->accountKey($request, $subject), $this->accountMaxAttempts);
+        foreach ($this->buckets($request, $subject) as [$key, $max]) {
+            if ($this->limiter->tooManyAttempts($key, $max)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function increment(Request $request, ?string $subject = null): void
     {
-        $this->limiter->hit($this->key($request, $subject), $this->decaySeconds);
-        $this->limiter->hit($this->accountKey($request, $subject), $this->decaySeconds);
+        foreach ($this->buckets($request, $subject) as [$key]) {
+            $this->limiter->hit($key, $this->decaySeconds);
+        }
     }
 
     public function clear(Request $request, ?string $subject = null): void
     {
-        $this->limiter->clear($this->key($request, $subject));
-        $this->limiter->clear($this->accountKey($request, $subject));
+        foreach ($this->buckets($request, $subject) as [$key]) {
+            $this->limiter->clear($key);
+        }
     }
 
     public function availableIn(Request $request, ?string $subject = null): int
     {
-        // Whichever bucket is blocking has the longer remaining window.
-        return max(
-            $this->limiter->availableIn($this->key($request, $subject)),
-            $this->limiter->availableIn($this->accountKey($request, $subject)),
-        );
+        // Whichever bucket is blocking has the longest remaining window.
+        return max(array_map(fn (array $bucket) => $this->limiter->availableIn($bucket[0]), $this->buckets($request, $subject)));
+    }
+
+    /** @return non-empty-list<array{0: string, 1: int}> each bucket key with its limit */
+    private function buckets(Request $request, ?string $subject): array
+    {
+        $buckets = [[$this->key($request), $this->maxAttempts], [$this->accountKey($request), $this->accountMaxAttempts]];
+
+        if ($subject !== null) {
+            $buckets[] = [$this->key($request, $subject), $this->maxAttempts];
+            $buckets[] = [$this->accountKey($request, $subject), $this->accountMaxAttempts];
+        }
+
+        return $buckets;
     }
 
     public function key(Request $request, ?string $subject = null): string

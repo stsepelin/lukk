@@ -244,14 +244,26 @@ The read-side mirror of `forget()`, used by the account export: it must reach ex
 
 ### Login failure counters key on the account, and non-account locks store a digest
 
-**Low impact — no action for most apps.** The login cache buckets (`max_attempts`,
-`account_max_attempts`) now key on the account the identifier names, so existing buckets are orphaned
-on deploy; that costs at most one decay window of counting. A persistent lock on an identifier that
+**Low impact — no action for most apps.** Each login attempt now counts against the account the
+identifier names as well as against the folded identifier, and either trips the throttle. The new
+account buckets start empty on deploy. A persistent lock on an identifier that
 names no account is now stored as `idn:sha256:<digest>` rather than the identifier in plain text.
 Locks written before the upgrade keep their old key: `lukk:release`, account erasure and the export
 still find them. A `Lukk::authenticateUsing` app with the lockout OFF keeps the old bucket keying,
 since its `lukk.username` may name no column. If you call `LoginRateLimiter` yourself, its methods
 take an optional trailing `?string $subject`.
+
+### Three request rules a client can hit
+
+**Low impact — check custom clients.**
+
+- `ceremony_id` on passkey login and step-up must be a UUID, which is what lukk issues; anything else
+  is a `422` on `ceremony_id`.
+- A refused passkey step-up is `422` on `credential`, not `403`.
+- `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
+  `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
+  request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never
+  touched a column must be renamed.
 
 ### New events when an authenticator is bound or removed
 

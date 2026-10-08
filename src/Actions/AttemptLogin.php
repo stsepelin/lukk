@@ -8,6 +8,7 @@ use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Auth\Events\Lockout;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
@@ -229,7 +230,7 @@ class AttemptLogin
         // being both weaker and distinguishable. Off when the application turned it off.
         if (config('hashing.rehash_on_login', true)) {
             try {
-                $this->users->rehashPasswordIfRequired($user, $credentials);
+                $this->rehash($user, $credentials['password']);
             } catch (\Throwable $e) {
                 // A failed upgrade must not fail a correct sign-in; the next one tries again.
                 report($e);
@@ -322,6 +323,45 @@ class AttemptLogin
     }
 
     /** The identifier field (config `lukk.username`) — the request field + the error key. */
+    /**
+     * Upgrade a weak stored hash — but only the hash this sign-in checked.
+     *
+     * The row was read at the start of the attempt. Saving that model, as the provider's own
+     * `rehashPasswordIfRequired()` does, wrote `Hash::make(<this password>)` over anything committed
+     * since: a password reset landing in between was REVERTED, and the session, fingerprinted from the
+     * rehashed model, survived the password-unchanged check. So the write is conditional on the stored
+     * value still being the one checked. Losing that race to a concurrent upgrade of the same password
+     * is harmless, and the model adopts the winner's hash so its own session is not taken for a change.
+     *
+     * Eloquent users only: another provider gives no conditional write to make, and lukk does not risk
+     * the revert for a cost upgrade.
+     */
+    private function rehash(Authenticatable $user, string $password): void
+    {
+        // Only a successful check reaches here, so the password is a string; the cast states it.
+        $stored = (string) $user->getAuthPassword(); // @pest-mutate-ignore: RemoveStringCast
+
+        if (! $user instanceof Model || ! Hash::needsRehash($stored)) {
+            return;
+        }
+
+        $column = $user->getAuthPasswordName();
+        $upgraded = Hash::make($password);
+
+        if ($user->newQueryWithoutScopes()->whereKey($user->getKey())->where($column, $stored)->update([$column => $upgraded]) === 1) {
+            $user->setAttribute($column, $upgraded)->syncOriginalAttribute($column);
+
+            return;
+        }
+
+        // A row deleted meanwhile reads null, which no check accepts either way; the cast states the type.
+        $current = (string) $user->newQueryWithoutScopes()->whereKey($user->getKey())->value($column); // @pest-mutate-ignore: RemoveStringCast
+
+        if (Hash::check($password, $current)) {
+            $user->setAttribute($column, $current)->syncOriginalAttribute($column);
+        }
+    }
+
     /**
      * The account the identifier names, or null — the one provider lookup a sign-in makes.
      *
