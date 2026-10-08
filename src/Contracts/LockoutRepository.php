@@ -59,7 +59,7 @@ interface LockoutRepository
      * erasure path can find any of them:
      *   - `id:<userId>`            — login failures against a resolvable account
      *   - `<userId>`               — step-up confirmation and two-factor failures
-     *   - `idn:<normalized>`       — login failures against an identifier resolving to no account
+     *   - `idn:sha256:<digest>`    — login failures against an identifier resolving to no account (a SHA-256 of the normalized identifier; releases before 0.7 wrote `idn:<normalized>`)
      *
      * Build them with {@see LoginRateLimiter::lockoutSubject()} rather than by hand: the
      * raw identifier is never a key, so a sweep keyed on it silently matches nothing.

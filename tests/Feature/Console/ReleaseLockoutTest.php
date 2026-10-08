@@ -103,3 +103,13 @@ it('reads a numeric subject, and treats one that is not a value as empty', funct
         ->expectsOutputToContain('No confirm lock found for [] on guard [api].')
         ->assertFailed();
 });
+
+it('still releases a non-account lock stored in plain text before the subject was hashed', function () {
+    // Locks written by an older release keep their old key until they are released; with
+    // `release_after` at 0 that is only ever this command, so it has to find them.
+    lockLogin('idn:legacy@example.test');
+
+    command('lukk:release', ['subject' => 'Legacy@Example.test'])->assertSuccessful();
+
+    expect(Lockout::query()->exists())->toBeFalse();
+});

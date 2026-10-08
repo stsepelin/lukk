@@ -101,7 +101,8 @@ class DeleteAccount
                     // id:<userId> — login. (The identifier argument is unused when a user is passed.)
                     LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
                     (string) $userId,                                         // <userId>      — confirm / two-factor
-                    $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:<normalized>
+                    $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:sha256:<digest>
+                    $identifier === null ? '' : LoginRateLimiter::legacyLockoutSubject($identifier), // idn:<normalized>, written before 0.7
                 ], $this->guard);
             }
 

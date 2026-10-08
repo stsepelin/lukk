@@ -551,11 +551,17 @@ return [
         | User Verification
         |--------------------------------------------------------------------------
         |
-        | Whether the authenticator must verify the user (biometric / PIN) rather
-        | than just their presence (a tap). Default "required" — passkey login and
-        | step-up are single-factor (possession), so enforcing user verification
-        | makes them phishing-resistant, AAL2-style. Lower to "preferred" only if
-        | you must support authenticators that can't verify the user.
+        | What sign-in and registration ASK the authenticator for: verifying the
+        | user (biometric / PIN) rather than just their presence (a tap). Default
+        | "required". Lower to "preferred" only if you must support
+        | authenticators that can't verify the user.
+        |
+        | It does not decide whether a passkey counts as multi-factor. That is
+        | read from each assertion: the UV flag on a credential that had already
+        | shown user verification before (WebAuthn L3 §4, uvInitialized). A
+        | single-factor assertion on an account with confirmed two-factor still
+        | gets the TOTP challenge, and a step-up asks for "required" whenever the
+        | account can reach AAL2, whatever this says.
         | One of: "required", "preferred", "discouraged".
         |
         */

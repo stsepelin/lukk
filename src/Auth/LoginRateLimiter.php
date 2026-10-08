@@ -146,6 +146,21 @@ class LoginRateLimiter
         // the non-empty `idn:`, slipping past the repository's empty-subject refusal and putting
         // every unkeyable caller into ONE never-decaying bucket — locking the whole application at
         // attempt 100. That refusal is the guard; don't hand it a truthy value.
+        //
+        // A DIGEST, never the identifier. What was typed is often someone's real address, or a
+        // stranger's; a held lock is never pruned, and no account exists through which its owner
+        // could have it erased. The counter only compares for equality, so nothing is lost.
+        return $normalized === '' ? '' : 'idn:sha256:'.hash('sha256', $normalized);
+    }
+
+    /**
+     * The plain-text subject releases before 0.7 wrote for an identifier naming no account. Read
+     * only to release, erase and export those rows; nothing writes this form any more.
+     */
+    public static function legacyLockoutSubject(string $identifier): string
+    {
+        $normalized = self::normalize($identifier);
+
         return $normalized === '' ? '' : 'idn:'.$normalized;
     }
 

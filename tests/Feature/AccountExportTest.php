@@ -135,6 +135,14 @@ it('exports the lockout counters erasure would delete, in all three key spaces',
         ->and(json_encode($export['lockouts']))->not->toContain('idn:')->not->toContain('id:');
 });
 
+it('exports a non-account counter stored in plain text by an older release', function () {
+    // Erasure deletes it, so an access request has to show it.
+    $user = User::factory()->create(['email' => 'legacy@example.test']);
+    app(LockoutRepository::class)->recordFailure('login', 'idn:legacy@example.test', 'api');
+
+    expect(app(ExportAccount::class)($user)['lockouts'])->toHaveCount(1);
+});
+
 it('exports no lockouts when the lockout table was never published', function () {
     Schema::drop('lukk_lockouts');
 
@@ -189,9 +197,9 @@ it('asks the lockout store about all three key spaces, as strings', function () 
     // strict comparison waiting to miss.
     $spy = new RecordingLockoutRepository;
     exporter('email', $spy)(new GenericUser(['id' => 5, 'email' => 'Ada@Example.test']));
-    expect($spy->summarised)->toBe(['id:5', '5', 'idn:ada@example.test']);
+    expect($spy->summarised)->toBe(['id:5', '5', 'idn:sha256:'.hash('sha256', 'ada@example.test'), 'idn:ada@example.test']);
 
     // No identifier: the third key space is empty, which the repository skips.
     exporter('email', $spy)(new GenericUser(['id' => 5]));
-    expect($spy->summarised)->toBe(['id:5', '5', '']);
+    expect($spy->summarised)->toBe(['id:5', '5', '', '']);
 });

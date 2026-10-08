@@ -484,7 +484,7 @@ it('still counts an identifier that names no account, so being locked is not an 
     // A non-existent address locks exactly like a real one — otherwise 423-vs-422 would answer
     // "does this account exist?" for free.
     failLogin('ghost@y.com')->assertStatus(423);
-    expect(Lockout::where('subject', 'idn:ghost@y.com')->exists())->toBeTrue();
+    expect(Lockout::where('subject', 'idn:sha256:'.hash('sha256', 'ghost@y.com'))->exists())->toBeTrue();
 });
 
 it('consumes the attempt before verifying, so concurrency cannot overrun the cap', function () {
@@ -582,4 +582,23 @@ it('answers a held step-up lock with its auto-release wait, and counts nothing m
         ->assertJsonValidationErrors(['password' => 'Wait 600 s.']);
 
     expect(Lockout::query()->value('attempts'))->toBe(3);
+});
+
+it('stores no readable identifier for an address that names no account', function () {
+    // A lock on a non-account is keyed by what was typed — often someone's real address, a typo of
+    // it, or a stranger's. `prune()` never removes a held lock and `release_after` defaults to 0, so
+    // that address sat in plain text indefinitely, with no account through which its owner could
+    // ever have it erased (GDPR Art. 5(1)(c), data minimisation). The counter only has to compare
+    // equal, so a digest does the job.
+    foreach (range(1, 4) as $i) {
+        failLogin('Stranger@Y.com');
+    }
+
+    $subjects = Lockout::pluck('subject')->all();
+
+    expect($subjects)->toHaveCount(1)
+        ->and($subjects[0])->toStartWith('idn:sha256:')
+        ->and(strtolower($subjects[0]))->not->toContain('stranger')
+        // Still one bucket for every spelling of it, and still locked.
+        ->and(failLogin('  stranger@y.COM ')->status())->toBe(423);
 });

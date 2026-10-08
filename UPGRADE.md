@@ -74,30 +74,38 @@ credentials. Use it instead of `passkeys/login-options` for a step-up (lukk-js d
 A presence-only passkey no longer earns a step-up on an account that has a password or a
 user-verifying passkey: such an account can authenticate more strongly, and a step-up mints the token
 that binds and removes authenticators (NIST SP 800-63B-4 §4.1.2.1). A password-less account whose
-credentials are all presence-only can still step up with one — it has nothing stronger.
+credentials are all presence-only can still step up with one — it has nothing stronger. That
+refusal answers **422 on `credential`**, like a failed verification, not 403: on a step-up route 403
+means the token itself may never confirm, and lukk-js abandons the prompt on it.
 
 ### A new `refresh_tokens.amr` column, and a new argument on `RefreshTokenRepository::persist()`
 
-**Medium impact — everyone republishes a migration; anyone implementing or subclassing
+**Medium impact — every existing install adds a column; anyone implementing or subclassing
 `RefreshTokenRepository` must update a signature.**
 
-`amr` (RFC 8176 — how the session was authenticated: `["pwd"]`, `["pwd","otp"]`, `["webauthn"]`) was
+`amr` (RFC 8176 — how the session was authenticated: `["pwd"]`, `["pwd","otp","mfa"]`, `["pop","user"]`) was
 stamped only at sign-in, so it disappeared from the first refreshed access token. A route gated on
 it therefore stopped working roughly one `access_ttl` into every session: fail-closed if the gate was
 written tightly, **fail-open** if it was written as `!isset($amr) || in_array(...)`. It is now stored
 with the family and carried forward by every rotation.
 
-1. Republish and run the core migration:
+1. Add the column. It went into the **existing** `create_refresh_tokens_table` migration, so how
+   you get it depends on whether you have already run that migration:
 
-   ```bash
-   php artisan vendor:publish --tag=lukk-migrations --force
-   php artisan migrate
-   ```
+   - **Fresh install / not yet migrated** — nothing to do. Publishing `lukk-migrations` and running
+     `php artisan migrate` creates the column.
+   - **You already ran it** (every existing install) — republishing does **not** help:
+     `publishesMigrations` stamps the copy with a new timestamp, so `--force` produces a second
+     `create_refresh_tokens_table` that fails with "table already exists". Add a migration of your own:
 
-   The column went into the **existing** `create_refresh_tokens_table` migration, so an install that
-   has already run it has no such column until you republish. Until you do, nothing breaks — the
-   repository writes `amr` only when it has one and reads it as `null` when the attribute is absent,
-   which is exactly the pre-upgrade behaviour.
+     ```php
+     Schema::table('refresh_tokens', function (Blueprint $table) {
+         $table->text('amr')->nullable();
+     });
+     ```
+
+   Until you do, nothing breaks — the repository writes `amr` only when it has one and reads it as
+   `null` when the attribute is absent, which is exactly the pre-upgrade behaviour.
 
 2. If you implement `Lukk\Contracts\RefreshTokenRepository` yourself, or subclass
    `DatabaseRefreshTokenRepository` and override `persist()`, add the trailing argument:
@@ -233,6 +241,31 @@ simply ignored, as they always were. Delete them to avoid implying they are swit
 
 The read-side mirror of `forget()`, used by the account export: it must reach exactly the rows
 `forget()` deletes, scoped to the guard. The export response gains a `lockouts` key.
+
+### Login failure counters key on the account, and non-account locks store a digest
+
+**Low impact — no action for most apps.** The login cache buckets (`max_attempts`,
+`account_max_attempts`) now key on the account the identifier names, so existing buckets are orphaned
+on deploy; that costs at most one decay window of counting. A persistent lock on an identifier that
+names no account is now stored as `idn:sha256:<digest>` rather than the identifier in plain text.
+Locks written before the upgrade keep their old key: `lukk:release`, account erasure and the export
+still find them. A `Lukk::authenticateUsing` app with the lockout OFF keeps the old bucket keying,
+since its `lukk.username` may name no column. If you call `LoginRateLimiter` yourself, its methods
+take an optional trailing `?string $subject`.
+
+### New events when an authenticator is bound or removed
+
+**Low impact — act on it.** NIST SP 800-63B-4 §4.1.2.1 requires telling the user, through another
+channel, when an authenticator is bound. lukk sends no mail, so listen and notify:
+`TwoFactorAuthenticationConfirmed`, `TwoFactorAuthenticationDisabled`, `RecoveryCodesGenerated`,
+`PasskeyRegistered`, `PasskeyDeleted`, all in `Lukk\Events`.
+
+### Sign-in and forgot-password are padded to a wall-clock budget
+
+**Low impact — check the budget.** A failed sign-in now takes at least `login_timebox_micros`
+(500 ms) and every forgot-password request at least `password_reset.timebox_micros` (one second).
+A successful sign-in returns early. Raise either budget if your slowest real path takes longer:
+the box pads, it never shortens. Queue the reset notification if one second is too slow.
 
 ### Logout clears the refresh cookie per guard
 

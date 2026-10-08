@@ -95,3 +95,11 @@ it('keys on the subject it is handed, and on the identifier fold without one', f
         // A request with no identifier at all still has a key, rather than a TypeError.
         ->and($limiter->accountKey(Request::create('/auth/login', 'POST')))->toBe('acct|admin|'.hash('sha256', ''));
 });
+
+it('derives no legacy subject from an identifier that is blank', function () {
+    // `idn:` alone would name one bucket for every blank caller — the shape the repository's
+    // empty-subject refusal exists to stop — and erasure would delete it on behalf of anyone.
+    expect(LoginRateLimiter::legacyLockoutSubject('   '))->toBe('')
+        ->and(LoginRateLimiter::legacyLockoutSubject(' Ada@Example.test '))->toBe('idn:ada@example.test')
+        ->and(LoginRateLimiter::lockoutSubject(null, '   '))->toBe('');
+});
