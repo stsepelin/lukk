@@ -46,10 +46,13 @@ class AttemptLogin
         // same bucket, and re-deriving it per call would mean three provider lookups.
         $this->assertIdentifierColumnExists();
 
-        $subject = $this->lockoutSubject($request);
+        // The account the identifier names, looked up ONCE: it keys the counters below and is the
+        // row the password is then checked against.
+        $candidate = $this->candidate($request);
+        $subject = LoginRateLimiter::lockoutSubject($candidate, (string) $request->input($this->field()));
 
         $this->ensureIsNotLocked($request, $subject);
-        $this->ensureIsNotThrottled($request);
+        $this->ensureIsNotThrottled($request, $subject);
 
         // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
         // the credential check is check-then-act: N concurrent requests all read "not locked", all
@@ -61,14 +64,14 @@ class AttemptLogin
         $this->reserve($subject);
 
         try {
-            $user = $this->resolve($request);
+            $user = $this->resolve($request, $candidate);
         } catch (ValidationException $e) {
-            $this->limiter->increment($request);
+            $this->limiter->increment($request, $subject);
 
             throw $e;
         }
 
-        $this->limiter->clear($request);
+        $this->limiter->clear($request, $subject);
         // "Consecutive" is the whole point of the cap: any success ends the run.
         $this->lockouts?->release('login', $subject, $this->limiter->guard());
         // A step-up lock counts failures against the SAME password, so a successful login is proof
@@ -117,7 +120,7 @@ class AttemptLogin
         $this->throwLocked('login', $subject, $this->field());
     }
 
-    private function resolve(Request $request): Authenticatable
+    private function resolve(Request $request, ?Authenticatable $candidate): Authenticatable
     {
         // Every failure costs the same WALL CLOCK, not merely the same number of key derivations.
         // Counting derivations was the wrong invariant: an unknown identifier hashes at the
@@ -129,8 +132,8 @@ class AttemptLogin
         // A Timebox pads a fast path up to the budget and never shortens a slow one, so a budget set
         // below the real hashing cost is ineffective rather than harmful — and `throw`s still
         // propagate, after the padding, so `fail()` keeps its timing too.
-        return app(Timebox::class)->call(function (Timebox $timebox) use ($request) {
-            $user = $this->resolveWithin($request);
+        return app(Timebox::class)->call(function (Timebox $timebox) use ($request, $candidate) {
+            $user = $this->resolveWithin($request, $candidate);
 
             // A success announces itself in its status code, so padding it hides nothing and only
             // taxes every legitimate sign-in. The box is for telling FAILURES apart.
@@ -143,7 +146,7 @@ class AttemptLogin
         }, (int) (Lukk::guardConfig()['login_timebox_micros'] ?? 500_000));
     }
 
-    private function resolveWithin(Request $request): Authenticatable
+    private function resolveWithin(Request $request, ?Authenticatable $candidate): Authenticatable
     {
         if (Lukk::$authenticateUsing !== null) {
             $user = (Lukk::$authenticateUsing)($request);
@@ -155,16 +158,8 @@ class AttemptLogin
             $this->fail();
         }
 
-        $field = $this->field();
-        $credentials = [
-            $field => (string) $request->input($field),
-            // The identifier cast is load-bearing — a null there becomes `WHERE … IS NULL`, which
-            // matches an account with no identifier set. A null password only reaches the hasher,
-            // where it fails like any wrong one; the cast keeps it out of a PHP that may refuse it.
-            'password' => (string) $request->input('password'), // @pest-mutate-ignore: RemoveStringCast
-        ];
-
-        $user = $this->users->retrieveByCredentials($credentials);
+        $credentials = $this->credentials($request);
+        $user = $candidate;
 
         // ONE key-derivation per attempt, on every path, so the answer's timing says nothing about
         // which accounts exist. `Hash::make` runs the same KDF at the same configured cost as the
@@ -256,15 +251,15 @@ class AttemptLogin
         }
     }
 
-    private function ensureIsNotThrottled(Request $request): void
+    private function ensureIsNotThrottled(Request $request, string $subject): void
     {
-        if (! $this->limiter->tooManyAttempts($request)) {
+        if (! $this->limiter->tooManyAttempts($request, $subject)) {
             return;
         }
 
         event(new Lockout($request));
 
-        $seconds = $this->limiter->availableIn($request);
+        $seconds = $this->limiter->availableIn($request, $subject);
 
         // The `(int)` is type hygiene, not behaviour: `ceil()` is always integral, and the value's
         // only consumer is a translation replacement, where `(string) 32.0` and `(string) 32` are
@@ -328,25 +323,39 @@ class AttemptLogin
 
     /** The identifier field (config `lukk.username`) — the request field + the error key. */
     /**
-     * The lockout subject for this attempt. Costs one provider lookup, and only when the feature is
-     * on — see `LoginRateLimiter::lockoutSubject()` for why the identifier alone is not safe to key
-     * on. The lookup reads `lukk.username`, which is the same field the counter has always keyed
-     * on, so a `Lukk::authenticateUsing` callback that authenticates elsewhere is no worse off than
-     * before (config/lukk.php documents that it must set `lukk.username` to match).
+     * The account the identifier names, or null — the one provider lookup a sign-in makes.
+     *
+     * It keys the persistent lockout and the cache buckets (`LoginRateLimiter::lockoutSubject()`
+     * explains why the identifier alone is not safe to key on), and the stock path then checks the
+     * password against this same row rather than querying again. The lookup sits outside the
+     * Timebox; a hit and a miss are one indexed SELECT each, and the derivation the box exists to
+     * hide happens inside it.
+     *
+     * A `Lukk::authenticateUsing` app may name a `lukk.username` that is no column. The lockout
+     * documents that it must match, so for such an app the lookup runs only when the lockout is on;
+     * otherwise its buckets keep the identifier fold, as before.
      */
-    private function lockoutSubject(Request $request): string
+    private function candidate(Request $request): ?Authenticatable
     {
-        if ($this->lockouts === null) {
-            // The value is never read: every consumer of the subject short-circuits on this same check.
-            return ''; // @pest-mutate-ignore: EmptyStringToNotEmpty
+        if ($this->lockouts === null && Lukk::$authenticateUsing !== null) {
+            return null;
         }
 
-        $identifier = (string) $request->input($this->field());
+        return $this->users->retrieveByCredentials($this->credentials($request));
+    }
 
-        return LoginRateLimiter::lockoutSubject(
-            $this->users->retrieveByCredentials([$this->field() => $identifier]),
-            $identifier,
-        );
+    /** @return array<string, string> the identifier under `lukk.username`, and the password */
+    private function credentials(Request $request): array
+    {
+        $field = $this->field();
+
+        return [
+            $field => (string) $request->input($field),
+            // The identifier cast is load-bearing — a null there becomes `WHERE … IS NULL`, which
+            // matches an account with no identifier set. A null password only reaches the hasher,
+            // where it fails like any wrong one; the cast keeps it out of a PHP that may refuse it.
+            'password' => (string) $request->input('password'), // @pest-mutate-ignore: RemoveStringCast
+        ];
     }
 
     private function field(): string

@@ -11,6 +11,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
@@ -655,4 +656,73 @@ it('uses the configured sign-in budget, not the fallback', function () {
     $this->postJson('/auth/login', ['email' => 'ghost@y.com', 'password' => 'whatever'])->assertStatus(422);
 
     expect($budgets)->toBe([123_456]);
+});
+
+it('does not let a look-alike account clear another account\'s failure bucket', function () {
+    // With the persistent lockout off — the default — the IP-independent account bucket is the only
+    // cap on consecutive failures (NIST SP 800-63B-4 §3.2.2). It was keyed on the NORMALIZED
+    // identifier, which folds `аdmin@y.com` (Cyrillic а) onto `admin@y.com`, and a success clears
+    // it: whoever owned the look-alike could sign in to it between bursts and reset the victim's
+    // count on demand. It is now keyed on the account the identifier names.
+    config(['lukk.rate_limits.login.max_attempts' => 100, 'lukk.rate_limits.login.account_max_attempts' => 3]);
+    User::factory()->create(['email' => 'admin@y.com', 'password' => bcrypt('correct')]);
+    User::factory()->create(['email' => "\u{0430}dmin@y.com", 'password' => bcrypt('correct')]);
+
+    foreach (range(1, 3) as $i) {
+        $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(422);
+    }
+    $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(429);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => "\u{0430}dmin@y.com", 'password' => 'correct'])->assertOk();
+
+    $this->postJson('/auth/login', ['email' => 'admin@y.com', 'password' => 'wrong'])->assertStatus(429);
+});
+
+it('still counts an identifier that names no account in one bucket per spelling fold', function () {
+    // Without an account to key on, the bucket stays on the normalized identifier, so spreading
+    // guesses across case or look-alike spellings of a non-account still lands in one bucket — and
+    // a non-account throttles exactly like a real one, so 429 is not an existence oracle.
+    config(['lukk.rate_limits.login.max_attempts' => 100, 'lukk.rate_limits.login.account_max_attempts' => 3]);
+
+    foreach (['ghost@y.com', 'GHOST@y.com', 'ghost@y.com '] as $spelling) {
+        $this->postJson('/auth/login', ['email' => $spelling, 'password' => 'wrong'])->assertStatus(422);
+    }
+    $this->postJson('/auth/login', ['email' => 'Ghost@Y.com', 'password' => 'wrong'])->assertStatus(429);
+});
+
+it('does not look the identifier up as a column for a custom authenticator with the lockout off', function () {
+    // Keying the buckets on the account means one provider lookup by `lukk.username`. A
+    // `Lukk::authenticateUsing` app may name a field that is no column at all; the lockout documents
+    // that it must match, but an app with the lockout off was never told, and its every sign-in
+    // would become a query error.
+    config(['lukk.username' => 'login']);
+    User::factory()->create(['email' => 'custom@y.com', 'password' => bcrypt('correct')]);
+    Lukk::authenticateUsing(function ($request) {
+        $user = User::query()->where('email', $request->input('login'))->first();
+
+        return $user !== null && Hash::check((string) $request->input('password'), $user->password) ? $user : null;
+    });
+
+    // SQLite reads an unknown double-quoted column as a string LITERAL, so it would not error here;
+    // PostgreSQL and MySQL would. Assert the query is never issued.
+    $sql = [];
+    DB::listen(function ($query) use (&$sql) {
+        $sql[] = $query->sql;
+    });
+
+    $this->postJson('/auth/login', ['login' => 'custom@y.com', 'password' => 'correct'])->assertOk();
+
+    expect(array_filter($sql, fn (string $q) => str_contains($q, '"login"')))->toBe([]);
+});
+
+it('honours a custom authenticator\'s refusal even when the password would pass', function () {
+    // With the lockout on, the account row has already been looked up for the counter. A callback
+    // that says no — a disabled account, an extra rule — must end the attempt there, not fall
+    // through to a stock password check against that row.
+    config(['lukk.features.lockout' => true]);
+    User::factory()->create(['email' => 'disabled@y.com', 'password' => bcrypt('correct')]);
+    Lukk::authenticateUsing(fn () => null);
+
+    $this->postJson('/auth/login', ['email' => 'disabled@y.com', 'password' => 'correct'])->assertStatus(422);
 });

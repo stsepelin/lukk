@@ -85,3 +85,13 @@ it('hashes an identifier longer than 190 characters, and keeps one that is not',
         ->and(LoginRateLimiter::normalize($at190))->toBe($at190)
         ->and(LoginRateLimiter::normalize($at191))->toBe('sha256:'.hash('sha256', $at191));
 });
+
+it('keys on the subject it is handed, and on the identifier fold without one', function () {
+    $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 5, 'email', 'admin');
+    $request = loginRequest('ADA@example.test');
+
+    expect($limiter->accountKey($request, 'id:7'))->toBe('acct|admin|'.hash('sha256', 'id:7'))
+        ->and($limiter->accountKey($request))->toBe('acct|admin|'.hash('sha256', 'ada@example.test'))
+        // A request with no identifier at all still has a key, rather than a TypeError.
+        ->and($limiter->accountKey(Request::create('/auth/login', 'POST')))->toBe('acct|admin|'.hash('sha256', ''));
+});

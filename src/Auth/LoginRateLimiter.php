@@ -32,43 +32,48 @@ class LoginRateLimiter
         private readonly string $guard = 'api',
     ) {}
 
-    public function tooManyAttempts(Request $request): bool
+    /*
+     * `$subject` is the account the identifier names — `lockoutSubject()` — when the caller has
+     * resolved it. Given one, both buckets key on IDENTITY; without, on the normalized identifier.
+     */
+
+    public function tooManyAttempts(Request $request, ?string $subject = null): bool
     {
-        return $this->limiter->tooManyAttempts($this->key($request), $this->maxAttempts)
-            || $this->limiter->tooManyAttempts($this->accountKey($request), $this->accountMaxAttempts);
+        return $this->limiter->tooManyAttempts($this->key($request, $subject), $this->maxAttempts)
+            || $this->limiter->tooManyAttempts($this->accountKey($request, $subject), $this->accountMaxAttempts);
     }
 
-    public function increment(Request $request): void
+    public function increment(Request $request, ?string $subject = null): void
     {
-        $this->limiter->hit($this->key($request), $this->decaySeconds);
-        $this->limiter->hit($this->accountKey($request), $this->decaySeconds);
+        $this->limiter->hit($this->key($request, $subject), $this->decaySeconds);
+        $this->limiter->hit($this->accountKey($request, $subject), $this->decaySeconds);
     }
 
-    public function clear(Request $request): void
+    public function clear(Request $request, ?string $subject = null): void
     {
-        $this->limiter->clear($this->key($request));
-        $this->limiter->clear($this->accountKey($request));
+        $this->limiter->clear($this->key($request, $subject));
+        $this->limiter->clear($this->accountKey($request, $subject));
     }
 
-    public function availableIn(Request $request): int
+    public function availableIn(Request $request, ?string $subject = null): int
     {
         // Whichever bucket is blocking has the longer remaining window.
         return max(
-            $this->limiter->availableIn($this->key($request)),
-            $this->limiter->availableIn($this->accountKey($request)),
+            $this->limiter->availableIn($this->key($request, $subject)),
+            $this->limiter->availableIn($this->accountKey($request, $subject)),
         );
     }
 
-    public function key(Request $request): string
+    public function key(Request $request, ?string $subject = null): string
     {
-        return $this->guard.'|'.$this->identifierKey($request).'|'.Lukk::rateLimitKey($request);
+        return $this->guard.'|'.$this->identifierKey($request, $subject).'|'.Lukk::rateLimitKey($request);
     }
 
     /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood
      *  on one guard's login can't lock a colliding account out of another guard. */
-    public function accountKey(Request $request): string
+    public function accountKey(Request $request, ?string $subject = null): string
     {
-        return 'acct|'.$this->guard.'|'.$this->identifierKey($request);
+        return 'acct|'.$this->guard.'|'.$this->identifierKey($request, $subject);
     }
 
     /**
@@ -86,22 +91,20 @@ class LoginRateLimiter
      * Hashing also puts the `|` delimiter out of reach of an identifier field that carries no
      * charset rule, so a submitted identifier can no longer shape the key's structure.
      *
-     * **It does NOT make these buckets per-account.** `normalize()` is itself many-to-one by design
-     * — `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither of
-     * which a binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` still share a
-     * bucket, and a successful sign-in to the look-alike still `clear()`s the victim's counter. That
-     * fold is deliberate: without it an attacker spreads guesses across spellings and evades the
-     * bucket entirely. `lockoutSubject()` below resolves the same tension for the PERSISTENT counter
-     * by keying on identity when the identifier names an account; these cache buckets cannot, since
-     * they are computed from the request before anyone is resolved. Closing it here means resolving
-     * the user first — see the note in CHANGELOG.
+     * **Hashing alone does not make these buckets per-account.** `normalize()` is many-to-one by
+     * design — `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither
+     * of which a binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` would share
+     * a bucket, and a successful sign-in to the look-alike would `clear()` the victim's counter. The
+     * fold is deliberate for identifiers that name no account: without it an attacker spreads guesses
+     * across spellings and evades the bucket. So `AttemptLogin` resolves the account first and passes
+     * `lockoutSubject()`, which keys on identity when there is one and on the fold when there is not.
      *
      * Equality-compared only, so nothing else about the limiter changes. Existing buckets are
      * orphaned on deploy, which costs at most one decay window of counting.
      */
-    private function identifierKey(Request $request): string
+    private function identifierKey(Request $request, ?string $subject): string
     {
-        return hash('sha256', $this->identifier($request));
+        return hash('sha256', $subject ?? $this->identifier($request));
     }
 
     /** The guard this limiter is scoped to, so a lock on one guard can't reach another. */
