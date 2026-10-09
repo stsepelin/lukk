@@ -59,15 +59,15 @@ class RegisterRequest extends FormRequest
      * `registerValidation()` replaces the rules wholesale, and a consumer's set naturally omits a
      * hashing detail: under bcrypt an over-72-byte password was then stored truncated (NIST
      * SP 800-63B-4 §3.1.1.2), and an array or a NUL byte 500'd in the default create. Only with the
-     * hook set — the default rules already say all three — and only while lukk's own create runs: a
-     * `registerUsing()` hook stores the password its own way. And only for a password that is
-     * present, so a set that does not require one still decides that itself.
+     * hook set — the default rules already say all three — and the 72-byte rule only while lukk's own
+     * create runs. And only for a password that is present, so a set that does not require one still
+     * decides that itself.
      *
      * @return array<int, \Closure>
      */
     public function after(): array
     {
-        if (Lukk::$registerValidation === null || Lukk::$registerUsing !== null) {
+        if (Lukk::$registerValidation === null) {
             return [];
         }
 
@@ -91,7 +91,12 @@ class RegisterRequest extends FormRequest
                 return;
             }
 
-            (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', $message));
+            // bcrypt's own limit, so only for lukk's create: a `registerUsing()` hook may hand the
+            // password to an IdP that takes longer passphrases. The two checks above stand for it too —
+            // any hook that hashes would 500 on either.
+            if (Lukk::$registerUsing === null) {
+                (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', $message));
+            }
         }];
     }
 

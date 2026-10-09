@@ -228,3 +228,32 @@ it('fails closed on an mfa_max_age that is not a number', function () {
 
     stepUpWithPassword($this, rotate()($session->refreshToken)->accessToken)->assertStatus(422);
 });
+
+it('does not take an auth_time from the future for a recent one', function () {
+    // Lowering refresh_ttl — a normal hardening step — shifts the derived auth_time FORWARD, so a
+    // sign-in from weeks ago read as one from the future, and a negative age always passed.
+    $user = withTotp(User::factory()->create());
+    $old = $this->travel(-25)->days(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+    config(['lukk.refresh_ttl' => 86_400]);
+
+    stepUpWithPassword($this, rotate()($old->refreshToken)->accessToken)->assertStatus(422);
+});
+
+it('refuses, rather than 500s on, an auth_time no integer can hold', function (mixed $authTime) {
+    // A co-issuer holding the key can stamp anything; an out-of-range float cast to int raised a warning.
+    $user = withTotp(User::factory()->create());
+    $context = ctx($user->id, 'fam-forged');
+    $token = issuer()->accessToken($context, ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => $authTime], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus(422);
+})->with(['huge float' => [1e30], 'just past int range' => [9.3e18], 'numeric string' => ['1e999']]);
+
+it('allows a sign-in up to the leeway ahead of this clock, and no further', function (int $ahead, int $status) {
+    // Clock skew between servers in one deployment, nothing more.
+    $this->freezeSecond();
+    config(['lukk.leeway' => 5]);
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-skew'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => now()->getTimestamp() + $ahead], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus($status);
+})->with(['at the leeway' => [5, 200], 'past it' => [6, 422]]);

@@ -75,15 +75,22 @@ class EnsurePasswordStepUpMeetsAccountLevel
      */
     private function recent(mixed $authTime): bool
     {
-        if (! is_numeric($authTime)) {
+        // An integer or nothing: an out-of-range float from a co-issuer would make a cast warn (a 500),
+        // and a fraction is no sign-in time this server ever stamped.
+        $signedIn = filter_var($authTime, FILTER_VALIDATE_INT);
+
+        if ($signedIn === false) {
             return false;
         }
 
-        // Equivalent without the cast for every value `is_numeric` admits — PHP's arithmetic reads a
-        // numeric string the same way, and a fraction only ever widens the age it is compared with.
-        $signedIn = (int) $authTime; // @pest-mutate-ignore: RemoveIntegerCast
+        $config = Lukk::guardConfig();
+        $age = now()->getTimestamp() - $signedIn;
 
-        // Cast, unlike the line above: a garbled override must fail closed, not compare as a string.
-        return now()->getTimestamp() - $signedIn <= (int) (Lukk::guardConfig()['confirm']['mfa_max_age'] ?? 86400);
+        // A sign-in in the future is not a recent one. `auth_time` is derived as `expires_at - refresh_ttl`,
+        // so LOWERING refresh_ttl shifts every older session forward, and with no lower bound a session
+        // signed in weeks ago passed as brand new. Clock skew between servers gets the leeway.
+        // Cast, too: a garbled override must fail closed, not compare as a string.
+        return $age >= -Lukk::leeway($config)
+            && $age <= (int) ($config['confirm']['mfa_max_age'] ?? 86400);
     }
 }

@@ -91,7 +91,7 @@ it('does not take a refresh cookie in body mode, where no CSRF guard stands in f
         ->post('/auth/refresh')
         ->assertUnauthorized();
 
-    expect(fn () => rotate()($victim))->not->toThrow(Throwable::class);
+    expectNoThrow(fn () => rotate()($victim));
 });
 
 it('guards every route that sets the cookie', function (string $route) use ($crossSiteForm) {

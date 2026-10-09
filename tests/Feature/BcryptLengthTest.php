@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
@@ -142,9 +143,11 @@ it('refuses partial verification for every bcrypt prefix password_verify accepts
 it('refuses a NUL byte under a custom rule set, where the default create would 500 on it', function () {
     Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed']]);
 
-    $nul = "abc\0".str_repeat('d', 80); // long too, and still one answer, not two
-
-    $errors = $this->postJson('/auth/register', ['name' => 'n', 'email' => 'nul@y.com', 'password' => $nul, 'password_confirmation' => $nul])
+    // Short, so only the NUL check can refuse it; and long, so the answer stays single.
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'nul@y.com', 'password' => "abc\0def", 'password_confirmation' => "abc\0def"])
+        ->assertStatus(422)->assertJsonValidationErrors('password');
+    $nul = "abc\0".str_repeat('d', 80);
+    $errors = $this->postJson('/auth/register', ['name' => 'n', 'email' => 'nul2@y.com', 'password' => $nul, 'password_confirmation' => $nul])
         ->assertStatus(422)->json('errors.password');
     expect($errors)->toHaveCount(1);
 });
@@ -181,4 +184,24 @@ it('draws the line at 73 bytes against a stored hash, not further out', function
 it('answers false, not a TypeError, for an account with no stored password', function () {
     // Public, so a consumer may call it outside lukk's own order, where the credential check runs first.
     expect(HashablePassword::verifiesOnlyInPart(new GenericUser(['password' => null]), str_repeat('a', 80)))->toBeFalse();
+});
+
+it('still refuses an array or a NUL byte for a registerUsing hook, which would 500 hashing either', function (mixed $password) {
+    // The documented hook shape hands the password to `Hash::make`; only the 72-byte rule is bcrypt's own.
+    Lukk::registerValidation(fn () => ['email' => ['required', 'email'], 'password' => ['required']]);
+    Lukk::registerUsing(fn (array $payload) => User::forceCreate(['name' => 'n', 'email' => $payload['email'], 'password' => Hash::make($payload['password'])]));
+
+    $this->postJson('/auth/register', ['email' => 'hook2@y.com', 'password' => $password])->assertStatus(422)->assertJsonValidationErrors('password');
+})->with(['array' => [['x']], 'NUL byte' => ["abc\0def"]]);
+
+it('answers 422, not 500, at step-up and change-password on a stored hash the hasher refuses', function () {
+    // With `hashing.bcrypt.verify` on (the default), a `$2b$` row makes `Hash::check` throw. Sign-in
+    // already failed that closed; these two let it escape, and with the lockout on each 500 still cost
+    // an attempt.
+    $user = User::factory()->create();
+    DB::table('users')->where('id', $user->id)->update(['password' => '$2b$'.substr(password_hash('password', PASSWORD_BCRYPT, ['cost' => 4]), 4)]);
+    $access = $user->startSession()->accessToken;
+
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'password'])->assertStatus(422);
+    $this->withToken($access)->postJson('/auth/password', ['current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1'])->assertStatus(422);
 });

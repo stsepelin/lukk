@@ -220,6 +220,14 @@ class DatabaseLockoutRepository implements LockoutRepository
         }
     }
 
+    /** On the model's own connection and table name; not memoized, so a later migration is seen. */
+    private function published(): bool
+    {
+        $model = new Lockout;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
+    }
+
     /**
      * Whether this subject can be counted at all.
      *
@@ -231,14 +239,6 @@ class DatabaseLockoutRepository implements LockoutRepository
      * documents the constraint next to `features.lockout`; it cannot be checked at boot, because a
      * package provider boots before the application registers its `authenticateUsing` callback.
      */
-    /** On the model's own connection and table name; not memoized, so a later migration is seen. */
-    private function published(): bool
-    {
-        $model = new Lockout;
-
-        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
-    }
-
     private function usable(string $subject): bool
     {
         return $subject !== '' && $this->published();

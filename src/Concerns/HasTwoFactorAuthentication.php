@@ -6,7 +6,6 @@ namespace Lukk\Concerns;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Lukk\Support\RecoveryCode;
 
@@ -96,7 +95,9 @@ trait HasTwoFactorAuthentication
 
         // Lock, re-read and spend by VALUE: a concurrent redemption may have spent this code (or
         // another) since the read above, so it is spent only if it is still there.
-        return DB::transaction(function () use ($match) {
+        // On the user's OWN connection: a directory database is supported, and a transaction on the default
+        // one would leave this lock in autocommit, released at once — two redemptions could both spend it.
+        return $this->getConnection()->transaction(function () use ($match) {
             static::query()->whereKey($this->getKey())->lockForUpdate()->first();
             $this->refresh();
 

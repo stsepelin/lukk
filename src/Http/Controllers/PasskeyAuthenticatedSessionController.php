@@ -59,10 +59,12 @@ class PasskeyAuthenticatedSessionController
             return $this->twoFactorChallenge($user, $challengeTokens, $methods);
         }
 
-        // Only now, with a session granted, and only for a multi-factor assertion. It ends a run of
-        // password-confirm failures, so it must prove at least what a step-up would: a presence-only
-        // key is mere possession, and with a stolen access token it would wipe the count between
-        // password guesses forever (NIST SP 800-63B-4 §3.2.2). A refused sign-in proves nothing.
+        // Only now, with a session granted, and only for a multi-factor assertion. NIST SP 800-63B-4 §3.2.2
+        // asks to disregard failures only for the authenticator that then succeeded, and a passkey is not
+        // the password — so this is lukk's own recovery path, not the spec's: a user who verifies with a
+        // PIN or biometric is let out of a confirm lock a token thief may have run up. It must prove at
+        // least what a step-up would. A presence-only key is mere possession, and with a stolen access
+        // token it would wipe the count between password guesses forever; a refused sign-in proves nothing.
         if ($passkey->multiFactor) {
             $this->finishLogin->releaseConfirmLock($passkey);
         }

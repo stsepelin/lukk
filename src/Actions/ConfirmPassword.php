@@ -47,7 +47,16 @@ class ConfirmPassword
             $this->throwLocked('confirm', $subject, 'password');
         }
 
-        if (! $this->users->validateCredentials($user, ['password' => $password])) {
+        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
+        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
+        // can present — fail closed with the ordinary answer, not a 500.
+        try {
+            $valid = $this->users->validateCredentials($user, ['password' => $password]);
+        } catch (\Throwable) {
+            $valid = false;
+        }
+
+        if (! $valid) {
             throw ValidationException::withMessages(['password' => [__('The provided password is incorrect.')]]);
         }
 

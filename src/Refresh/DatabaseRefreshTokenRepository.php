@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Lukk\Refresh;
 
 use Closure;
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
@@ -28,7 +28,17 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     public function transaction(Closure $callback): mixed
     {
         /** @var Closure(): mixed $callback */
-        return DB::transaction($callback);
+        return $this->connection()->transaction($callback);
+    }
+
+    /**
+     * The connection the refresh-token model lives on. A transaction opened on the default one while the
+     * queries run on a `useRefreshTokenModel` subclass's own connection guards nothing: the row lock is
+     * taken in autocommit and released at once, so rotation and reuse detection stop being atomic.
+     */
+    private function connection(): ConnectionInterface
+    {
+        return $this->query()->getConnection();
     }
 
     public function findByHash(string $hash): ?RefreshTokenRecord
@@ -213,7 +223,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // each statement a fresh snapshot, and InnoDB's UPDATE is a current read, so a session committed
         // between the SELECT and an UPDATE by the user's query is visible to it. Revoked that way, it was never
         // denylisted and never returned: signed out on its next refresh, with nothing recorded as to why.
-        return DB::transaction(function () use ($constrain, $before) {
+        return $this->connection()->transaction(function () use ($constrain, $before) {
             $ids = $constrain($this->scoped())->distinct()->pluck('family_id')->all();
 
             // `$before` denylists, and it runs BEFORE the update and inside the transaction — the

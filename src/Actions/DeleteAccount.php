@@ -113,7 +113,7 @@ class DeleteAccount
             // artifact holding a PLAINTEXT email address of someone who asked to be forgotten. An
             // install that never ran the broker's migration has no table, and that is the only case
             // worth skipping.
-            if ($user instanceof CanResetPassword && $this->tableExists($this->passwordResetTable())) {
+            if ($user instanceof CanResetPassword && $this->resetTableExists()) {
                 /** @var PasswordBroker $broker */
                 $broker = Password::broker($this->passwordBroker);
                 $broker->deleteToken($user);
@@ -137,9 +137,13 @@ class DeleteAccount
      * leaks between tests in a shared process. Two cheap queries on an irreversible operation is not
      * a cost worth that.
      */
-    private function tableExists(string $table): bool
+    private function resetTableExists(): bool
     {
-        return Schema::hasTable($table);
+        // On the broker's OWN connection (`auth.passwords.*.connection`, which the framework's broker
+        // honours): checked on the default one, a table living elsewhere read as missing and the row —
+        // a plaintext email address — survived the erasure.
+        return Schema::connection(config("auth.passwords.{$this->brokerName()}.connection"))
+            ->hasTable($this->passwordResetTable());
     }
 
     /**
@@ -151,11 +155,14 @@ class DeleteAccount
      */
     private function passwordResetTable(): string
     {
-        // The casts only state types: a broker name only reaches a config key, where null and '' read
-        // the same, and a table name from config is a string.
-        $broker = $this->passwordBroker ?? (string) config('auth.defaults.passwords'); // @pest-mutate-ignore: RemoveStringCast
+        // The cast only states the type: a table name from config is a string.
+        return (string) (config("auth.passwords.{$this->brokerName()}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
+    }
 
-        return (string) (config("auth.passwords.{$broker}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
+    private function brokerName(): string
+    {
+        // The cast only states the type: a broker name only reaches a config key, where null and '' read the same.
+        return $this->passwordBroker ?? (string) config('auth.defaults.passwords'); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**
