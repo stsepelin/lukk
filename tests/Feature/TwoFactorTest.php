@@ -815,3 +815,22 @@ it('gives one session per challenge even when two redemptions read it as unspent
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'R-TWO'])
         ->assertStatus(422)->assertJsonValidationErrors('challenge_token');
 });
+
+it('answers 422, not 500, for a recovery code stored under a hasher the app has since left', function () {
+    // After a move to argon2id with `hashing.argon.verify` on, checking a bcrypt-hashed code THROWS
+    // ("does not use the Argon2id algorithm"), and the lost-authenticator path died with a 500. A
+    // code the active hasher refuses to read is no match, exactly as sign-in treats a password.
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString(app(TwoFactorProvider::class)->generateSecret()),
+        'two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-CODE-1')]),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+    config(['hashing.driver' => 'argon2id', 'hashing.argon.verify' => true]);
+    app()->forgetInstance('hash');
+    Hash::clearResolvedInstances();
+    DB::table('users')->where('id', $user->id)->update(['password' => Hash::make('password')]);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])->assertStatus(422);
+});

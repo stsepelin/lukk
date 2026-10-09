@@ -97,9 +97,19 @@ class FirebaseTokenVerifier implements TokenVerifier
             return null;
         }
 
-        // Require exp explicitly: the library only validates it when present.
-        if (! is_numeric($claims->exp ?? null)) {
+        // Require exp explicitly: the library only validates it when present. And every time claim must
+        // be a NumericDate (RFC 7519 §2) — a fraction is allowed — within a range a timestamp can
+        // mean. A co-issuer holding the key could otherwise stamp `exp: 1e30` (or `iat`
+        // beside an `nbf`, where the library skips its own iat check), and every later `(int)` cast of
+        // it warned into a 500: on logout, on logout-all, and with claim_seconds on, on every request.
+        if (! self::isNumericDate($claims->exp ?? null)) {
             return null;
+        }
+
+        foreach (['iat', 'nbf'] as $claim) {
+            if (property_exists($claims, $claim) && ! self::isNumericDate($claims->{$claim})) {
+                return null;
+            }
         }
 
         // Require a non-empty string sub before handing it to the user provider.
@@ -131,5 +141,20 @@ class FirebaseTokenVerifier implements TokenVerifier
 
         /** @var (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed}) $claims */
         return $claims;
+    }
+
+    /**
+     * A number between the epoch and the end of year 9999 — the range a timestamp can mean. A numeric
+     * string is tolerated, as some issuers send one (SessionClaimTest); the range is what matters.
+     */
+    private static function isNumericDate(mixed $value): bool
+    {
+        if (! is_int($value) && ! is_float($value) && ! is_numeric($value)) {
+            return false;
+        }
+
+        $number = (float) $value;
+
+        return is_finite($number) && $number >= 0 && $number <= 253402300799;
     }
 }

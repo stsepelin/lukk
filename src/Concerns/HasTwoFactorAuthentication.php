@@ -82,7 +82,16 @@ trait HasTwoFactorAuthentication
         $match = null;
 
         foreach ($this->recoveryCodeHashes() as $hash) {
-            if (Hash::check($code, $hash)) {
+            // A code stored under a hasher the app has since left (bcrypt, after a move to argon2id with
+            // `verify` on) makes the check THROW; it is no match, as sign-in treats such a password,
+            // rather than a 500 on the one path left to a user who lost their authenticator.
+            try {
+                $matches = Hash::check($code, $hash);
+            } catch (\Throwable) {
+                $matches = false;
+            }
+
+            if ($matches) {
                 $match = $hash;
 
                 break;

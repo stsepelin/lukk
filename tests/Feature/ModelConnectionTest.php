@@ -97,3 +97,40 @@ it('erases the reset row of a broker that keeps its table on another connection'
 
     expect(DB::connection('lukk_other')->table('password_reset_tokens')->count())->toBe(0);
 });
+
+it('keeps the default-connection erasure atomic when refresh tokens live on another connection', function () {
+    // The erasure transaction followed the refresh-token connection, so the passkey and reset-row
+    // deletes on the default one ran in autocommit: a disposal that then threw left an account that
+    // still exists with no way to sign in — the outcome the single transaction exists to prevent.
+    onOtherConnection(fn () => (require __DIR__.'/../../database/migrations/2026_01_01_000000_create_refresh_tokens_table.php')->up());
+    Lukk::useRefreshTokenModel(OtherConnectionRefreshToken::class);
+    config(['lukk.features.lockout' => true]);
+    $user = User::factory()->create(['email' => 'atomic@y.com']);
+    DB::table('passkeys')->insert(['credential_id' => 'c1', 'user_id' => $user->id, 'guard' => Lukk::currentGuard(), 'public_key' => 'x', 'sign_count' => 0]);
+    Password::broker()->createToken($user);
+    Lukk::deleteUserUsing(fn () => throw new RuntimeException('disposal failed'));
+
+    expect(fn () => app(DeleteAccount::class)($user))->toThrow(RuntimeException::class, 'disposal failed');
+
+    expect(User::query()->whereKey($user->id)->exists())->toBeTrue()
+        ->and(DB::table('passkeys')->where('user_id', $user->id)->count())->toBe(1)
+        ->and(DB::table('password_reset_tokens')->count())->toBe(1);
+});
+
+it('rolls back the reset-row delete on the broker\'s own connection when the disposal fails', function () {
+    onOtherConnection(fn () => Schema::create('password_reset_tokens', function (Blueprint $table) {
+        $table->string('email')->primary();
+        $table->string('token');
+        $table->timestamp('created_at')->nullable();
+    }));
+    config(['auth.passwords.users.connection' => 'lukk_other']);
+    app()->forgetInstance('auth.password');
+    Password::clearResolvedInstances();
+    $user = User::factory()->create(['email' => 'broker-atomic@y.com']);
+    Password::broker()->createToken($user);
+    Lukk::deleteUserUsing(fn () => throw new RuntimeException('disposal failed'));
+
+    expect(fn () => app(DeleteAccount::class)($user))->toThrow(RuntimeException::class, 'disposal failed');
+
+    expect(DB::connection('lukk_other')->table('password_reset_tokens')->count())->toBe(1);
+});

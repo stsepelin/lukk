@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Closure;
 use Illuminate\Auth\Passwords\PasswordBroker;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\CanResetPassword;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Auth\LoginRateLimiter;
@@ -77,7 +79,11 @@ class DeleteAccount
 
         ($this->revokeAllSessions)($userId);
 
-        $this->tokens->transaction(function () use ($user, $userId, $identifier): void {
+        // Every connection the erasure writes to, nested so a shared one becomes a savepoint: the token
+        // store's (which may be a `useRefreshTokenModel` connection of its own), and outside it the
+        // default one (passkeys, lockouts) and the broker's. Opening only the token store's left the
+        // others in autocommit, so a disposal that threw kept the user and lost their credentials.
+        $this->acrossConnections(fn () => $this->tokens->transaction(function () use ($user, $userId, $identifier): void {
             event(new AccountDeleting($user, $this->guard));
 
             $this->tokens->deleteForUser($userId);
@@ -123,7 +129,7 @@ class DeleteAccount
             // An app that anonymizes instead of deleting must clear them itself — the callback is
             // the only thing that knows the row survives, so it is the only thing that can.
             $this->disposeOf($user);
-        });
+        }));
 
         event(new AccountDeleted($userId, $identifier, $this->guard));
     }
@@ -166,9 +172,23 @@ class DeleteAccount
     }
 
     /**
+     * Run `$callback` inside a transaction on the broker's connection and the default one. The same
+     * connection named twice nests as a savepoint.
+     *
+     * @param  Closure(): void  $callback
+     */
+    private function acrossConnections(Closure $callback): void
+    {
+        $default = DB::getDefaultConnection();
+        $broker = (string) (config("auth.passwords.{$this->brokerName()}.connection") ?? $default);
+
+        DB::connection($broker)->transaction(fn () => DB::connection($default)->transaction($callback));
+    }
+
+    /**
      * Run the disposal inside a transaction on the USER's own connection.
      *
-     * The surrounding transaction belongs to lukk's connection. When the provider model lives on a
+     * The surrounding transactions cover lukk's own connections. When the provider model lives on a
      * different one — identities in a shared directory database, application tables local — the
      * disposal ran with no transaction at all: it committed the moment it executed, so a rollback
      * afterwards restored the refresh tokens, passkeys, lockouts and reset row around a user that

@@ -246,14 +246,21 @@ it('refuses, rather than 500s on, an auth_time no integer can hold', function (m
     $token = issuer()->accessToken($context, ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => $authTime], null)['token'];
 
     stepUpWithPassword($this, $token)->assertStatus(422);
-})->with(['huge float' => [1e30], 'just past int range' => [9.3e18], 'numeric string' => ['1e999']]);
+})->with([
+    'huge float' => [1e30],
+    'just past int range' => [9.3e18],
+    'numeric string' => ['1e999'],
+    // Accepted before: the cast truncated it to a recent second. No sign-in this server stamps has a fraction.
+    'a fraction of a second ago' => [fn () => time() - 0.5],
+]);
 
 it('allows a sign-in up to the leeway ahead of this clock, and no further', function (int $ahead, int $status) {
     // Clock skew between servers in one deployment, nothing more.
     $this->freezeSecond();
-    config(['lukk.leeway' => 5]);
+    // Not the default (5), so the configured value is what is read.
+    config(['lukk.leeway' => 20]);
     $user = withTotp(User::factory()->create());
     $token = issuer()->accessToken(ctx($user->id, 'fam-skew'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => now()->getTimestamp() + $ahead], null)['token'];
 
     stepUpWithPassword($this, $token)->assertStatus($status);
-})->with(['at the leeway' => [5, 200], 'past it' => [6, 422]]);
+})->with(['at the leeway' => [20, 200], 'past it' => [21, 422]]);

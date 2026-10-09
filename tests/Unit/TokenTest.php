@@ -408,3 +408,26 @@ it('reads an aud another issuer encoded as a number', function () {
 
     expect(verifier()->verify($token))->not->toBeNull();
 });
+
+it('refuses a time claim no integer can hold, and keeps a fractional one RFC 7519 allows', function (string $claim, mixed $value, bool $accepted) {
+    // A co-issuer holding the key could stamp `exp: 1e30` (or `iat: 1e30` beside an `nbf`, where the
+    // library skips its own iat check); every later `(int)` cast of it warned into a 500 — on logout,
+    // logout-all, and with claim_seconds on, every authenticated request. NumericDate may be
+    // non-integer (§2), so a fraction near now stays valid; a value past year 9999 does not.
+    $claims = [
+        'iss' => config('lukk.issuer'), 'aud' => config('lukk.audience'), 'sub' => '1', 'jti' => 'j-time', 'fid' => 'f-time',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $claims[$claim] = $value;
+    $token = JWT::encode($claims, config('lukk.secret'), 'HS256', head: ['typ' => 'at+jwt']);
+
+    expect(verifier()->verify($token) !== null)->toBe($accepted);
+})->with([
+    'huge exp' => ['exp', 1e30, false],
+    'huge iat beside nbf' => ['iat', 1e30, false],
+    'huge nbf' => ['nbf', -1e30, false],
+    'exp as a numeric string, which some issuers send' => ['exp', (string) (time() + 900), true],
+    'exp as a huge numeric string' => ['exp', '1e30', false],
+    'fractional exp' => ['exp', time() + 900.5, true],
+    'fractional iat' => ['iat', time() - 0.5, true],
+]);
