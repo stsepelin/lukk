@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Lukk\Actions\Concerns\ComputesDenylistTtl;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\StartSession;
@@ -11,6 +12,7 @@ use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Support\Abilities;
 use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
+use Lukk\Tests\Fixtures\LocklessStore;
 use Lukk\Tests\Fixtures\User;
 
 function denylistTtl(array $config): int
@@ -259,4 +261,15 @@ it('reads the longest minted lifetime from the configured denylist store, not th
     LongestAccessTtl::record(3600, 'api', 'lukk-deny');
 
     expect(denylistTtl(['access_ttl' => 300, 'leeway' => 5, 'denylist_store' => 'lukk-deny']))->toBe(3605);
+});
+
+it('records lifetimes in a store that cannot lock', function () {
+    // The index write is serialised under a lock only where the store offers one.
+    $store = new LocklessStore;
+    Cache::extend('lockless', fn () => Cache::repository($store));
+    config(['cache.stores.lukk-lockless' => ['driver' => 'lockless']]);
+
+    LongestAccessTtl::record(1800, 'api', 'lukk-lockless');
+
+    expect(LongestAccessTtl::current('api', 'lukk-lockless'))->toBe(1800);
 });

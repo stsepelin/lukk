@@ -310,3 +310,12 @@ it('honours a never-expiring mfa_max_age, down to the epoch and no further', fun
     'a second before it' => [PHP_INT_MAX, -1, 422],
     'past the int range' => [1e30, 0, 200],
 ]);
+
+it('takes a multi-factor token with no usable auth_time for no recent sign-in', function (mixed $authTime) {
+    // A co-issuer's token may omit it or carry something else; neither vouches for a password step-up.
+    $user = withTotp(User::factory()->create());
+    $claims = ['amr' => ['pwd', 'otp', 'mfa']] + ($authTime === 'absent' ? [] : ['auth_time' => $authTime]);
+    $token = issuer()->accessToken(ctx($user->id, 'fam-none'), $claims, null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus(422);
+})->with(['absent' => ['absent'], 'a word' => ['yesterday'], 'a list' => [[1, 2]]]);
