@@ -554,12 +554,15 @@ return [
         | Challenge Lifetime
         |--------------------------------------------------------------------------
         |
-        | How long, in seconds, a WebAuthn challenge stays valid while the user
-        | completes the registration or login ceremony.
+        | How long, in seconds, the browser may prompt for a registration or
+        | login ceremony (sent as the WebAuthn `timeout`). Five minutes is the
+        | WebAuthn L3 recommendation for a ceremony that verifies the user. The
+        | server keeps the challenge 30 seconds longer, for the answer still in
+        | transit when the prompt closes.
         |
         */
 
-        'challenge_ttl' => (int) env('LUKK_PASSKEY_CHALLENGE_TTL', 120),
+        'challenge_ttl' => (int) env('LUKK_PASSKEY_CHALLENGE_TTL', 300),
 
         /*
         |--------------------------------------------------------------------------

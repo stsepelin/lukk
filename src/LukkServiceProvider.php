@@ -93,6 +93,9 @@ use Webauthn\AuthenticatorAttestationResponseValidator;
 
 class LukkServiceProvider extends ServiceProvider
 {
+    /** How long a passkey challenge outlives the prompt the browser was told to show. */
+    private const CEREMONY_TRANSIT_SECONDS = 30;
+
     public function register(): void
     {
         $this->mergeConfigDeep(__DIR__.'/../config/lukk.php', 'lukk');
@@ -223,7 +226,11 @@ class LukkServiceProvider extends ServiceProvider
             // Unguarded, a missing key is a TTL of 0 — and the cache FORGETS a key written with a
             // non-positive TTL, so the ceremony's challenge is gone before the authenticator answers
             // and every passkey login and registration fails.
-            $this->cacheStore(), (int) ($this->config()['passkeys']['challenge_ttl'] ?? 120),
+            //
+            // Plus a margin: the prompt may close at exactly `challenge_ttl` (WebAuthn L3 §5.4, §5.5) and the
+            // assertion still has to reach this server, so forgetting the challenge at the same instant
+            // refused a user who answered at the last moment.
+            $this->cacheStore(), (int) ($this->config()['passkeys']['challenge_ttl'] ?? 300) + self::CEREMONY_TRANSIT_SECONDS,
         ));
 
         // Shares the revocation store: a marker has to be visible to every worker, exactly like the
@@ -244,7 +251,7 @@ class LukkServiceProvider extends ServiceProvider
                 'origins' => $passkeys['origins'] ?? [],
                 'user_verification' => $passkeys['user_verification'] ?? 'required',
                 // The prompt closes when the server forgets the challenge (WebAuthn L3 §5.4, §5.5).
-                'timeout' => 1000 * (int) ($passkeys['challenge_ttl'] ?? 120),
+                'timeout' => 1000 * (int) ($passkeys['challenge_ttl'] ?? 300),
             ]);
         });
     }
