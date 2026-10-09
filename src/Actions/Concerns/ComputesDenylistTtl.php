@@ -27,11 +27,13 @@ trait ComputesDenylistTtl
     /**
      * @param  array<string, mixed>  $config
      */
-    private function denylistTtl(array $config): int
+    private function denylistTtl(array $config, string $guard): int
     {
         // The configured lifetime, or the longest one minted that may still be alive if that is longer —
         // `access_ttl` lowered since (see `LongestAccessTtl`).
-        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current()) + (int) ($config['leeway'] ?? 5);
+        // The guard and store the CALLER was built for, never the ambient ones: an action resolved under one
+        // guard and run under another (a queued job) read the wrong record and under-covered.
+        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + (int) ($config['leeway'] ?? 5);
 
         // The configured window is only exact while every access token's `exp` really is
         // `iat + lukk.access_ttl`. Two ordinary things break that, and both under-cover the revoke:

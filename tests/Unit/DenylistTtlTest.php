@@ -6,6 +6,8 @@ use Illuminate\Http\Request;
 use Lukk\Actions\Concerns\ComputesDenylistTtl;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\StartSession;
+use Lukk\Contracts\Denylist;
+use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Support\Abilities;
 use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
@@ -19,7 +21,7 @@ function denylistTtl(array $config): int
 
         public function of(array $config): int
         {
-            return $this->denylistTtl($config);
+            return $this->denylistTtl($config, 'api');
         }
     };
 
@@ -143,15 +145,16 @@ it('covers a presented token lukk never recorded minting, such as a co-issuer\'s
     VerifiedToken::put($request, new VerifiedToken(guard: 'api', userId: '1', userClass: User::class, familyId: 'fam', abilities: Abilities::fromArray([]), claims: $claims));
     app()->instance('request', $request);
 
-    expect(LongestAccessTtl::current())->toBe(0)
+    expect(LongestAccessTtl::current('api'))->toBe(0)
         ->and(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBeGreaterThanOrEqual(3600)->toBeLessThanOrEqual(3605);
 });
 
 it('reads the recorded lifetime as an integer, whatever the store hands back', function () {
     // Redis returns what it stores as a string.
-    cache()->store()->put('lukk:longest-access-ttl:api', '1800', 60);
+    cache()->store()->put('lukk:access-ttls:api', ['1800'], 60);
+    cache()->store()->put('lukk:access-ttl:api:1800', true, 60);
 
-    expect(LongestAccessTtl::current())->toBe(1800);
+    expect(LongestAccessTtl::current('api'))->toBe(1800);
 });
 
 it('decodes a stored amr up to its cap, and a list as a list', function () {
@@ -185,7 +188,7 @@ it('records the lifetime a rotation mints, as a sign-in does', function () {
 
     rotate()($pair->refreshToken);
 
-    expect(LongestAccessTtl::current())->toBe(1800);
+    expect(LongestAccessTtl::current('api'))->toBe(1800);
 });
 
 it('uses the configured window when no request is bound at all, as in a queued job', function () {
@@ -195,8 +198,58 @@ it('uses the configured window when no request is bound at all, as in a queued j
 });
 
 it('records no lifetime that is not positive', function () {
-    LongestAccessTtl::record(0);
-    LongestAccessTtl::record(-5);
+    LongestAccessTtl::record(0, 'api');
+    LongestAccessTtl::record(-5, 'api');
 
-    expect(LongestAccessTtl::current())->toBe(0);
+    expect(LongestAccessTtl::current('api'))->toBe(0);
+});
+
+it('keeps each guard\'s record apart, and reads the one the revoke was built for', function () {
+    // A revoke resolved under one guard and run under another (a queued job) read the AMBIENT guard's
+    // record and denylisted for its shorter window, so the other guard's long token verified again.
+    LongestAccessTtl::record(3600, 'admin');
+
+    expect(LongestAccessTtl::current('admin'))->toBe(3600)
+        ->and(LongestAccessTtl::current('api'))->toBe(0);
+
+    app()->instance(Denylist::class, $spy = new class implements Denylist
+    {
+        public array $ttls = [];
+
+        public function revokeJti(string $jti, int $ttlSeconds): void {}
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->ttls[] = $ttlSeconds;
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return false;
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return false;
+        }
+    });
+    $revoke = new RevokeSession(app(RefreshTokenRepository::class), $spy, ['access_ttl' => 300, 'leeway' => 5], 'admin');
+
+    $revoke('fam');
+
+    expect($spy->ttls)->toBe([3605]);
+});
+
+it('remembers a longer lifetime minted alongside a shorter one, whichever is recorded last', function () {
+    // The old record kept one shared maximum, read and then written: a concurrent shorter mint could
+    // overwrite a longer one. Each lifetime now has its own key.
+    LongestAccessTtl::record(3600, 'api');
+    LongestAccessTtl::record(300, 'api');
+
+    expect(LongestAccessTtl::current('api'))->toBe(3600);
+
+    $this->travel(3601)->seconds();
+    LongestAccessTtl::record(300, 'api');
+
+    expect(LongestAccessTtl::current('api'))->toBe(300);
 });

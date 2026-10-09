@@ -22,11 +22,13 @@ class RevokeAllSessions
         private readonly RefreshTokenRepository $repository,
         private readonly Denylist $denylist,
         private readonly array $config,
+        /** Captured with the config, so a revoke run outside the guard it was built for still covers its tokens. */
+        private readonly string $guard = 'api',
     ) {}
 
     public function __invoke(int|string $userId): void
     {
-        $ttl = $this->denylistTtl($this->config);
+        $ttl = $this->denylistTtl($this->config, $this->guard);
 
         // Denylisted inside the repository's transaction and BEFORE the rows are revoked — see
         // `RevokeSession` for why that direction is the safe one to fail in.

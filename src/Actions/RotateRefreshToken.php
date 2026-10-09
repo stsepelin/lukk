@@ -336,7 +336,7 @@ class RotateRefreshToken
         assert($outcome->access !== null && $outcome->refreshSecret !== null); // @pest-mutate-ignore: BooleanAndToBooleanOr,RemoveFunctionCall
 
         // After commit, never under the row lock: see `LongestAccessTtl`.
-        LongestAccessTtl::record((int) $outcome->access['expires_in']); // @pest-mutate-ignore: RemoveIntegerCast
+        LongestAccessTtl::record((int) $outcome->access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null); // @pest-mutate-ignore: RemoveIntegerCast
 
         return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
     }

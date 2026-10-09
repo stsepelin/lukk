@@ -24,6 +24,8 @@ class RevokeSession
         private readonly RefreshTokenRepository $repository,
         private readonly Denylist $denylist,
         private readonly array $config,
+        /** Captured with the config, so a revoke run outside the guard it was built for still covers its tokens. */
+        private readonly string $guard = 'api',
         /** Null unless this guard's `claim_seconds` is on. */
         private readonly ?UnclaimedSessions $unclaimed = null,
     ) {}
@@ -32,7 +34,7 @@ class RevokeSession
     {
         // Denylist FIRST: if the second write fails, a leftover denylist entry is harmless, whereas a
         // DB revoke with no denylist entry would leave the family's access tokens live until expiry.
-        $this->denylist->revokeFamily($familyId, $this->denylistTtl($this->config));
+        $this->denylist->revokeFamily($familyId, $this->denylistTtl($this->config, $this->guard));
         $this->repository->revokeFamily($familyId);
 
         // Last: a revoked family's marker is harmless (the denylist and the rows already refuse it),

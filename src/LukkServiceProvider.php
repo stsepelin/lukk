@@ -312,7 +312,7 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard(),
             $this->unclaimedSessions($app)));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(),
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard(),
             $this->unclaimedSessions($app)));
         $this->app->bind(ClaimSession::class, fn ($app) => new ClaimSession(
             $app->make(UnclaimedSessions::class), $app->make(RevokeSession::class),
@@ -322,9 +322,9 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeSession::class), $app->make(Denylist::class), $app->make(RateLimiter::class),
             Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeOtherSessions::class, fn ($app) => new RevokeOtherSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
             $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard(),

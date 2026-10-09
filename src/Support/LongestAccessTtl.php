@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Support;
 
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Repository;
-use Lukk\Lukk;
 
 /**
  * The longest access-token lifetime this guard has minted, for as long as a token of that length can
@@ -19,33 +19,62 @@ use Lukk\Lukk;
  */
 class LongestAccessTtl
 {
-    public static function record(int $ttl): void
+    /**
+     * Record one mint's lifetime. ONE write, and never a read-modify-write of a shared maximum: a key per
+     * lifetime, living exactly as long as that lifetime. A shared "longest so far" read then written lost
+     * a concurrent longer value — in a rolling deploy lowering `access_ttl`, the very case this exists
+     * for. The small index of lifetimes seen is touched only when a new value appears, under a lock where
+     * the store has one.
+     */
+    public static function record(int $ttl, string $guard, ?string $store = null): void
     {
         if ($ttl <= 0) {
             return;
         }
 
-        $store = self::store();
+        $cache = cache()->store($store);
+        $cache->put(self::key($guard, $ttl), true, $ttl);
 
-        // Only a lifetime at least as long replaces the record, and it restarts the clock: the record
-        // must outlive the newest token of the longest length.
-        if ($ttl >= (int) $store->get(self::key(), 0)) {
-            $store->put(self::key(), $ttl, $ttl);
+        if (in_array($ttl, self::index($cache, $guard), true)) {
+            return;
         }
+
+        $add = fn () => $cache->forever(self::indexKey($guard), array_values(array_unique([...self::index($cache, $guard), $ttl])));
+        $lockable = $cache->getStore();
+
+        $lockable instanceof LockProvider
+            ? $lockable->lock(self::indexKey($guard).':lock', 5)->block(5, $add)
+            : $add();
     }
 
-    public static function current(): int
+    /** The longest lifetime minted on this guard of which a token may still be alive, or 0. */
+    public static function current(string $guard, ?string $store = null): int
     {
-        return (int) self::store()->get(self::key(), 0);
+        $cache = cache()->store($store);
+
+        return array_reduce(
+            self::index($cache, $guard),
+            fn (int $longest, int $ttl) => $ttl > $longest && $cache->has(self::key($guard, $ttl)) ? $ttl : $longest,
+            0,
+        );
     }
 
-    private static function store(): Repository
+    /** @return list<int> */
+    private static function index(Repository $cache, string $guard): array
     {
-        return cache()->store(Lukk::guardConfig()['denylist_store'] ?? null);
+        $index = $cache->get(self::indexKey($guard), []);
+
+        // Integers only: a store that hands values back as strings (Redis) or a hand-edited entry.
+        return is_array($index) ? array_values(array_map('intval', array_filter($index, 'is_numeric'))) : [];
     }
 
-    private static function key(): string
+    private static function key(string $guard, int $ttl): string
     {
-        return 'lukk:longest-access-ttl:'.Lukk::currentGuard();
+        return 'lukk:access-ttl:'.$guard.':'.$ttl;
+    }
+
+    private static function indexKey(string $guard): string
+    {
+        return 'lukk:access-ttls:'.$guard;
     }
 }
