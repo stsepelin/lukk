@@ -300,6 +300,7 @@ it('leaves no guarded config read unexercised', function () {
         'features.change_password' => 'defaults true; route mount pinned by ChangePasswordTest',
         'features.email_verification' => 'defaults false; absent disables an optional feature',
         'features.lockout' => 'defaults false; absent disables an optional feature',
+        'features.passkeys' => 'defaults false; absent skips the passkey half of the password step-up check (PasswordStepUpLevelTest)',
         'features.abilities' => 'defaults false; absent disables an optional feature',
         'features.logout_all' => 'defaults true; route mount pinned by LogoutAllDisabledTest',
         // Fails CLOSED if it flips: the gate stays on for a pinned token.

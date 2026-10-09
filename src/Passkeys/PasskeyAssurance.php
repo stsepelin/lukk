@@ -37,6 +37,12 @@ class PasskeyAssurance
             return true;
         }
 
+        return $this->hasMultiFactorCredential($user);
+    }
+
+    /** Whether any of the account's passkeys has shown user verification, so it alone reaches AAL2. */
+    public function hasMultiFactorCredential(Authenticatable $user): bool
+    {
         foreach ($this->passkeys->credentialIdsFor($user->getAuthIdentifier()) as $credentialId) {
             $record = $this->passkeys->findByCredentialId($credentialId);
 
