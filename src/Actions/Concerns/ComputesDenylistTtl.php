@@ -67,8 +67,9 @@ trait ComputesDenylistTtl
         try {
             $token = VerifiedToken::current(app('request'));
         } catch (\Throwable) {
-            // No request bound at all (console, queue). Nothing to learn; the configured window stands.
-            return 0;
+            // No request bound at all (console, queue). Nothing to learn; the configured window stands. As
+            // below, any value at or below that window is equivalent: the caller takes the larger.
+            return 0; // @pest-mutate-ignore: DecrementInteger,IncrementInteger
         }
 
         // `?? null` already absorbs a missing token; the `?->` states that it may be one.

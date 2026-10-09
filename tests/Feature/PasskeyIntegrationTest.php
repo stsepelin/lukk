@@ -281,3 +281,12 @@ it('steps up with the owner bound as the expected user handle, through the real 
     $this->withToken($access)->postJson('/auth/confirm-passkey', ['ceremony_id' => $start['ceremony_id'], 'credential' => $assertion])
         ->assertOk()->assertJsonStructure(['confirmation_token']);
 })->with(['with the user handle' => true, 'without one' => false]);
+
+it('offers a ceremony without a timeout, rather than a 500, on a garbled challenge_ttl', function () {
+    // A string from a hand-edited config must degrade like a missing value, not fail every passkey route.
+    config(['lukk.passkeys.challenge_ttl' => 'five minutes']);
+
+    $options = $this->postJson('/auth/passkeys/login-options')->assertOk()->json('options');
+
+    expect($options)->not->toHaveKey('timeout');
+});

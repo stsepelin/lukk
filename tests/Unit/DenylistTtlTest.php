@@ -253,3 +253,10 @@ it('remembers a longer lifetime minted alongside a shorter one, whichever is rec
 
     expect(LongestAccessTtl::current('api'))->toBe(300);
 });
+
+it('reads the longest minted lifetime from the configured denylist store, not the default one', function () {
+    config(['cache.stores.lukk-deny' => ['driver' => 'array']]);
+    LongestAccessTtl::record(3600, 'api', 'lukk-deny');
+
+    expect(denylistTtl(['access_ttl' => 300, 'leeway' => 5, 'denylist_store' => 'lukk-deny']))->toBe(3605);
+});

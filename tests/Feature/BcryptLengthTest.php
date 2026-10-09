@@ -2,9 +2,11 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
 use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 use Lukk\Tests\Fixtures\User;
 
 /*
@@ -167,4 +169,16 @@ it('names the field when a custom rule set let an array password through', funct
 
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'arr2@y.com', 'password' => ['x'], 'password_confirmation' => ['x']])
         ->assertStatus(422)->assertJsonPath('errors.password.0', 'The password field must be a string.');
+});
+
+it('draws the line at 73 bytes against a stored hash, not further out', function () {
+    $user = User::factory()->create(['email' => 'b73@y.com']);
+    DB::table('users')->where('id', $user->id)->update(['password' => password_hash(str_repeat('c', 73), PASSWORD_BCRYPT, ['cost' => 4])]);
+
+    $this->postJson('/auth/login', ['email' => 'b73@y.com', 'password' => str_repeat('c', 73)])->assertStatus(422);
+});
+
+it('answers false, not a TypeError, for an account with no stored password', function () {
+    // Public, so a consumer may call it outside lukk's own order, where the credential check runs first.
+    expect(HashablePassword::verifiesOnlyInPart(new GenericUser(['password' => null]), str_repeat('a', 80)))->toBeFalse();
 });
