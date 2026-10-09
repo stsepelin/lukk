@@ -242,16 +242,14 @@ simply ignored, as they always were. Delete them to avoid implying they are swit
 The read-side mirror of `forget()`, used by the account export: it must reach exactly the rows
 `forget()` deletes, scoped to the guard. The export response gains a `lockouts` key.
 
-### Login failure counters key on the account, and non-account locks store a digest
+### A sign-in no longer resets the account-wide login bucket, and non-account locks store a digest
 
-**Low impact — no action for most apps.** Each login attempt now counts against the account the
-identifier names as well as against the folded identifier, and either trips the throttle. The new
-account buckets start empty on deploy. A persistent lock on an identifier that
+**Low impact — no action for most apps.** A successful sign-in now clears only the caller's
+per-address login bucket; the IP-independent `account_max_attempts` bucket decays instead of resetting.
+A user who mistypes often may meet that cap after a success where before they would not. A persistent lock on an identifier that
 names no account is now stored as `idn:sha256:<digest>` rather than the identifier in plain text.
 Locks written before the upgrade keep their old key: `lukk:release`, account erasure and the export
-still find them. A `Lukk::authenticateUsing` app with the lockout OFF keeps the old bucket keying,
-since its `lukk.username` may name no column. If you call `LoginRateLimiter` yourself, its methods
-take an optional trailing `?string $subject`.
+still find them.
 
 ### Three request rules a client can hit
 

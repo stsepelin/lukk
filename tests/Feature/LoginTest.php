@@ -849,3 +849,70 @@ it('attempts no upgrade, and reports nothing, for a user that is not an Eloquent
     Exceptions::assertNothingReported();
     expect((string) DB::table('users')->where('id', $user->id)->value('password'))->toBe($before);
 });
+
+it('gives a real account and a non-account the same throttle timing, whatever spellings are mixed', function () {
+    // Any bucket only a real account has is visible through its timer, even when the gate itself answers
+    // alike: a spelling the database does not resolve (another case on a binary collation, a Cyrillic а)
+    // counts only in the fold, so the account's own bucket drifts from it, and both the Retry-After and,
+    // after one bucket expires, the status itself told the two apart.
+    $this->freezeSecond();
+    config(['lukk.rate_limits.login.max_attempts' => 3, 'lukk.rate_limits.login.account_max_attempts' => 100]);
+    User::factory()->create(['email' => 'real@y.com', 'password' => bcrypt('correct')]);
+
+    $probe = function (string $email) {
+        $this->postJson('/auth/login', ['email' => strtoupper($email), 'password' => 'wrong']);
+        $this->travel(40)->seconds();
+        $this->postJson('/auth/login', ['email' => $email, 'password' => 'wrong']);
+        $this->postJson('/auth/login', ['email' => $email, 'password' => 'wrong']);
+        $throttled = $this->postJson('/auth/login', ['email' => $email, 'password' => 'wrong']);
+        $this->travel(25)->seconds();
+        $this->postJson('/auth/login', ['email' => $email, 'password' => 'wrong']);
+        $after = $this->postJson('/auth/login', ['email' => $email, 'password' => 'wrong']);
+
+        return [$throttled->status(), $throttled->json('message'), $after->status()];
+    };
+
+    expect($probe('real@y.com'))->toBe($probe('ghost@y.com'));
+});
+
+it('lets a success reset the caller\'s own per-address count, but not the account-wide one', function () {
+    // The IP-independent bucket only decays. A success clearing it is what let a look-alike account's
+    // owner — sharing the fold — reset the victim's count; letting it decay costs a real user nothing
+    // short of `account_max_attempts` failures inside one window.
+    config(['lukk.rate_limits.login.max_attempts' => 3, 'lukk.rate_limits.login.account_max_attempts' => 4]);
+    User::factory()->create(['email' => 'own@y.com', 'password' => bcrypt('correct')]);
+
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'wrong'])->assertStatus(422);
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'wrong'])->assertStatus(422);
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'correct'])->assertOk();
+
+    // Two more failures fit: the per-address bucket (3) was reset by the success. The account-wide one
+    // (4) was not, so the attempt after them is refused.
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'wrong'])->assertStatus(422);
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'wrong'])->assertStatus(422);
+    $this->postJson('/auth/login', ['email' => 'own@y.com', 'password' => 'wrong'])->assertStatus(429);
+});
+
+it('keeps the session when a password mutator hashes what it is given', function () {
+    // The upgraded hash is put on the model as stored. Through `setAttribute()` a legacy
+    // `setPasswordAttribute()` hashed the hash in memory, so the session's fingerprint matched nothing
+    // stored and the first sign-in after a cost bump answered 422.
+    $user = MutatingPasswordUser::query()->create(['name' => 'm', 'email' => 'mut@y.com', 'password' => 'plain-ignored']);
+    DB::table('users')->where('id', $user->id)->update(['password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    config(['auth.providers.users.model' => MutatingPasswordUser::class]);
+    app('auth')->forgetGuards();
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => 'mut@y.com', 'password' => 'password'])->assertOk();
+});
+
+class MutatingPasswordUser extends User
+{
+    protected $table = 'users';
+
+    public function setPasswordAttribute(string $value): void
+    {
+        $this->attributes['password'] = Hash::make($value);
+    }
+}

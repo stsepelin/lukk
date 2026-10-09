@@ -56,9 +56,11 @@ it('does not let two identifiers that HTML-entity-fold together share a bucket',
     expect($lookalike)->not->toBe($victim);
 });
 
-it('clears both buckets on a successful sign-in', function () {
-    // The account bucket survives an IP change by design, so leaving it behind means a user who
-    // finally gets their password right still carries the failures to their next attempt.
+it('clears only the per-address bucket on a successful sign-in', function () {
+    // It used to clear the account bucket too. That bucket is keyed on the identifier fold, which a
+    // look-alike account shares, so its owner could sign in to reset the victim's IP-independent count
+    // between bursts. It now only decays; a real user loses nothing short of `account_max_attempts`
+    // failures in one window.
     $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 5);
     $request = loginRequest();
     $limiter->increment($request);
@@ -66,7 +68,7 @@ it('clears both buckets on a successful sign-in', function () {
     $limiter->clear($request);
 
     expect(app(RateLimiter::class)->attempts($limiter->key($request)))->toBe(0)
-        ->and(app(RateLimiter::class)->attempts($limiter->accountKey($request)))->toBe(0);
+        ->and(app(RateLimiter::class)->attempts($limiter->accountKey($request)))->toBe(1);
 });
 
 it('normalizes an identifier before it becomes a bucket', function () {
@@ -86,14 +88,10 @@ it('hashes an identifier longer than 190 characters, and keeps one that is not',
         ->and(LoginRateLimiter::normalize($at191))->toBe('sha256:'.hash('sha256', $at191));
 });
 
-it('keys on the subject it is handed, and on the identifier fold without one', function () {
+it('keys a request with no identifier at all, rather than raising a TypeError', function () {
     $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 5, 'email', 'admin');
-    $request = loginRequest('ADA@example.test');
 
-    expect($limiter->accountKey($request, 'id:7'))->toBe('acct|admin|'.hash('sha256', 'id:7'))
-        ->and($limiter->accountKey($request))->toBe('acct|admin|'.hash('sha256', 'ada@example.test'))
-        // A request with no identifier at all still has a key, rather than a TypeError.
-        ->and($limiter->accountKey(Request::create('/auth/login', 'POST')))->toBe('acct|admin|'.hash('sha256', ''));
+    expect($limiter->accountKey(Request::create('/auth/login', 'POST')))->toBe('acct|admin|'.hash('sha256', ''));
 });
 
 it('derives no legacy subject from an identifier that is blank', function () {

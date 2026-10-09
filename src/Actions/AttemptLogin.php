@@ -53,7 +53,7 @@ class AttemptLogin
         $subject = LoginRateLimiter::lockoutSubject($candidate, (string) $request->input($this->field()));
 
         $this->ensureIsNotLocked($request, $subject);
-        $this->ensureIsNotThrottled($request, $subject);
+        $this->ensureIsNotThrottled($request);
 
         // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
         // the credential check is check-then-act: N concurrent requests all read "not locked", all
@@ -67,12 +67,12 @@ class AttemptLogin
         try {
             $user = $this->resolve($request, $candidate);
         } catch (ValidationException $e) {
-            $this->limiter->increment($request, $subject);
+            $this->limiter->increment($request);
 
             throw $e;
         }
 
-        $this->limiter->clear($request, $subject);
+        $this->limiter->clear($request);
         // "Consecutive" is the whole point of the cap: any success ends the run.
         $this->lockouts?->release('login', $subject, $this->limiter->guard());
         // A step-up lock counts failures against the SAME password, so a successful login is proof
@@ -252,15 +252,15 @@ class AttemptLogin
         }
     }
 
-    private function ensureIsNotThrottled(Request $request, string $subject): void
+    private function ensureIsNotThrottled(Request $request): void
     {
-        if (! $this->limiter->tooManyAttempts($request, $subject)) {
+        if (! $this->limiter->tooManyAttempts($request)) {
             return;
         }
 
         event(new Lockout($request));
 
-        $seconds = $this->limiter->availableIn($request, $subject);
+        $seconds = $this->limiter->availableIn($request);
 
         // The `(int)` is type hygiene, not behaviour: `ceil()` is always integral, and the value's
         // only consumer is a translation replacement, where `(string) 32.0` and `(string) 32` are
@@ -322,7 +322,6 @@ class AttemptLogin
         );
     }
 
-    /** The identifier field (config `lukk.username`) — the request field + the error key. */
     /**
      * Upgrade a weak stored hash — but only the hash this sign-in checked.
      *
@@ -349,7 +348,7 @@ class AttemptLogin
         $upgraded = Hash::make($password);
 
         if ($user->newQueryWithoutScopes()->whereKey($user->getKey())->where($column, $stored)->update([$column => $upgraded]) === 1) {
-            $user->setAttribute($column, $upgraded)->syncOriginalAttribute($column);
+            $this->storeRaw($user, $column, $upgraded);
 
             return;
         }
@@ -358,8 +357,18 @@ class AttemptLogin
         $current = (string) $user->newQueryWithoutScopes()->whereKey($user->getKey())->value($column); // @pest-mutate-ignore: RemoveStringCast
 
         if (Hash::check($password, $current)) {
-            $user->setAttribute($column, $current)->syncOriginalAttribute($column);
+            $this->storeRaw($user, $column, $current);
         }
+    }
+
+    /**
+     * Put a hash on the model as stored, past any mutator: a legacy `setPasswordAttribute()` that hashes
+     * what it is given would hash the hash, and the session's password fingerprint, taken from this
+     * model, would then match nothing stored.
+     */
+    private function storeRaw(Model $user, string $column, string $hash): void
+    {
+        $user->setRawAttributes([...$user->getAttributes(), $column => $hash]);
     }
 
     /**
@@ -398,6 +407,7 @@ class AttemptLogin
         ];
     }
 
+    /** The identifier field (config `lukk.username`) — the request field + the error key. */
     private function field(): string
     {
         return Lukk::usernameField();
