@@ -243,6 +243,8 @@ class LukkServiceProvider extends ServiceProvider
                 'rp_name' => $passkeys['rp_name'] ?? $this->appName(),
                 'origins' => $passkeys['origins'] ?? [],
                 'user_verification' => $passkeys['user_verification'] ?? 'required',
+                // The prompt closes when the server forgets the challenge (WebAuthn L3 §5.4, §5.5).
+                'timeout' => 1000 * (int) ($passkeys['challenge_ttl'] ?? 120),
             ]);
         });
     }

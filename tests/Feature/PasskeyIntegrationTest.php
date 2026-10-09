@@ -230,3 +230,15 @@ it('enforces the step-up\'s own user-verification requirement through the real l
     $this->withToken($access)->postJson('/auth/confirm-passkey', ['ceremony_id' => $start['ceremony_id'], 'credential' => $assertion])
         ->assertStatus(422)->assertJsonMissingPath('confirmation_token');
 });
+
+it('tells the browser how long the server keeps the challenge', function () {
+    // Without `timeout` (WebAuthn L3 §5.4, §5.5) the browser's own default — often five minutes or more —
+    // applied while lukk forgot the challenge after `challenge_ttl`, so a user finishing a slow PIN or
+    // biometric entry got "could not be verified". The prompt now closes when the challenge does.
+    config(['lukk.passkeys.challenge_ttl' => 90]);
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+
+    expect($this->postJson('/auth/passkeys/login-options')->json('options.timeout'))->toBe(90_000)
+        ->and($this->withToken($access)->withHeaders(confirmedHeaders($access))->postJson('/auth/passkeys/registration-options')->json('timeout'))->toBe(90_000);
+});

@@ -153,8 +153,8 @@ it('never moves a sign count backwards, whatever order concurrent logins write i
     // Two assertions (counters 6 and 5) both read the stored 4 and each wrote max(4, theirs): if 6
     // landed first, 5 then overwrote it, and a clone presenting 6 later passed the regression check
     // (WebAuthn L3 §7.2). The write is now conditional on the stored count being lower.
-    $repo = app(Lukk\Contracts\PasskeyRepository::class);
-    $repo->store(1, new Lukk\Support\NewPasskey('cred-race', 'PUB', 4));
+    $repo = app(PasskeyRepository::class);
+    $repo->store(1, new NewPasskey('cred-race', 'PUB', 4));
 
     $repo->updateSignCount('cred-race', 6);
     $repo->updateSignCount('cred-race', 5);
@@ -163,8 +163,8 @@ it('never moves a sign count backwards, whatever order concurrent logins write i
 });
 
 it('still stamps last use when the count does not move', function () {
-    $repo = app(Lukk\Contracts\PasskeyRepository::class);
-    $repo->store(1, new Lukk\Support\NewPasskey('cred-synced', 'PUB', 0));
+    $repo = app(PasskeyRepository::class);
+    $repo->store(1, new NewPasskey('cred-synced', 'PUB', 0));
     $this->freezeSecond();
 
     $repo->updateSignCount('cred-synced', 0);

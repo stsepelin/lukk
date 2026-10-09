@@ -293,6 +293,9 @@ it('leaves no guarded config read unexercised', function () {
         // Laravel's own guard/provider config arrays, not the `lukk` block.
         'driver' => "Laravel's auth guard config, not lukk's",
         'provider' => "Laravel's auth guard config, not lukk's",
+        // The WebAuthn ceremony's constructor array, which the provider fills from `passkeys.challenge_ttl`
+        // (itself defaulted) — not a `lukk` key.
+        'timeout' => "the ceremony's own array, derived from a defaulted key",
         // Feature flags: absent disables an OPTIONAL feature, which is degradation working as intended.
         // The two that default to true — and so would silently unmount a documented route — are covered
         // by their own feature suites (AccountDeletionTest, ChangePasswordTest).

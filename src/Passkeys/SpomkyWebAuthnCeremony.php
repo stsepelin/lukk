@@ -94,9 +94,22 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 residentKey: AuthenticatorSelectionCriteria::RESIDENT_KEY_REQUIREMENT_REQUIRED,
             ),
             excludeCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $excludeCredentialIds),
+            timeout: $this->timeout(),
         );
 
         return $this->toArray($options);
+    }
+
+    /**
+     * How long the browser may prompt, in milliseconds: the challenge's own lifetime, when configured.
+     *
+     * @return positive-int|null
+     */
+    private function timeout(): ?int
+    {
+        $timeout = $this->config['timeout'] ?? null;
+
+        return is_int($timeout) && $timeout > 0 ? $timeout : null;
     }
 
     /**
@@ -165,6 +178,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             rpId: $this->config['rp_id'],
             allowCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $allowCredentialIds),
             userVerification: $this->userVerification($userVerification),
+            timeout: $this->timeout(),
         );
 
         return $this->toArray($options);
