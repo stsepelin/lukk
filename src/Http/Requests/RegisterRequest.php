@@ -47,9 +47,8 @@ class RegisterRequest extends FormRequest
                 ? ['required', 'string', 'max:255', 'email', Rule::unique($this->userModel(), 'email')]
                 : ['required', 'string', 'max:255', Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
-            'password' => ['required', 'string', 'confirmed', 'max:255', // A NUL byte makes `Hash::make` throw ("Bcrypt hashing not supported"), which surfaces as a 500
-                // on a public endpoint rather than a 422. Nothing else in the rule set rejects one.
-                'not_regex:/\0/', HashablePassword::rule(), Password::defaults()],
+            // The type and NUL-byte checks are `after()`'s, which runs for every rule set, this one included.
+            'password' => ['required', 'confirmed', 'max:255', HashablePassword::rule(), Password::defaults()],
         ];
     }
 
@@ -59,8 +58,9 @@ class RegisterRequest extends FormRequest
      * `registerValidation()` replaces the rules wholesale, as a rebound subclass overriding `rules()`
      * does, and a consumer's set naturally omits a hashing detail: under bcrypt an over-72-byte password
      * was then stored truncated (NIST SP 800-63B-4 §3.1.1.2), and an array or a NUL byte 500'd in the
-     * default create. Run for every rule set (the default one already says all three, so nothing is
-     * added there); the 72-byte rule only while lukk's own create runs. And only for a password that is
+     * default create. Run for every rule set, the default one included, which leaves the type and
+     * NUL-byte checks to it; the 72-byte rule only while lukk's own create runs (the default rules carry
+     * that one themselves). And only for a password that is
      * present, so a set that does not require one still decides that itself.
      *
      * @return array<int, \Closure>
@@ -68,8 +68,7 @@ class RegisterRequest extends FormRequest
     public function after(): array
     {
         // For EVERY rule set, not only `registerValidation()`'s: a rebound subclass overriding `rules()` is
-        // the other documented customisation, and it skipped all three checks. On the default rules the
-        // closure adds nothing, since they carry the same checks and it skips a password with an error.
+        // the other documented customisation, and it skipped all three checks.
         return [function (Validator $validator): void {
             $password = $this->input('password');
 

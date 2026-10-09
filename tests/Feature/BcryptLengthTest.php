@@ -224,3 +224,20 @@ it('names the field in the 72-byte message it adds', function () use ($long) {
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'msg@y.com', 'password' => $long, 'password_confirmation' => $long])
         ->assertJsonPath('errors.password.0', 'The password may not be longer than 72 bytes.');
 });
+
+it('refuses a NUL byte and a non-string password under the default rules', function (mixed $password, string $message) {
+    // Checked by `after()` for every rule set, the default one included.
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'def@y.com', 'password' => $password, 'password_confirmation' => $password])
+        ->assertStatus(422)->assertJsonPath('errors.password.0', $message);
+})->with([
+    'NUL byte' => ["new-pass\0word-123", 'The password field format is invalid.'],
+    'number' => [123456789012, 'The password field must be a string.'],
+]);
+
+it('keeps the 72-byte rule of the default rules for a registerUsing hook that brings no rules of its own', function () use ($long) {
+    // Only a custom rule set opts out of it; the default one says it whoever does the create.
+    Lukk::registerUsing(fn (array $payload) => User::forceCreate(['name' => 'n', 'email' => $payload['email'], 'password' => Hash::make($payload['password'])]));
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'defhook@y.com', 'password' => $long, 'password_confirmation' => $long])
+        ->assertStatus(422)->assertJsonPath('errors.password.0', 'The password may not be longer than 72 bytes.');
+});

@@ -38,7 +38,7 @@ it('applies each default rule on its own', function (string $field, array $overr
     'password required' => ['password', ['password' => null], 'Required'],
     'password confirmed' => ['password', ['password_confirmation' => 'other-password-123'], 'Confirmed'],
     'password bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
-    'password without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
+    // The NUL-byte and type checks live in `after()`, for every rule set; BcryptLengthTest pins them.
     'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
 ]);
 
