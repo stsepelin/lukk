@@ -161,7 +161,8 @@ class DatabasePasskeyRepository implements PasskeyRepository
         //
         // Two round trips are affordable HERE, unlike on the `pin` path, because this is a
         // console-only command that runs once a day rather than on every ordinary request.
-        $scopable = Schema::hasColumn((new Passkey)->getTable(), 'guard');
+        $model = new Passkey;
+        $scopable = Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'guard');
 
         // A GLOBAL sweep. It runs from the console, where `$this->guard` is whatever `GuardContext`
         // happens to hold — never null, since it falls back to the default guard — which is

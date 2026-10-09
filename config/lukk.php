@@ -558,7 +558,8 @@ return [
         | login ceremony (sent as the WebAuthn `timeout`). Five minutes is the
         | WebAuthn L3 recommendation for a ceremony that verifies the user. The
         | server keeps the challenge 30 seconds longer, for the answer still in
-        | transit when the prompt closes.
+        | transit when the prompt closes. With `user_verification` "discouraged"
+        | everywhere, WebAuthn suggests 120 instead: a tap needs less time.
         |
         */
 

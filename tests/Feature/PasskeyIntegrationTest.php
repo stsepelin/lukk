@@ -257,3 +257,27 @@ it('sends no timeout when none, or a non-positive one, is configured', function 
     'negative' => [-5, null],
     'not an integer' => ['90000', null],
 ]);
+
+it('steps up with the owner bound as the expected user handle, through the real library', function (bool $withHandle) {
+    // WebAuthn L3 §7.2 step 6: the step-up names whose credential it expects. The handle lukk
+    // registered is that account's id, so a real assertion carrying it passes, and one from a
+    // non-discoverable key, which omits it, passes on the credential's own binding.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+    $authenticator = new UserVerifyingAuthenticator(new InMemoryRepository);
+    $options = $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json();
+    $this->withToken($access)->withHeaders($headers)
+        ->postJson('/auth/passkeys', ['credential' => toBase64Url($authenticator->getAttestation($options, 'https://localhost'))])
+        ->assertNoContent();
+
+    $start = $this->withToken($access)->postJson('/auth/confirm-passkey/options')->assertOk()->json();
+    $assertion = toBase64Url($authenticator->getAssertion('localhost', null, $start['options']['challenge'], 'https://localhost'));
+    expect($assertion['response']['userHandle'] ?? null)->not->toBeNull();
+    if (! $withHandle) {
+        unset($assertion['response']['userHandle']);
+    }
+
+    $this->withToken($access)->postJson('/auth/confirm-passkey', ['ceremony_id' => $start['ceremony_id'], 'credential' => $assertion])
+        ->assertOk()->assertJsonStructure(['confirmation_token']);
+})->with(['with the user handle' => true, 'without one' => false]);

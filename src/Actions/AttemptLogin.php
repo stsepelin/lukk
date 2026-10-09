@@ -215,9 +215,12 @@ class AttemptLogin
 
         // bcrypt reads 72 bytes, so against a bcrypt row a longer password is verified only in part:
         // every string sharing the prefix says yes. NIST SP 800-63B-4 §3.1.1.2 requires verifying the
-        // ENTIRE password, and lukk never stores one this long (`HashablePassword`), so such a row came
-        // from elsewhere and its owner resets. Decided AFTER the check, so the derivation is still paid.
-        $valid = $valid && ! HashablePassword::verifiesOnlyInPart($user, $credentials['password']);
+        // ENTIRE password. lukk no longer stores one this long, but releases before 0.7 did, so its
+        // owner is told to reset rather than that it is wrong. Decided AFTER the check, so the
+        // derivation is still paid; counted as a failure like any other refusal.
+        if ($valid && HashablePassword::verifiesOnlyInPart($user, $credentials['password'])) {
+            throw HashablePassword::mustReset($this->field());
+        }
 
         if (! $valid) {
             // Equalize the COST, not just the count. `Hash::check` runs at the cost embedded in the

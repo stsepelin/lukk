@@ -6,6 +6,7 @@ namespace Lukk\Support;
 
 use Closure;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Under bcrypt a password may be at most 72 BYTES: a rule for a new one, a check for a presented one.
@@ -28,8 +29,24 @@ class HashablePassword
      */
     public static function verifiesOnlyInPart(Authenticatable $user, mixed $password): bool
     {
+        // By prefix, not `password_get_info()`: that names only `$2y$`, while `password_verify` accepts
+        // and truncates `$2a$`/`$2b$`/`$2x$` too — the very hashes an import from Node, Python or Ruby
+        // brings, behind `hashing.bcrypt.verify` turned off.
         return is_string($password) && strlen($password) > 72
-            && password_get_info((string) $user->getAuthPassword())['algo'] === PASSWORD_BCRYPT;
+            && preg_match('/\A\$2[abxy]\$/', (string) $user->getAuthPassword()) === 1;
+    }
+
+    /**
+     * The answer for a password that matched only in part.
+     *
+     * Not "incorrect": every released lukk before this one stored such a password truncated, so its
+     * owner is typing the right one, and a generic refusal would only spend their lockout attempts.
+     * It reveals nothing new — only a caller whose first 72 bytes already match reaches it, and the
+     * old code signed that caller straight in.
+     */
+    public static function mustReset(string $field): ValidationException
+    {
+        return ValidationException::withMessages([$field => [__('This password is longer than 72 bytes, which can no longer be checked in full. Reset your password to continue.')]]);
     }
 
     public static function rule(): Closure

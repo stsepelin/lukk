@@ -94,22 +94,21 @@ class DeleteAccount
             // and `idn:` for one that resolves to nothing — so an earlier sweep keyed on the raw
             // value matched no real row at all, and only looked correct because its test hand-wrote
             // a subject that bypassed the derivation. `prune()` never removes a held lock at any
-            // age, so anything missed here is permanent.
-            if ($this->tableExists('lukk_lockouts')) {
-                $this->lockouts->forget([
-                    // id:<userId> — login. (The identifier argument is unused when a user is passed.)
-                    LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
-                    (string) $userId,                                         // <userId>      — confirm / two-factor
-                    $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:sha256:<digest>
-                    $identifier === null ? '' : LoginRateLimiter::legacyLockoutSubject($identifier), // idn:<normalized>, written before 0.7
-                ], $this->guard);
-            }
+            // age, so anything missed here is permanent. An unpublished table is the database
+            // store's to answer, so a rebound store is erased too.
+            $this->lockouts->forget([
+                // id:<userId> — login. (The identifier argument is unused when a user is passed.)
+                LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
+                (string) $userId,                                         // <userId>      — confirm / two-factor
+                $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:sha256:<digest>
+                $identifier === null ? '' : LoginRateLimiter::legacyLockoutSubject($identifier), // idn:<normalized>, written before 0.7
+            ], $this->guard);
 
             // The password broker's own table. Laravel does not garbage-collect it by default
             // (`deleteExpired` is not scheduled), so a pending reset row keeps a plaintext email
             // address of someone who asked to be forgotten for as long as the table lives.
-            // Guarded on the TABLE, not on `features.password_reset` — the same rule as the passkey
-            // and lockout sweeps three lines up, and it was the one sweep that broke it. Switching
+            // Guarded on the TABLE, not on `features.password_reset` — the rule the passkey and
+            // lockout stores apply to themselves, and it was the one sweep that broke it. Switching
             // the feature off does not delete the rows it already wrote, and this row is the single
             // artifact holding a PLAINTEXT email address of someone who asked to be forgotten. An
             // install that never ran the broker's migration has no table, and that is the only case

@@ -47,10 +47,13 @@ class ConfirmPassword
             $this->throwLocked('confirm', $subject, 'password');
         }
 
-        // `||` keeps the derivation first; a bcrypt row longer than 72 bytes verifies only in part.
-        if (! $this->users->validateCredentials($user, ['password' => $password])
-            || HashablePassword::verifiesOnlyInPart($user, $password)) {
+        if (! $this->users->validateCredentials($user, ['password' => $password])) {
             throw ValidationException::withMessages(['password' => [__('The provided password is incorrect.')]]);
+        }
+
+        // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
+        if (HashablePassword::verifiesOnlyInPart($user, $password)) {
+            throw HashablePassword::mustReset('password');
         }
 
         // "Consecutive" is the whole point of the cap: any success ends the run — which also

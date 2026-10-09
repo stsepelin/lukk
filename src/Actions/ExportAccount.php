@@ -6,7 +6,6 @@ namespace Lukk\Actions;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Schema;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
@@ -59,18 +58,6 @@ class ExportAccount
         }
 
         return is_string($value) && $value !== '' ? Carbon::parse($value)->toIso8601String() : null;
-    }
-
-    /**
-     * Whether a table is there to read.
-     *
-     * Deliberately NOT memoized, and the same spelling as `DeleteAccount` — a static cache is
-     * answered once per PROCESS, so a worker started before a migration keeps saying "no such
-     * table" for its whole life.
-     */
-    private function tableExists(string $table): bool
-    {
-        return Schema::hasTable($table);
     }
 
     /** The value the account authenticates with, as a string — see `DeleteAccount::identifierOf()`. */
@@ -142,7 +129,8 @@ class ExportAccount
      */
     private function lockoutsFor(Authenticatable $user): array
     {
-        if ($this->lockouts === null || ! $this->tableExists('lukk_lockouts')) {
+        // An unpublished table is the database store's to answer, so a rebound store is exported too.
+        if ($this->lockouts === null) {
             return [];
         }
 

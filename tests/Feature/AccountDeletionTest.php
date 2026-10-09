@@ -574,3 +574,13 @@ it('erases the passkeys of a store that is not the passkeys table', function () 
 
     expect($store->rows)->toBe([]);
 });
+
+it('erases the counters of a lockout store that is not the lockout table', function () {
+    Schema::drop('lukk_lockouts');
+    $spy = new RecordingLockoutRepository;
+    app()->instance(LockoutRepository::class, $spy);
+
+    deleteAccount()(User::factory()->create());
+
+    expect($spy->forgotten)->not->toBe([]);
+});

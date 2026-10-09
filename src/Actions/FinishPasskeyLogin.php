@@ -62,7 +62,11 @@ class FinishPasskeyLogin
         // one can move the counter. The one that cannot is the clone signal WebAuthn L3 §7.2 describes.
         if (! $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount))
             && $newSignCount > $stored->signCount) {
-            event(new PasskeyCloneDetected($stored->userId, $stored->credentialId));
+            // Or the credential was deleted mid-ceremony, which also writes nothing: refused either
+            // way, but only a row still there is a lost race worth an alarm.
+            if ($this->passkeys->existsByCredentialId($stored->credentialId)) {
+                event(new PasskeyCloneDetected($stored->userId, $stored->credentialId));
+            }
 
             $this->fail();
         }

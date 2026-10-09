@@ -351,17 +351,34 @@ it('clears a confirm lock on a successful passkey assertion', function () {
     // carry confirm failures planted by a token thief and lock on their next typo.
     config(['lukk.features.lockout' => true, 'lukk.rate_limits.confirm.max_attempts' => 500]);
     $user = User::factory()->create();
-    storePasskey($user->id, 'cred-lock', 0);
+    // A user-verifying key: a presence-only one proves no more than possession (see below).
+    storePasskey($user->id, 'cred-lock', 0, uvInitialized: true);
     app(LockoutRepository::class)->recordFailure('confirm', (string) $user->getKey(), 'api');
 
-    $start = $this->postJson('/auth/passkeys/login-options')->json();
-    $this->postJson('/auth/passkeys/login', [
-        'ceremony_id' => $start['ceremony_id'],
-        'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-lock', 'sign_count' => 1],
-    ])->assertOk();
+    passkeyLogin($this, 'cred-lock', uv: true)->assertOk();
 
     expect(Lockout::where('purpose', 'confirm')->exists())->toBeFalse();
 });
+
+it('keeps the confirm failures through a sign-in that grants no session or proves only possession', function (string $case) {
+    // A stolen access token plus a PIN-less key: guess the password at /confirm-password, then sign in
+    // with the key to wipe the count, and repeat — unlimited guessing (NIST SP 800-63B-4 §3.2.2). The
+    // release used to run before any gate, so even a sign-in that was then refused cleared it.
+    config(['lukk.features.lockout' => true, 'lukk.rate_limits.confirm.max_attempts' => 500]);
+    $user = User::factory()->create();
+    $uv = $case !== 'presence only';
+    storePasskey($user->id, 'cred-keep', 0, uvInitialized: $uv);
+    if ($case === 'unverified email') {
+        config(['lukk.features.email_verification' => true, 'lukk.email_verification.block_unverified_login' => true]);
+        $user->forceFill(['email_verified_at' => null])->save();
+    }
+    app(LockoutRepository::class)->recordFailure('confirm', (string) $user->getKey(), 'api');
+
+    $response = passkeyLogin($this, 'cred-keep', uv: $uv);
+
+    expect($response->status())->toBe($case === 'presence only' ? 200 : 403)
+        ->and(Lockout::where('purpose', 'confirm')->exists())->toBeTrue();
+})->with(['presence only', 'unverified email']);
 
 it('applies block_unverified_login to passkey login, like the password path', function () {
     // The passkey path minted a session straight off the credential row, so it never ran the gate.
@@ -885,6 +902,26 @@ it('refuses an assertion whose counter another concurrent assertion already reac
 
     passkeyLogin($this, 'cred-raced', uv: false, signCount: 5)->assertStatus(422);
     Event::assertDispatched(PasskeyCloneDetected::class);
+});
+
+it('refuses, without a clone alarm, an assertion whose credential was deleted mid-ceremony', function () {
+    // The counter write found no row: nothing raced it, the passkey is simply gone. Refusing is right;
+    // telling the application a key was cloned is not.
+    Event::fake([PasskeyCloneDetected::class]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-gone', 4);
+    app()->instance(PasskeyRepository::class, new class extends DatabasePasskeyRepository
+    {
+        public function updateSignCount(string $credentialId, int $signCount): bool
+        {
+            Passkey::query()->whereKey($credentialId)->delete();
+
+            return parent::updateSignCount($credentialId, $signCount);
+        }
+    });
+
+    passkeyLogin($this, 'cred-gone', uv: false, signCount: 5)->assertStatus(422);
+    Event::assertNotDispatched(PasskeyCloneDetected::class);
 });
 
 it('tells the ceremony whose credential a step-up expects, and nobody\'s at sign-in', function () {

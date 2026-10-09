@@ -60,10 +60,13 @@ class ChangePassword
             $this->throwLocked('confirm', $subject, 'current_password');
         }
 
-        // `||` keeps the derivation first; a bcrypt row longer than 72 bytes verifies only in part.
-        if (! $this->users->validateCredentials($user, ['password' => $current])
-            || HashablePassword::verifiesOnlyInPart($user, $current)) {
+        if (! $this->users->validateCredentials($user, ['password' => $current])) {
             throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
+        }
+
+        // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
+        if (HashablePassword::verifiesOnlyInPart($user, $current)) {
+            throw HashablePassword::mustReset('current_password');
         }
 
         // The column the model names (`getAuthPasswordName()`), as sign-in reads it.

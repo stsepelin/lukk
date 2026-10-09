@@ -216,3 +216,13 @@ it('exports the passkeys of a store that is not the passkeys table', function ()
 
     expect(collect(app(ExportAccount::class)($user)['passkeys'])->pluck('credential_id')->all())->toBe(['elsewhere']);
 });
+
+it('exports the counters of a lockout store that is not the lockout table', function () {
+    // A rebound LockoutRepository (Redis, say) has no `lukk_lockouts` table; gating on it exported nothing.
+    Schema::drop('lukk_lockouts');
+    $spy = new RecordingLockoutRepository;
+
+    exporter('email', $spy)(new GenericUser(['id' => 5, 'email' => 'ada@example.test']));
+
+    expect($spy->summarised)->not->toBe([]);
+});

@@ -34,7 +34,6 @@ class PasskeyAuthenticatedSessionController
     {
         // `ceremony_id` is validated as a required string; the cast states it.
         $passkey = ($this->finishLogin)((string) $request->input('ceremony_id'), $request->array('credential')); // @pest-mutate-ignore: RemoveStringCast
-        $this->finishLogin->releaseConfirmLock($passkey);
 
         // Resolve the user rather than minting a session straight off the credential row. The
         // password path runs these gates and this one skipped both: `block_unverified_login` was
@@ -58,6 +57,14 @@ class PasskeyAuthenticatedSessionController
 
         if (! $passkey->multiFactor && $this->twoFactorRequired($user)) {
             return $this->twoFactorChallenge($user, $challengeTokens, $methods);
+        }
+
+        // Only now, with a session granted, and only for a multi-factor assertion. It ends a run of
+        // password-confirm failures, so it must prove at least what a step-up would: a presence-only
+        // key is mere possession, and with a stolen access token it would wipe the count between
+        // password guesses forever (NIST SP 800-63B-4 §3.2.2). A refused sign-in proves nothing.
+        if ($passkey->multiFactor) {
+            $this->finishLogin->releaseConfirmLock($passkey);
         }
 
         return app(LoginResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => $methods])]);

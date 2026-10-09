@@ -128,7 +128,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         // single call site happens to check first. A consumer calling the contract directly on an
         // install that never published the lockout migration got a raw SQL error. Checked here
         // rather than through `usable()`, which takes ONE subject and this takes a list.
-        if (! Schema::hasTable((new Lockout)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -152,7 +152,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         // different rows.
         $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== '')); // @pest-mutate-ignore: UnwrapArrayValues
 
-        if ($subjects === [] || ! Schema::hasTable((new Lockout)->getTable())) {
+        if ($subjects === [] || ! $this->published()) {
             return [];
         }
 
@@ -171,7 +171,7 @@ class DatabaseLockoutRepository implements LockoutRepository
 
     public function prune(int $staleAfterDays): int
     {
-        if (! Schema::hasTable((new Lockout)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -231,9 +231,17 @@ class DatabaseLockoutRepository implements LockoutRepository
      * documents the constraint next to `features.lockout`; it cannot be checked at boot, because a
      * package provider boots before the application registers its `authenticateUsing` callback.
      */
+    /** On the model's own connection and table name; not memoized, so a later migration is seen. */
+    private function published(): bool
+    {
+        $model = new Lockout;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
+    }
+
     private function usable(string $subject): bool
     {
-        return $subject !== '' && Schema::hasTable((new Lockout)->getTable());
+        return $subject !== '' && $this->published();
     }
 
     private function find(string $purpose, string $subject, ?string $guard): ?Lockout
