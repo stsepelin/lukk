@@ -9,6 +9,7 @@ use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
+use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use Lukk\Support\UnclaimedSessions;
@@ -120,6 +121,7 @@ class StartSession
         // The Action resolves the grant; the issuer only stamps it. A pinned grant wins outright —
         // that is what "the TOKEN owns its abilities" means — otherwise it is derived per mint.
         $access = $this->issuer->accessToken($context, $claims, $abilities);
+        LongestAccessTtl::record((int) $access['expires_in']);
 
         return new TokenPair($access['token'], $secret, $access['expires_in']);
     }

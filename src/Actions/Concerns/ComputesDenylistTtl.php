@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Actions\Concerns;
 
+use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
 
 /**
@@ -28,7 +29,9 @@ trait ComputesDenylistTtl
      */
     private function denylistTtl(array $config): int
     {
-        $configured = (int) ($config['access_ttl'] ?? 900) + (int) ($config['leeway'] ?? 5);
+        // The configured lifetime, or the longest one minted that may still be alive if that is longer —
+        // `access_ttl` lowered since (see `LongestAccessTtl`).
+        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current()) + (int) ($config['leeway'] ?? 5);
 
         // The configured window is only exact while every access token's `exp` really is
         // `iat + lukk.access_ttl`. Two ordinary things break that, and both under-cover the revoke:

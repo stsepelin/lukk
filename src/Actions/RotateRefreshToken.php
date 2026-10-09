@@ -12,6 +12,7 @@ use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
+use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\RefreshTokenRecord;
 use Lukk\Support\RotationOutcome;
 use Lukk\Support\TokenContext;
@@ -328,6 +329,9 @@ class RotateRefreshToken
         // assertion outright is equivalent, and what is load-bearing here is the narrowing it gives
         // the analyser rather than any runtime check.
         assert($outcome->access !== null && $outcome->refreshSecret !== null); // @pest-mutate-ignore: BooleanAndToBooleanOr,RemoveFunctionCall
+
+        // After commit, never under the row lock: see `LongestAccessTtl`.
+        LongestAccessTtl::record((int) $outcome->access['expires_in']);
 
         return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
     }

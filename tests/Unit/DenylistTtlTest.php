@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Http\Request;
 use Lukk\Actions\Concerns\ComputesDenylistTtl;
+use Lukk\Actions\RevokeSession;
 use Lukk\Support\Abilities;
 use Lukk\Support\VerifiedToken;
 use Lukk\Tests\Fixtures\User;
@@ -86,4 +87,43 @@ it('adds leeway to the presented token\'s own remaining life', function () {
     $remaining = (int) $claims->exp - now()->getTimestamp();
 
     expect(denylistTtl(['access_ttl' => 1, 'leeway' => 30]))->toBe($remaining + 30);
+});
+
+it('keeps a family revoked for as long as its longest token lives, after access_ttl is lowered', function () {
+    // A revoke denylisted for the CONFIGURED `access_ttl + leeway`. Lowered from 3600 to 60 during an
+    // incident, a family revoked afterwards — logout, reuse, "everywhere" — had its entry expire after
+    // 65 s, and its hour-long access token verified again (RFC 7009 §2.2). Revocation now covers the
+    // longest access token this deployment has minted while one can still be alive. Revoked from the
+    // console here, so no presented token can supply the answer instead.
+    config(['lukk.access_ttl' => 3600]);
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $fid = (string) verifier()->verify($access)->fid;
+
+    config(['lukk.access_ttl' => 60]);
+    app(RevokeSession::class)($fid);
+
+    $this->travel(120)->seconds();
+
+    expect(verifier()->verify($access))->toBeNull();
+});
+
+it('forgets the longest lifetime once no token minted under it can be alive', function () {
+    config(['lukk.access_ttl' => 3600]);
+    User::factory()->create()->startSession();
+    config(['lukk.access_ttl' => 60]);
+
+    expect(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBe(3605);
+
+    $this->travel(3601)->seconds();
+
+    expect(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBe(65);
+});
+
+it('caps the clock-skew leeway at a few minutes', function () {
+    // RFC 7519 §4.1.4 allows "some small leeway". `LUKK_LEEWAY=86400` stretched every exp by a day.
+    config(['lukk.leeway' => 86400]);
+    $expired = $this->travel(-1)->hours(fn () => issuer()->accessToken(ctx('1'))['token']);
+
+    expect(verifier()->verify($expired))->toBeNull();
 });
