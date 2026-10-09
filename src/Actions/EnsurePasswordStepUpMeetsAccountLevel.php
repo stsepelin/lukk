@@ -84,9 +84,15 @@ class EnsurePasswordStepUpMeetsAccountLevel
 
         $time = (float) $authTime;
 
-        // Only so the cast below cannot warn: anything past the end of year 9999 (INF included) is refused
-        // by the future check anyway, and anything before the epoch by the age, so any bound in between is
+        // Before the epoch is no sign-in at all — and below the int range the cast itself warned into a 500,
+        // before the age check could refuse it. Past the end of year 9999 (INF included) the cast would
+        // warn too; the future check refuses anything that far anyway, so any upper bound in between is
         // equivalent. A numeric string or JSON number is never NAN.
+        // Only removing this check is observable: an edge moved by a second either way is refused by the age.
+        if ($time < 0) { // @pest-mutate-ignore: SmallerToSmallerOrEqual,DecrementInteger,IncrementInteger
+            return false;
+        }
+
         if ($time > 253402300799) { // @pest-mutate-ignore: GreaterToGreaterOrEqual,IncrementInteger,DecrementInteger
             return false;
         }

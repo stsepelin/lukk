@@ -251,6 +251,10 @@ it('refuses, rather than 500s on, an auth_time no integer can hold', function (m
     'just past int range' => [9.3e18],
     'numeric string' => ['1e999'],
     'before the epoch' => [-1],
+    // Below the int range: refused by the age only AFTER a cast that warned into a 500.
+    'far before the epoch' => [-1e19],
+    'negative infinity as a string' => ['-1e999'],
+    'a negative integer string past PHP_INT_MIN' => ['-99999999999999999999'],
 ]);
 
 it('takes a fractional auth_time, which OIDC allows, as the second it falls in', function () {

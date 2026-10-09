@@ -5,10 +5,12 @@ declare(strict_types=1);
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Auth\Listeners\SendEmailVerificationNotification;
 use Illuminate\Auth\Notifications\VerifyEmail;
+use Illuminate\Contracts\Validation\Rule;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Validation\Rules\Password;
 use Lukk\Actions\Register;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Lukk;
@@ -268,4 +270,30 @@ it('signs the new user in when registration.login is unset — the default is on
     $access = $this->postJson('/auth/register', registerPayload())->assertOk()->json('access_token');
 
     expect(claims($access)->amr)->toBe(['pwd']);
+});
+
+it('refuses a password that is not a string under the default rules, whatever Password::defaults() is', function () {
+    // The default set relied on the app's `Password::defaults()` to say "string"; an app registering its
+    // own rule object there let a JSON number through to be cast and stored.
+    Notification::fake();
+    Password::defaults(fn () => new class implements Rule
+    {
+        public function passes($attribute, $value): bool
+        {
+            return true;
+        }
+
+        public function message(): string
+        {
+            return '';
+        }
+    });
+
+    try {
+        $this->postJson('/auth/register', registerPayload(['password' => 12345678, 'password_confirmation' => 12345678]))
+            ->assertStatus(422)->assertJsonValidationErrors('password');
+    } finally {
+        // Process-static: left set, it would leak into every later test.
+        Password::$defaultCallback = null;
+    }
 });

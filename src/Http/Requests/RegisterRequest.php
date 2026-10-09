@@ -47,7 +47,7 @@ class RegisterRequest extends FormRequest
                 ? ['required', 'string', 'max:255', 'email', Rule::unique($this->userModel(), 'email')]
                 : ['required', 'string', 'max:255', Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
-            'password' => ['required', 'confirmed', 'max:255', // A NUL byte makes `Hash::make` throw ("Bcrypt hashing not supported"), which surfaces as a 500
+            'password' => ['required', 'string', 'confirmed', 'max:255', // A NUL byte makes `Hash::make` throw ("Bcrypt hashing not supported"), which surfaces as a 500
                 // on a public endpoint rather than a 422. Nothing else in the rule set rejects one.
                 'not_regex:/\0/', HashablePassword::rule(), Password::defaults()],
         ];
@@ -67,8 +67,9 @@ class RegisterRequest extends FormRequest
      */
     public function after(): array
     {
-        // Equivalent without the return: the default rules already carry all three checks, so any
-        // password they refuse has an error, and the closure below skips a password that has one.
+        // Equivalent without the return: the default rules carry all three checks themselves (`string`,
+        // `not_regex` and `HashablePassword`, not borrowed from `Password::defaults()`), so any password they
+        // refuse has an error, and the closure below skips a password that has one.
         if (Lukk::$registerValidation === null) {
             return []; // @pest-mutate-ignore: RemoveEarlyReturn
         }

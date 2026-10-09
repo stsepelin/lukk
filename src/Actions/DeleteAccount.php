@@ -179,9 +179,11 @@ class DeleteAccount
      */
     private function acrossConnections(Closure $callback): void
     {
-        // Uncast: Laravel takes an enum as a connection name, and `(string)` on one threw before anything
-        // was erased. Null (or '') is the default connection, which then just nests as a savepoint.
+        // An enum is a valid connection name in config, and `(string)` on one threw before anything was
+        // erased. Unwrapped here rather than handed to `DB::connection()`, which reads enums only from
+        // later 12.x releases. Null (or '') is the default connection, which then nests as a savepoint.
         $broker = config("auth.passwords.{$this->brokerName()}.connection");
+        $broker = $broker instanceof \BackedEnum ? $broker->value : ($broker instanceof \UnitEnum ? $broker->name : $broker);
 
         DB::connection($broker)->transaction(fn () => DB::connection()->transaction($callback));
     }
