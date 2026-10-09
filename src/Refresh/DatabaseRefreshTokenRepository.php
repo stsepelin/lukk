@@ -331,8 +331,9 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         try {
             // No `?? false`: `rememberAmrSupport()` returns null only when it was PASSED null, and
             // this passes a bool. The mutation run flagged the coalesce as unreachable, and the
-            // repo's rule is to delete an equivalent rather than test it.
-            return (bool) $this->rememberAmrSupport(
+            // repo's rule is to delete an equivalent rather than test it. The cast, likewise, only states
+            // the type for the analyser: passed a bool, it returns that bool.
+            return (bool) $this->rememberAmrSupport( // @pest-mutate-ignore: RemoveBooleanCast
                 Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'amr')
             );
         } catch (\Throwable) {
