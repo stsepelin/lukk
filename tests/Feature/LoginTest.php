@@ -930,3 +930,65 @@ it('hands back a user whose upgraded password is not left dirty', function () {
     expect(password_get_info($user->getAuthPassword())['options']['cost'])->toBe(5)
         ->and($user->isDirty('password'))->toBeFalse();
 });
+
+/** A hasher wrapping the real one, with chosen methods throwing — for the paths that must not 500. */
+function throwingHasher(array $throws): void
+{
+    $inner = app('hash')->driver();
+    app('hash')->extend('throwing', fn () => new class($inner, $throws) implements Hasher
+    {
+        public function __construct(private readonly Hasher $inner, private readonly array $throws) {}
+
+        public function info($hashedValue): array
+        {
+            return $this->inner->info($hashedValue);
+        }
+
+        public function make(#[SensitiveParameter] $value, array $options = []): string
+        {
+            in_array('make', $this->throws, true) && throw new RuntimeException('make failed');
+
+            return $this->inner->make($value, $options);
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            return $this->inner->check($value, $hashedValue, $options);
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            in_array('needsRehash', $this->throws, true) && throw new RuntimeException('needsRehash failed');
+
+            return $this->inner->needsRehash($hashedValue, $options);
+        }
+    });
+    config(['hashing.driver' => 'throwing']);
+    app('hash')->forgetDrivers();
+}
+
+it('answers a wrong password on a weak hash with 422 even when the equalizing derivation throws', function () {
+    User::factory()->create(['email' => 'weakthrow@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    throwingHasher(['make']);
+
+    $this->postJson('/auth/login', ['email' => 'weakthrow@y.com', 'password' => 'wrong'])->assertStatus(422);
+});
+
+it('treats a stored hash the hasher cannot judge as weak, and still answers 422', function () {
+    User::factory()->create(['email' => 'unjudged@y.com']);
+    throwingHasher(['needsRehash']);
+
+    $this->postJson('/auth/login', ['email' => 'unjudged@y.com', 'password' => 'wrong'])->assertStatus(422);
+});
+
+it('signs in when the hash upgrade fails, and reports the failure', function () {
+    Exceptions::fake();
+    User::factory()->create(['email' => 'upgradefail@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+    throwingHasher(['make']);
+
+    $this->postJson('/auth/login', ['email' => 'upgradefail@y.com', 'password' => 'password'])->assertOk();
+
+    Exceptions::assertReported(RuntimeException::class);
+});

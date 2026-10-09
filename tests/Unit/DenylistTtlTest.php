@@ -187,3 +187,16 @@ it('records the lifetime a rotation mints, as a sign-in does', function () {
 
     expect(LongestAccessTtl::current())->toBe(1800);
 });
+
+it('uses the configured window when no request is bound at all, as in a queued job', function () {
+    app()->offsetUnset('request');
+
+    expect(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBe(65);
+});
+
+it('records no lifetime that is not positive', function () {
+    LongestAccessTtl::record(0);
+    LongestAccessTtl::record(-5);
+
+    expect(LongestAccessTtl::current())->toBe(0);
+});

@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Models\RefreshToken;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -64,4 +66,25 @@ it('reads once and writes nothing for a user with no live session', function () 
 
     expect($repo->revokeUserFamilies($user->getKey()))->toBe([]);
     expect(array_values(array_filter($queries, fn (string $sql) => str_starts_with($sql, 'update'))))->toBe([]);
+});
+
+it('writes the row without amr when the column probe fails, rather than failing the sign-in', function () {
+    // A blip, a deadlock, a statement timeout: skipping `amr` for this one write is the safe direction,
+    // and nothing is cached, so the next write asks again. The probe's own schema query is made to fail
+    // once — `Schema::connection()` is a static facade method, so it cannot be mocked.
+    $armed = true;
+    DB::listen(function ($query) use (&$armed) {
+        if ($armed && str_contains(strtolower($query->sql), 'pragma')) {
+            $armed = false;
+            throw new RuntimeException('probe failed');
+        }
+    });
+
+    $first = start()(1, ['amr' => ['pwd']]);
+    $second = start()(1, ['amr' => ['pwd']]);
+
+    $amrOf = fn ($pair) => RefreshToken::query()->where('token_hash', issuer()->hash($pair->refreshToken))->value('amr');
+    expect($armed)->toBeFalse()
+        ->and($amrOf($first))->toBeNull()
+        ->and($amrOf($second))->toBe('["pwd"]');
 });
