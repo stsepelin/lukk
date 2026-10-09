@@ -330,9 +330,11 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
-            (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
-            (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
-            (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
+            // Per guard, like everything else bound to the current guard here: a guard that hardens itself
+            // with tighter caps must get them, not the default guard's.
+            (int) (Lukk::guardConfig()['rate_limits']['login']['max_attempts'] ?? 5),
+            (int) (Lukk::guardConfig()['rate_limits']['login']['decay_seconds'] ?? 60),
+            (int) (Lukk::guardConfig()['rate_limits']['login']['account_max_attempts'] ?? 20),
             Lukk::usernameField(),
             Lukk::currentGuard(),
         ));
@@ -340,7 +342,7 @@ class LukkServiceProvider extends ServiceProvider
         // admin login authenticates against the admins table, not the users table.
         $this->app->bind(LockoutRepository::class, function () {
             // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
-            $lockout = (array) ($this->config()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
+            $lockout = (array) (Lukk::guardConfig()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
             // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
             // account on its owner's first typo — the `Limit(0)` failure class this package already
             // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
@@ -384,8 +386,8 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             // Missing means 0 attempts — the "missing rate-limit key locks everyone out" shape, here
             // on the second factor: no one holding a challenge could ever spend it.
-            (int) ($this->config()['rate_limits']['two_factor']['max_attempts'] ?? 5),
-            (int) ($this->config()['rate_limits']['two_factor']['decay_seconds'] ?? 60),
+            (int) (Lukk::guardConfig()['rate_limits']['two_factor']['max_attempts'] ?? 5),
+            (int) (Lukk::guardConfig()['rate_limits']['two_factor']['decay_seconds'] ?? 60),
             $this->lockouts($app), Lukk::currentGuard(),
         ));
         $this->app->bind(RegenerateRecoveryCodes::class, fn () => new RegenerateRecoveryCodes(
@@ -618,7 +620,8 @@ class LukkServiceProvider extends ServiceProvider
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
     private function lockouts(Application $app): ?LockoutRepository
     {
-        return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
+        // Per guard: a guard that switches the lockout on for itself must get it.
+        return (Lukk::guardConfig()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
     }
 
     private function registerPublishing(): void
