@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
@@ -482,4 +483,33 @@ it('says what to do when the pre-read disagrees with the locked read', function 
         RuntimeException::class,
         'the pre-transaction read disagreed with the locked read. Nothing was consumed; retry.',
     );
+});
+
+it('dates auth_time from the configured refresh_ttl, and from its default when a cached config lacks it', function (?int $refreshTtl) {
+    // The family's expiry is sign-in + refresh_ttl, so the rotation subtracts the SAME value StartSession
+    // added: the configured one, or the default both sides fall back to.
+    $lukk = config('lukk');
+    if ($refreshTtl === null) {
+        unset($lukk['refresh_ttl']);
+    } else {
+        $lukk['refresh_ttl'] = $refreshTtl;
+    }
+    config(['lukk' => $lukk]);
+    $signedIn = now()->getTimestamp() - 100;
+    $pair = $this->travel(-100)->seconds(fn () => start()(1));
+    $this->freezeSecond();
+
+    expect(verifier()->verify(rotate()($pair->refreshToken)->accessToken)->auth_time)->toBe($signedIn);
+})->with(['configured' => [3600], 'default, key missing' => [null]]);
+
+it('records the rotated token\'s lifetime in the configured denylist store', function () {
+    // Revocation reads the longest live lifetime from that store; recorded elsewhere, a lowered
+    // access_ttl would let a revoke expire before this token does.
+    config(['cache.stores.lukk-deny' => ['driver' => 'array'], 'lukk.denylist_store' => 'lukk-deny']);
+    $pair = start()(1);
+    Cache::store('lukk-deny')->flush();
+
+    rotate()($pair->refreshToken);
+
+    expect(Cache::store('lukk-deny')->get('lukk:access-ttls:api'))->not->toBeNull();
 });

@@ -154,3 +154,17 @@ it('leaves the password to a registerUsing hook, which does its own create', fun
 
     $this->postJson('/auth/register', ['email' => 'idp@y.com', 'password' => $long])->assertSuccessful();
 });
+
+it('says it once under the default rules, which already carry the check', function () use ($long) {
+    $errors = $this->postJson('/auth/register', ['name' => 'n', 'email' => 'once@y.com', 'password' => $long, 'password_confirmation' => $long])
+        ->assertStatus(422)->json('errors.password');
+
+    expect($errors)->toBe(['The password may not be longer than 72 bytes.']);
+});
+
+it('names the field when a custom rule set let an array password through', function () {
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed']]);
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'arr2@y.com', 'password' => ['x'], 'password_confirmation' => ['x']])
+        ->assertStatus(422)->assertJsonPath('errors.password.0', 'The password field must be a string.');
+});

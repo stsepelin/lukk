@@ -112,3 +112,12 @@ it('treats a cached config without cookie_mode as body mode', function () use ($
 
     $this->withHeaders($crossSiteForm)->post('/auth/login', ['email' => 'stale@y.com', 'password' => 'password'])->assertOk();
 });
+
+it('reads no refresh cookie on a cached config without cookie_mode, which is body mode', function () use ($crossSiteForm) {
+    $lukk = config('lukk');
+    unset($lukk['cookie_mode']);
+    config(['lukk' => $lukk]);
+    $victim = User::factory()->create()->startSession()->refreshToken;
+
+    $this->withHeaders($crossSiteForm)->withUnencryptedCookie(RefreshCookie::name(), $victim)->post('/auth/refresh')->assertUnauthorized();
+});

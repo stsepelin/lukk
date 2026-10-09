@@ -267,7 +267,10 @@ class RotateRefreshToken
         // When the SESSION was authenticated, which a refresh does not repeat: the family's expiry is fixed
         // at sign-in (`refresh_ttl` from then) and inherited by every successor, so it dates the sign-in
         // without a column. A `refresh_ttl` changed since shifts it by the difference.
-        $claims['auth_time'] = $record->expiresAt - (int) ($this->config['refresh_ttl'] ?? 2592000);
+        $refreshTtl = $this->config['refresh_ttl'] ?? 2592000;
+        // The cast changes nothing for a numeric value, and StartSession reads the same key with the same
+        // cast, so a non-numeric one gave the family a zero lifetime and never reaches a live rotation.
+        $claims['auth_time'] = $record->expiresAt - (int) $refreshTtl; // @pest-mutate-ignore: RemoveIntegerCast
 
         // Re-validated on the way OUT, not trusted because it was validated on the way in. The
         // column is written through `RefreshTokenRepository`, a documented swap seam, and

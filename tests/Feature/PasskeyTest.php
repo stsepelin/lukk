@@ -874,8 +874,10 @@ it('releases them when the passkey step-up is accepted', function () {
     config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 5]);
     $user = User::factory()->create();
     storePasskey($user->id, 'cred-PIN', 0, uvInitialized: true);
-    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+    // Multi-factor, so the password step-up is allowed to run — and fail — on this account.
+    $access = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']])->accessToken;
     $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'wrong'])->assertStatus(422);
+    expect(Lockout::query()->where('purpose', 'confirm')->exists())->toBeTrue();
 
     passkeyStepUp($this, $access, 'cred-PIN', uv: true)->assertOk();
 
