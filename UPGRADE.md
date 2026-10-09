@@ -102,7 +102,7 @@ deletion), `summariesForUser()` (account export) and, with `password_reset.revok
 
 bcrypt reads only the first 72 bytes, so lukk could verify a longer password only in part (NIST
 SP 800-63B-4 §3.1.1.2 requires the whole of it). Registration, reset and change-password answer 422
-for one; with `Lukk::registerValidation()` set, lukk adds that check (and "must be a string", and no NUL byte) after
+for one; with `Lukk::registerValidation()` set or a rebound `RegisterRequest` overriding `rules()`, lukk adds that check (and "must be a string", and no NUL byte) after
 your rules, since they replace its own (the 72-byte rule not when `Lukk::registerUsing()` does the create).
 **Sign-in, step-up and change-password refuse one against a bcrypt hash** — and every earlier lukk
 release stored such passwords, truncated, as does any import. Those users are typing the right

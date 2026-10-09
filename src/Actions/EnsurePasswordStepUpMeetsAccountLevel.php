@@ -88,8 +88,7 @@ class EnsurePasswordStepUpMeetsAccountLevel
         // before the age check could refuse it. Past the end of year 9999 (INF included) the cast would
         // warn too; the future check refuses anything that far anyway, so any upper bound in between is
         // equivalent. A numeric string or JSON number is never NAN.
-        // Only removing this check is observable: an edge moved by a second either way is refused by the age.
-        if ($time < 0) { // @pest-mutate-ignore: SmallerToSmallerOrEqual,DecrementInteger,IncrementInteger
+        if ($time < 0) {
             return false;
         }
 
@@ -97,7 +96,8 @@ class EnsurePasswordStepUpMeetsAccountLevel
             return false;
         }
 
-        $signedIn = (int) floor($time);
+        // Floored, and kept a float: a cast to int is what warned, and nothing here needs one.
+        $signedIn = floor($time);
 
         $config = Lukk::guardConfig();
         $age = now()->getTimestamp() - $signedIn;
@@ -105,8 +105,9 @@ class EnsurePasswordStepUpMeetsAccountLevel
         // A sign-in in the future is not a recent one. `auth_time` is derived as `expires_at - refresh_ttl`,
         // so LOWERING refresh_ttl shifts every older session forward, and with no lower bound a session
         // signed in weeks ago passed as brand new. Clock skew between servers gets the leeway.
-        // Cast, too: a garbled override must fail closed, not compare as a string.
+        // Cast to float, too: a garbled override must fail closed (it reads as 0), not compare as a string,
+        // and a "never" past the int range must not warn the way an int cast did.
         return $age >= -Lukk::leeway($config)
-            && $age <= (int) ($config['confirm']['mfa_max_age'] ?? 86400);
+            && $age <= (float) ($config['confirm']['mfa_max_age'] ?? 86400);
     }
 }

@@ -56,24 +56,20 @@ class RegisterRequest extends FormRequest
     /**
      * What lukk's own create needs of the password, whatever rule set is in force.
      *
-     * `registerValidation()` replaces the rules wholesale, and a consumer's set naturally omits a
-     * hashing detail: under bcrypt an over-72-byte password was then stored truncated (NIST
-     * SP 800-63B-4 §3.1.1.2), and an array or a NUL byte 500'd in the default create. Only with the
-     * hook set — the default rules already say all three — and the 72-byte rule only while lukk's own
-     * create runs. And only for a password that is present, so a set that does not require one still
-     * decides that itself.
+     * `registerValidation()` replaces the rules wholesale, as a rebound subclass overriding `rules()`
+     * does, and a consumer's set naturally omits a hashing detail: under bcrypt an over-72-byte password
+     * was then stored truncated (NIST SP 800-63B-4 §3.1.1.2), and an array or a NUL byte 500'd in the
+     * default create. Run for every rule set (the default one already says all three, so nothing is
+     * added there); the 72-byte rule only while lukk's own create runs. And only for a password that is
+     * present, so a set that does not require one still decides that itself.
      *
      * @return array<int, \Closure>
      */
     public function after(): array
     {
-        // Equivalent without the return: the default rules carry all three checks themselves (`string`,
-        // `not_regex` and `HashablePassword`, not borrowed from `Password::defaults()`), so any password they
-        // refuse has an error, and the closure below skips a password that has one.
-        if (Lukk::$registerValidation === null) {
-            return []; // @pest-mutate-ignore: RemoveEarlyReturn
-        }
-
+        // For EVERY rule set, not only `registerValidation()`'s: a rebound subclass overriding `rules()` is
+        // the other documented customisation, and it skipped all three checks. On the default rules the
+        // closure adds nothing, since they carry the same checks and it skips a password with an error.
         return [function (Validator $validator): void {
             $password = $this->input('password');
 
@@ -98,7 +94,7 @@ class RegisterRequest extends FormRequest
             // password to an IdP that takes longer passphrases. The two checks above stand for it too —
             // any hook that hashes would 500 on either.
             if (Lukk::$registerUsing === null) {
-                (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', $message));
+                (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', str_replace(':attribute', 'password', $message)));
             }
         }];
     }

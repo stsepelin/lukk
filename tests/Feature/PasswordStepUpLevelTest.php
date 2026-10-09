@@ -274,3 +274,39 @@ it('allows a sign-in up to the leeway ahead of this clock, and no further', func
 
     stepUpWithPassword($this, $token)->assertStatus($status);
 })->with(['at the leeway' => [20, 200], 'past it' => [21, 422]]);
+
+it('floors a fractional auth_time at both edges of the allowance', function (float $offset, int $status) {
+    // The second a fraction falls in: just past the age is too old, just past the leeway still allowed.
+    $this->freezeSecond();
+    config(['lukk.confirm.mfa_max_age' => 600, 'lukk.leeway' => 5]);
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-edge'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => now()->getTimestamp() + $offset], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus($status);
+})->with([
+    'half a second past the age' => [-600.5, 422],
+    'half a second past the leeway' => [5.5, 200],
+]);
+
+it('reads auth_time sent as a numeric string', function () {
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-str'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => (string) time()], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertOk();
+});
+
+it('honours a never-expiring mfa_max_age, down to the epoch and no further', function (mixed $maxAge, mixed $authTime, int $status) {
+    // "Never" is a plausible setting — PHP_INT_MAX, or a float past the int range, which made the cast
+    // warn into a 500. Then only the epoch bounds the allowance.
+    config(['lukk.confirm.mfa_max_age' => $maxAge]);
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-never'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => $authTime], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus($status);
+})->with([
+    'at the epoch' => [PHP_INT_MAX, 0, 200],
+    'half a second after it' => [PHP_INT_MAX, 0.5, 200],
+    'half a second before it' => [PHP_INT_MAX, -0.5, 422],
+    'a second before it' => [PHP_INT_MAX, -1, 422],
+    'past the int range' => [1e30, 0, 200],
+]);

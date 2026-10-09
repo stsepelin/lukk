@@ -6,8 +6,10 @@ use Illuminate\Auth\GenericUser;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Lukk\Http\Requests\RegisterRequest;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
+use Lukk\Tests\Fixtures\LooseRegisterRequest;
 use Lukk\Tests\Fixtures\User;
 
 /*
@@ -204,4 +206,21 @@ it('answers 422, not 500, at step-up and change-password on a stored hash the ha
 
     $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'password'])->assertStatus(422);
     $this->withToken($access)->postJson('/auth/password', ['current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1'])->assertStatus(422);
+});
+
+it('applies the safety net to a rebound RegisterRequest whose own rules omit it', function (mixed $password) {
+    // The documented other way to customise registration: a subclass overriding rules(). `after()`
+    // returned nothing without `registerValidation`, so a NUL byte 500'd, a JSON number was stored, and
+    // an over-long password was stored truncated.
+    app()->bind(RegisterRequest::class, LooseRegisterRequest::class);
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'sub@y.com', 'password' => $password, 'password_confirmation' => $password])
+        ->assertStatus(422)->assertJsonValidationErrors('password');
+})->with(['NUL byte' => ["abc\0defgh"], 'number' => [12345678], 'over 72 bytes' => [str_repeat('a', 73)]]);
+
+it('names the field in the 72-byte message it adds', function () use ($long) {
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed']]);
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'msg@y.com', 'password' => $long, 'password_confirmation' => $long])
+        ->assertJsonPath('errors.password.0', 'The password may not be longer than 72 bytes.');
 });

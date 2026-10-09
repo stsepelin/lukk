@@ -20,6 +20,8 @@ use Lukk\Events\AccountDeleted;
 use Lukk\Events\AccountDeleting;
 use Lukk\Lukk;
 
+use function Illuminate\Support\enum_value;
+
 /**
  * Erase an account: lukk's own artifacts, then the user itself (GDPR Art. 17).
  *
@@ -148,7 +150,7 @@ class DeleteAccount
         // On the broker's OWN connection (`auth.passwords.*.connection`, which the framework's broker
         // honours): checked on the default one, a table living elsewhere read as missing and the row —
         // a plaintext email address — survived the erasure.
-        return Schema::connection(config("auth.passwords.{$this->brokerName()}.connection"))
+        return Schema::connection($this->brokerConnection())
             ->hasTable($this->passwordResetTable());
     }
 
@@ -165,6 +167,19 @@ class DeleteAccount
         return (string) (config("auth.passwords.{$this->brokerName()}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
     }
 
+    /**
+     * The broker's connection, as the framework reads it. An enum is a valid name in config; `(string)`
+     * on one threw before anything was erased, and only later 12.x releases unwrap one inside
+     * `DB::connection()` — so it is unwrapped here, with the framework's own helper, for both callers.
+     * Null (or '') is the default connection.
+     */
+    private function brokerConnection(): ?string
+    {
+        $connection = enum_value(config("auth.passwords.{$this->brokerName()}.connection"));
+
+        return is_string($connection) ? $connection : null;
+    }
+
     private function brokerName(): string
     {
         // The cast only states the type: a broker name only reaches a config key, where null and '' read the same.
@@ -179,11 +194,7 @@ class DeleteAccount
      */
     private function acrossConnections(Closure $callback): void
     {
-        // An enum is a valid connection name in config, and `(string)` on one threw before anything was
-        // erased. Unwrapped here rather than handed to `DB::connection()`, which reads enums only from
-        // later 12.x releases. Null (or '') is the default connection, which then nests as a savepoint.
-        $broker = config("auth.passwords.{$this->brokerName()}.connection");
-        $broker = $broker instanceof \BackedEnum ? $broker->value : ($broker instanceof \UnitEnum ? $broker->name : $broker);
+        $broker = $this->brokerConnection();
 
         DB::connection($broker)->transaction(fn () => DB::connection()->transaction($callback));
     }
