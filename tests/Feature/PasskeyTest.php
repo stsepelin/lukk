@@ -18,6 +18,7 @@ use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
 use Lukk\Models\Passkey;
+use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Support\Abilities;
 use Lukk\Support\NewPasskey;
@@ -835,4 +836,67 @@ it('asks the authenticator to verify the user only when the account needs it', f
 
 it('requires authentication to ask for step-up options', function () {
     $this->postJson('/auth/confirm-passkey/options')->assertStatus(401);
+});
+
+it('keeps the password-confirm failures when a passkey step-up is refused', function () {
+    // A refused step-up still released the confirm lockout, so someone holding the session and a
+    // PIN-less key reset the counter on every refused assertion and kept guessing the password.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 5]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-noPIN', 0, uvInitialized: false);
+    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'wrong'])->assertStatus(422);
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'wrong'])->assertStatus(422);
+
+    passkeyStepUp($this, $access, 'cred-noPIN', uv: true)->assertStatus(422);
+
+    expect(Lockout::query()->where('purpose', 'confirm')->value('attempts'))->toBe(2);
+});
+
+it('releases them when the passkey step-up is accepted', function () {
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 5]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-PIN', 0, uvInitialized: true);
+    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => 'wrong'])->assertStatus(422);
+
+    passkeyStepUp($this, $access, 'cred-PIN', uv: true)->assertOk();
+
+    expect(Lockout::query()->where('purpose', 'confirm')->exists())->toBeFalse();
+});
+
+it('refuses an assertion whose counter another concurrent assertion already reached', function () {
+    // Two assertions presenting the same next counter — a clone and the real key at once — both passed
+    // the check against the stale read; only one could move the counter. The one that could not is the
+    // clone signal WebAuthn L3 §7.2 describes.
+    Event::fake([PasskeyCloneDetected::class]);
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-raced', 4);
+    app()->instance(PasskeyRepository::class, new class extends DatabasePasskeyRepository
+    {
+        public function updateSignCount(string $credentialId, int $signCount): bool
+        {
+            // The other assertion landed first.
+            parent::updateSignCount($credentialId, $signCount);
+
+            return parent::updateSignCount($credentialId, $signCount);
+        }
+    });
+
+    passkeyLogin($this, 'cred-raced', uv: false, signCount: 5)->assertStatus(422);
+    Event::assertDispatched(PasskeyCloneDetected::class);
+});
+
+it('tells the ceremony whose credential a step-up expects, and nobody\'s at sign-in', function () {
+    // WebAuthn L3 §7.2 step 6: when the user is identified first, the credential must be theirs and the
+    // response may omit the user handle — which a non-discoverable key does.
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-owner', 0, uvInitialized: true);
+
+    passkeyStepUp($this, start()($user->id, ['amr' => ['pwd']])->accessToken, 'cred-owner', uv: true)->assertOk();
+    expect(FakeWebAuthnCeremony::$lastOwner)->toBe((string) $user->id);
+
+    app('auth')->forgetGuards();
+    passkeyLogin($this, 'cred-owner', uv: true, signCount: 2)->assertOk();
+    expect(FakeWebAuthnCeremony::$lastOwner)->toBeNull();
 });

@@ -50,6 +50,7 @@ class ConfirmablePasskeyController
             (string) $request->input('ceremony_id'), // @pest-mutate-ignore: RemoveStringCast
             $request->array('credential'),
             $assurance->requiredUserVerification($user),
+            $user->getAuthIdentifier(),
         );
 
         if ((string) $passkey->userId !== (string) $user->getAuthIdentifier()) {
@@ -61,6 +62,9 @@ class ConfirmablePasskeyController
         if (! $assurance->permitsStepUp($user, $passkey)) {
             throw ValidationException::withMessages(['credential' => [__('This account needs a passkey that verifies you (PIN or biometric), or your password.')]]);
         }
+
+        // Only now, accepted: a refused step-up must not reset the password-confirm failures.
+        $finishPasskeyLogin->releaseConfirmLock($passkey);
 
         // Bound to the session presenting it, so the confirmation cannot be replayed by another
         // token the same subject holds.

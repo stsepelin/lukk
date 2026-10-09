@@ -34,6 +34,7 @@ class PasskeyAuthenticatedSessionController
     {
         // `ceremony_id` is validated as a required string; the cast states it.
         $passkey = ($this->finishLogin)((string) $request->input('ceremony_id'), $request->array('credential')); // @pest-mutate-ignore: RemoveStringCast
+        $this->finishLogin->releaseConfirmLock($passkey);
 
         // Resolve the user rather than minting a session straight off the credential row. The
         // password path runs these gates and this one skipped both: `block_unverified_login` was

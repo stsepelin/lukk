@@ -50,9 +50,13 @@ interface WebAuthnCeremony
      * `uvInitialized` before this ceremony; WebAuthn L3 §4 says the UV flag "MUST NOT be relied upon"
      * otherwise, and lukk skips a user's enrolled second factor on the strength of this answer.
      *
+     * `$owner`: the user a step-up has already identified (WebAuthn L3 §7.2 step 6). The credential must be
+     * theirs, and the response may then omit its user handle, as a non-discoverable key does. Null at
+     * sign-in, where the response's user handle names the account.
+     *
      * @param  array<string,mixed>  $response
      */
-    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion;
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion;
 
     /**
      * Can this stored credential prove two factors in one gesture — has it shown user verification

@@ -195,7 +195,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         }
     }
 
-    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion
     {
         // Decode the stored credential outside the try — a corrupt record is infra failure, not verification failure.
         $source = $this->source($stored);
@@ -223,7 +223,9 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             );
 
             // Usernameless: the user is resolved from our credential_id→userId mapping, so pass null here.
-            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null); // @pest-mutate-ignore: RemoveStringCast
+            // The owner a step-up already identified (WebAuthn L3 §7.2 step 6), or null at sign-in, where the
+            // response must carry the user handle.
+            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], $owner === null ? null : (string) $owner); // @pest-mutate-ignore: RemoveStringCast
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {

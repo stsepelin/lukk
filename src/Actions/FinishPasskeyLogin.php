@@ -33,7 +33,7 @@ class FinishPasskeyLogin
      * @param  array<string, mixed>  $response
      * @param  string|null  $userVerification  enforced for THIS ceremony; null for the configured one
      */
-    public function __invoke(string $ceremonyId, array $response, ?string $userVerification = null): VerifiedPasskey
+    public function __invoke(string $ceremonyId, array $response, ?string $userVerification = null, int|string|null $owner = null): VerifiedPasskey
     {
         $challenge = $this->challenges->pullForCeremony($ceremonyId);
 
@@ -49,7 +49,7 @@ class FinishPasskeyLogin
         }
 
         try {
-            $assertion = $this->ceremony->verifyAssertion($response, $challenge, $stored, $userVerification);
+            $assertion = $this->ceremony->verifyAssertion($response, $challenge, $stored, $userVerification, $owner);
         } catch (PasskeyVerificationFailed) {
             $this->fail();
         }
@@ -57,14 +57,15 @@ class FinishPasskeyLogin
         $newSignCount = $assertion->signCount;
         $this->guardAgainstClone($stored, $newSignCount);
 
-        // A successful assertion ends the run, the same way a successful password does. Without
-        // this, "consecutive" was only honoured for the password authenticator: a passkey-primary
-        // user could carry 99 confirm failures planted months earlier by a token thief and lock on
-        // their next typo, having done nothing wrong in between.
-        $this->lockouts?->release('confirm', (string) $stored->userId, $this->guard);
-        // Never lower the ratchet. The guard above already throws on a regression, so this is
-        // belt-and-braces — but a rebound ceremony must not be able to walk the counter backwards.
-        $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount));
+        // Never lower the ratchet, and notice losing a race: two assertions presenting the same next counter
+        // (a clone and the real key at once) both passed the check above against the same stale read, and only
+        // one can move the counter. The one that cannot is the clone signal WebAuthn L3 §7.2 describes.
+        if (! $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount))
+            && $newSignCount > $stored->signCount) {
+            event(new PasskeyCloneDetected($stored->userId, $stored->credentialId));
+
+            $this->fail();
+        }
 
         return new VerifiedPasskey($stored->userId, $stored->credentialId, $assertion->multiFactor);
     }
@@ -86,6 +87,16 @@ class FinishPasskeyLogin
 
             $this->fail();
         }
+    }
+
+    /**
+     * A verified passkey ends a run of password-confirm failures, as a correct password does: a passkey-
+     * primary user must not carry failures a token thief planted months ago. The CALLER decides when — a
+     * step-up only once it is accepted, or a refused one would reset the counter every attempt.
+     */
+    public function releaseConfirmLock(VerifiedPasskey $passkey): void
+    {
+        $this->lockouts?->release('confirm', (string) $passkey->userId, $this->guard);
     }
 
     private function fail(): never

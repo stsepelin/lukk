@@ -48,7 +48,7 @@ count as multi-factor, so it carries no `mfa`.
 ```php
 public function authenticationOptions(string $challenge, array $allowCredentialIds, ?string $userVerification = null): array;
 
-public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion;
+public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion;
 
 public function isMultiFactor(PasskeyRecord $stored): bool;
 ```
@@ -61,6 +61,18 @@ public function isMultiFactor(PasskeyRecord $stored): bool;
   library typically updates it from the assertion as part of verification, and WebAuthn L3 §4 forbids
   relying on the flag in the ceremony that would set it. lukk skips an enrolled TOTP on this answer.
 - `isMultiFactor()` reports whether a stored credential has shown user verification; false when unknown.
+- `$owner` is the account a step-up expects the credential to belong to, or null at sign-in. Pass it
+  to your library as the expected user handle (WebAuthn L3 §7.2 step 6): when the authenticator returns
+  a `userHandle`, it must name that account.
+
+### `PasskeyRepository::updateSignCount()` returns `bool`
+
+**Only if you implement `Lukk\Contracts\PasskeyRepository` yourself.** Return whether the row was
+written. The update must be forward-only — write only while the stored counter is below the new one —
+so that of two concurrent assertions presenting the same counter, exactly one wins. lukk treats a
+non-zero counter that did not advance as a cloned authenticator (WebAuthn L3 §6.1.1), refuses the
+assertion and fires `PasskeyCloneDetected`; a repository that always answers `true` silently loses
+that check, and one that always answers `false` refuses every non-zero counter.
 
 A missing or mismatched method is a **fatal at class-load time**, not a catchable exception, so it
 appears on the first request that resolves your binding rather than at boot.

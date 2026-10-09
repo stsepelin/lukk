@@ -55,8 +55,13 @@ class FakeWebAuthnCeremony implements WebAuthnCeremony
      * not, because pinning the library's own config-level UV check is `PasskeyIntegrationTest`'s job
      * and enforcing it here would make every flow test model a UV-capable authenticator.
      */
-    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null): PasskeyAssertion
+    /** The owner the last assertion was checked against — `(string)` id, or null at sign-in. */
+    public static ?string $lastOwner = null;
+
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion
     {
+        self::$lastOwner = $owner === null ? null : (string) $owner;
+
         if (($response['challenge'] ?? null) !== $challenge || ($response['id'] ?? null) !== $stored->credentialId) {
             throw new PasskeyVerificationFailed('assertion mismatch');
         }

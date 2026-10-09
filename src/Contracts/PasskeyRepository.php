@@ -35,7 +35,12 @@ interface PasskeyRepository
      */
     public function credentialIdsFor(int|string $userId): array;
 
-    public function updateSignCount(string $credentialId, int $signCount): void;
+    /**
+     * Move the stored count forward to `$signCount` — never back — and stamp last use. True when the count
+     * moved: false when it was already at or past `$signCount`, which for an advancing count means another
+     * assertion got there first.
+     */
+    public function updateSignCount(string $credentialId, int $signCount): bool;
 
     /**
      * Lightweight metadata for listing a user's passkeys — no COSE key decryption.
