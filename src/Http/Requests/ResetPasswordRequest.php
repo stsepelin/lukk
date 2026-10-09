@@ -6,6 +6,7 @@ namespace Lukk\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rules\Password;
+use Lukk\Support\HashablePassword;
 
 class ResetPasswordRequest extends FormRequest
 {
@@ -28,7 +29,7 @@ class ResetPasswordRequest extends FormRequest
             'email' => ['required', 'string', 'email', 'max:255'],
             'password' => ['required', 'confirmed', 'max:255', // A NUL byte makes `Hash::make` throw ("Bcrypt hashing not supported"), which surfaces as a 500
                 // on a public endpoint rather than a 422. Nothing else in the rule set rejects one.
-                'not_regex:/\0/', Password::defaults()],
+                'not_regex:/\0/', HashablePassword::rule(), Password::defaults()],
         ];
     }
 }
