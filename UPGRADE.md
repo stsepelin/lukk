@@ -333,6 +333,10 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
   passkey or sign in again after every refresh.
 - Even in an `mfa` session, that allowance lasts only `confirm.mfa_max_age` (one day) after the sign-in,
   read from the new `auth_time` claim. Older sessions confirm with a passkey or sign in again.
+  An `auth_time` more than `leeway` in the future, or not an integer, counts as no recent sign-in.
+  `auth_time` is derived as `expires_at − refresh_ttl`, so **lowering `refresh_ttl` pushes older
+  sessions' `auth_time` forward**: after you lower it, those sessions need a fresh multi-factor
+  sign-in (or a passkey) to step up.
 - `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
   `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
   request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never
