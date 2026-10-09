@@ -66,10 +66,12 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
     public function updateSignCount(string $credentialId, int $signCount): void
     {
-        $this->scoped()->whereKey($credentialId)->update([
-            'sign_count' => $signCount,
-            'last_used_at' => now(),
-        ]);
+        $this->scoped()->whereKey($credentialId)->update(['last_used_at' => now()]);
+
+        // Only ever forward. Two concurrent assertions each computed max(stored, theirs) from the same
+        // stale read; written unconditionally, the lower one could land last and roll the count back,
+        // so a clone presenting the higher value later passed the regression check (WebAuthn L3 §7.2).
+        $this->scoped()->whereKey($credentialId)->where('sign_count', '<', $signCount)->update(['sign_count' => $signCount]);
     }
 
     public function summariesForUser(int|string $userId): array
