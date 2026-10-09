@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
+use Illuminate\Contracts\Validation\Rule;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
@@ -240,4 +241,32 @@ it('keeps the 72-byte rule of the default rules for a registerUsing hook that br
 
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'defhook@y.com', 'password' => $long, 'password_confirmation' => $long])
         ->assertStatus(422)->assertJsonPath('errors.password.0', 'The password may not be longer than 72 bytes.');
+});
+
+it('refuses a password that is not a string at reset and change-password, whatever Password::defaults() is', function () {
+    // Registration got the rule; these two still relied on the app's `Password::defaults()` to say
+    // "string", and a JSON number was cast and stored.
+    Illuminate\Validation\Rules\Password::defaults(fn () => new class implements Rule
+    {
+        public function passes($attribute, $value): bool
+        {
+            return true;
+        }
+
+        public function message(): string
+        {
+            return '';
+        }
+    });
+
+    try {
+        $user = User::factory()->create();
+        $this->postJson('/auth/reset-password', ['email' => $user->email, 'token' => Password::createToken($user), 'password' => 123456789012, 'password_confirmation' => 123456789012])
+            ->assertStatus(422)->assertJsonValidationErrors('password');
+        $access = $user->startSession()->accessToken;
+        $this->withToken($access)->postJson('/auth/password', ['current_password' => 'password', 'password' => 123456789012, 'password_confirmation' => 123456789012])
+            ->assertStatus(422)->assertJsonValidationErrors('password');
+    } finally {
+        Illuminate\Validation\Rules\Password::$defaultCallback = null;
+    }
 });
