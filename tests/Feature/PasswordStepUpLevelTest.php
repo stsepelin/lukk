@@ -187,3 +187,44 @@ it('does not let a claims hook forge auth_time', function () {
 
     expect(verifier()->verify($pair->accessToken)->auth_time)->toBe(now()->getTimestamp());
 });
+
+it('honours the allowance up to and including the last second of its age', function (?int $maxAge, int $age) {
+    // The boundary, and the default when a cached config predates the key: a day, to the second.
+    // Pinned by hand: `travel()->seconds($callback)` UNFREEZES the clock when the callback returns, and
+    // a boundary test that straddles a wall-clock second flakes.
+    $now = now()->startOfSecond();
+    $lukk = config('lukk');
+    if ($maxAge === null) {
+        unset($lukk['confirm']['mfa_max_age']);
+    } else {
+        $lukk['confirm']['mfa_max_age'] = $maxAge;
+    }
+    config(['lukk' => $lukk]);
+    $user = withTotp(User::factory()->create());
+    $signInAt = function (int $ago) use ($now, $user) {
+        Carbon\Carbon::setTestNow($now->copy()->subSeconds($ago));
+        $session = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]);
+        Carbon\Carbon::setTestNow($now);
+
+        return $session;
+    };
+    $atLimit = $signInAt($age);
+    $pastLimit = $signInAt($age + 1);
+
+    stepUpWithPassword($this, rotate()($atLimit->refreshToken)->accessToken)->assertOk();
+    app('auth')->forgetGuards();
+    stepUpWithPassword($this, rotate()($pastLimit->refreshToken)->accessToken)->assertStatus(422);
+})->with([
+    'configured' => [600, 600],
+    'default, key missing' => [null, 86_400],
+]);
+
+it('fails closed on an mfa_max_age that is not a number', function () {
+    // A garbled override must not compare as a string — "86400" <= "abc" is true in PHP 8.
+    $this->freezeSecond();
+    config(['lukk.confirm.mfa_max_age' => 'a day']);
+    $user = withTotp(User::factory()->create());
+    $session = $this->travel(-10)->seconds(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+
+    stepUpWithPassword($this, rotate()($session->refreshToken)->accessToken)->assertStatus(422);
+});

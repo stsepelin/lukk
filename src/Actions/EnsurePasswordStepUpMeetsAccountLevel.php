@@ -75,7 +75,15 @@ class EnsurePasswordStepUpMeetsAccountLevel
      */
     private function recent(mixed $authTime): bool
     {
-        return is_numeric($authTime)
-            && now()->getTimestamp() - (int) $authTime <= (int) (Lukk::guardConfig()['confirm']['mfa_max_age'] ?? 86400);
+        if (! is_numeric($authTime)) {
+            return false;
+        }
+
+        // Equivalent without the cast for every value `is_numeric` admits — PHP's arithmetic reads a
+        // numeric string the same way, and a fraction only ever widens the age it is compared with.
+        $signedIn = (int) $authTime; // @pest-mutate-ignore: RemoveIntegerCast
+
+        // Cast, unlike the line above: a garbled override must fail closed, not compare as a string.
+        return now()->getTimestamp() - $signedIn <= (int) (Lukk::guardConfig()['confirm']['mfa_max_age'] ?? 86400);
     }
 }
