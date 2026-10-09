@@ -80,8 +80,8 @@ class DatabaseLockoutRepository implements LockoutRepository
 
         if ($justLocked) {
             // Fired once, on the transition — a locked-out user gets no other signal, so this is
-            // where an app tells the account's owner. NOTE for listeners: `subject` is whatever was
-            // submitted and need not name a real account, so rate-limit any mail you send off it.
+            // where an app tells the account's owner. NOTE for listeners: only an `id:` (login) or bare
+            // user-id (two-factor, confirm) subject names an account; an `idn:` digest names no one.
             event(new AccountLocked($purpose, $subject, $guard));
         }
 

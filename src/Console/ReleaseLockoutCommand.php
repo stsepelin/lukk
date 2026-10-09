@@ -49,11 +49,11 @@ class ReleaseLockoutCommand extends Command
         // for the others — so the command has to derive the same subject the failure path recorded.
         // `two_factor` and `confirm` key on the USER ID verbatim: lower-casing those would break a
         // ULID (uppercase Crockford base32) wherever comparison is binary (PostgreSQL, SQLite).
-        // A `login` lock on an identifier naming no account was keyed by the identifier in plain text
-        // before 0.7, and with `release_after` at 0 this command is the only thing that ever releases
-        // it — so both keys are released.
+        // A `login` lock counts against the account and against the identifier's fold, and before 0.7 a
+        // non-account was keyed by the identifier in plain text. With `release_after` at 0 this command is
+        // the only thing that ever releases any of them, so all are released.
         $subjects = $purpose === 'login'
-            ? [$this->loginSubject($this->stringArgument('subject'), $guard), LoginRateLimiter::legacyLockoutSubject($this->stringArgument('subject'))]
+            ? [$this->loginSubject($this->stringArgument('subject'), $guard), LoginRateLimiter::lockoutSubject(null, $this->stringArgument('subject')), LoginRateLimiter::legacyLockoutSubject($this->stringArgument('subject'))]
             : [$this->stringArgument('subject')];
 
         // `release()` fires AccountReleased itself, so every path (success, reset, console, expiry)

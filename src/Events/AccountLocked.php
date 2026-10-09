@@ -9,9 +9,12 @@ namespace Lukk\Events;
  *
  * Fired once, on the transition. A locked-out user gets no other signal — they simply can't
  * authenticate — so this is where an app sends the "someone is trying to get into your account"
- * mail, or a release link. `$subject` is the normalized identifier for a login lock and the user id
- * for a two-factor one; it is NOT a resolved user, because a login lock can name an account that
- * doesn't exist.
+ * mail, or a release link. `$subject` is the counter that locked:
+ *
+ *  - `id:<user id>` — a login lock on an account. The one to notify.
+ *  - `idn:sha256:<digest>` — a login lock on an identifier's fold. Names no one: it locks for a
+ *    non-account, and alongside the account's own lock for a real one. Ignore it for notifications.
+ *  - `<user id>` — a two-factor or step-up (`confirm`) lock.
  */
 class AccountLocked
 {

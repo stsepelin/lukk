@@ -12,6 +12,7 @@ use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\PasswordChanged;
+use Lukk\Lukk;
 
 /**
  * Change the password of an already-authenticated user, having re-verified the current one.
@@ -73,7 +74,9 @@ class ChangePassword
         // line required proving the current password.
         $this->lockouts?->release('confirm', $subject, $this->guard);
         // (The identifier argument is unused when a user is passed.)
-        $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard); // @pest-mutate-ignore: EmptyStringToNotEmpty
+        foreach (LoginRateLimiter::lockoutSubjects($user, (string) ($user->getAttribute(Lukk::usernameField()) ?? '')) as $subject) {
+            $this->lockouts?->release('login', $subject, $this->guard);
+        }
 
         // Every OTHER session dies; this one survives. Changing a password is what a user does when
         // they think someone else is in the account, so leaving those sessions alive would defeat

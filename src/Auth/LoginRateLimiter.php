@@ -160,6 +160,24 @@ class LoginRateLimiter
     }
 
     /**
+     * Every persistent-lockout counter a login attempt touches: the identifier FOLD always, and the
+     * account too when the identifier resolves to one. Either being locked refuses the attempt.
+     *
+     * The fold alone would let a look-alike account's owner reset the victim's lock with their own
+     * success or password reset. The account alone was an existence oracle: failures on a spelling the
+     * database never resolves (a Cyrillic look-alike, another case on a binary collation) locked the fold
+     * of a non-account, which its canonical spelling then also checked, and nothing a real account's
+     * canonical spelling checked — 423 versus 422. Counting both, a non-resolving spelling locks the same
+     * fold in either case, and only the account's own success or reset releases its account counter.
+     *
+     * @return list<string>
+     */
+    public static function lockoutSubjects(?Authenticatable $user, string $identifier): array
+    {
+        return array_values(array_filter(array_unique([self::lockoutSubject(null, $identifier), self::lockoutSubject($user, $identifier)]), fn (string $s) => $s !== ''));
+    }
+
+    /**
      * The plain-text subject releases before 0.7 wrote for an identifier naming no account. Read
      * only to release, erase and export those rows; nothing writes this form any more.
      */

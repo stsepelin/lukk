@@ -83,9 +83,13 @@ it('fires AccountLocked once, on the transition', function () {
         failLogin();
     }
 
-    // A locked-out user gets no other signal, so an app needs exactly one notification to hang off.
-    Event::assertDispatchedTimes(AccountLocked::class, 1);
-    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::firstOrFail()->getKey());
+    // A locked-out user gets no other signal, so an app needs exactly one notification to hang off: one
+    // for the account. The identifier's fold counter locks alongside it, and announces itself with a
+    // digest subject, which is what a non-account lock always looked like and names no one to notify.
+    $id = 'id:'.User::firstOrFail()->getKey();
+    Event::assertDispatchedTimes(AccountLocked::class, 2);
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === $id);
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->subject === LoginRateLimiter::lockoutSubject(null, 'victim@y.com'));
 });
 
 it('auto-releases once release_after has elapsed', function () {
@@ -230,13 +234,15 @@ it('prunes spent counters but never a lock that is still held', function () {
         failLogin();
     }
 
-    expect(Lockout::query()->count())->toBe(3);
+    // Two probe counters, and the victim's two: its account and its identifier's fold.
+    expect(Lockout::query()->count())->toBe(4);
 
     $this->travel(31)->days();
     command('lukk:prune')->assertSuccessful();
 
-    // The two stale probe counters go; the held lock stays, or pruning would be a release path.
-    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::firstOrFail()->getKey()]);
+    // The two stale probe counters go; the held locks stay, or pruning would be a release path.
+    expect(Lockout::query()->pluck('subject')->sort()->values()->all())
+        ->toBe(collect(['id:'.User::firstOrFail()->getKey(), LoginRateLimiter::lockoutSubject(null, 'victim@y.com')])->sort()->values()->all());
 });
 
 it('rejects an unknown --purpose rather than releasing something else', function () {
@@ -461,8 +467,10 @@ it('does not let a look-alike account share, or clear, another account\'s lock',
     }
     failLogin('admin@y.com')->assertStatus(423);
 
-    // The look-alike is a different account, so it holds a different counter and is not locked.
-    failLogin("\u{0430}dmin@y.com")->assertStatus(422);
+    // The look-alike shares the identifier's fold, which the victim's failures locked — the price of
+    // keeping a non-resolving spelling from answering whether an account exists. It is a different
+    // ACCOUNT, though, so its own success or reset cannot release the victim's account counter.
+    failLogin("\u{0430}dmin@y.com")->assertStatus(423);
 
     // And resetting the look-alike's password must not release the victim's lock.
     app('auth')->forgetGuards();
@@ -601,4 +609,36 @@ it('stores no readable identifier for an address that names no account', functio
         ->and(strtolower($subjects[0]))->not->toContain('stranger')
         // Still one bucket for every spelling of it, and still locked.
         ->and(failLogin('  stranger@y.COM ')->status())->toBe(423);
+});
+
+it('locks a spelling that names no row the same whether or not the account exists', function () {
+    // The subject was the account for a resolving spelling and the fold for any other, so failures on a
+    // spelling the database never resolves (a Cyrillic look-alike; another case on a binary collation)
+    // locked the fold for a non-account but nothing a real account's canonical spelling checked: the
+    // canonical probe then answered 423 for a non-account and 422 for a real one. Failures now count
+    // against the fold always, and against the account too when one resolves; either locks.
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    $probe = function (string $email) {
+        $variant = str_replace('i', "\u{0456}", $email); // Cyrillic і, never resolves
+        foreach (range(1, 4) as $i) {
+            failLogin($variant);
+        }
+
+        return failLogin($email)->status();
+    };
+
+    expect($probe('victim@y.com'))->toBe($probe('ghost@y.com'))->toBe(423);
+});
+
+it('lets the account\'s own success, or its own reset, release both of its counters', function () {
+    User::factory()->create(['email' => 'mine@y.com', 'password' => bcrypt('correct')]);
+    foreach (range(1, 2) as $i) {
+        failLogin('mine@y.com');
+    }
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'mine@y.com', 'password' => 'correct'])->assertOk();
+
+    expect(Lockout::count())->toBe(0);
 });

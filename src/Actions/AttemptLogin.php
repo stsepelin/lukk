@@ -50,9 +50,9 @@ class AttemptLogin
         // The account the identifier names, looked up ONCE: it keys the counters below and is the
         // row the password is then checked against.
         $candidate = $this->candidate($request);
-        $subject = LoginRateLimiter::lockoutSubject($candidate, (string) $request->input($this->field()));
+        $subjects = LoginRateLimiter::lockoutSubjects($candidate, (string) $request->input($this->field()));
 
-        $this->ensureIsNotLocked($request, $subject);
+        $this->ensureIsNotLocked($request, $subjects);
         $this->ensureIsNotThrottled($request);
 
         // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
@@ -62,7 +62,7 @@ class AttemptLogin
         // transactional and row-locked, so consuming it first makes the count authoritative at the
         // moment it is taken. Costs one write per attempt, and only when the feature is on: a hard
         // consecutive cap is not something a decaying counter can approximate.
-        $this->reserve($subject);
+        $this->reserve($subjects);
 
         try {
             $user = $this->resolve($request, $candidate);
@@ -74,7 +74,9 @@ class AttemptLogin
 
         $this->limiter->clear($request);
         // "Consecutive" is the whole point of the cap: any success ends the run.
-        $this->lockouts?->release('login', $subject, $this->limiter->guard());
+        foreach ($subjects as $subject) {
+            $this->lockouts?->release('login', $subject, $this->limiter->guard());
+        }
         // A step-up lock counts failures against the SAME password, so a successful login is proof
         // enough to clear it — and it's the only self-service escape from a confirm lock an attacker
         // set with a stolen access token (they cannot log in without the password, so this hands
@@ -96,7 +98,8 @@ class AttemptLogin
      * A success releases the row immediately below, so the counter still means "consecutive
      * failures" from the outside — it is only *held* for the duration of the credential check.
      */
-    private function reserve(string $subject): void
+    /** @param  list<string>  $subjects */
+    private function reserve(array $subjects): void
     {
         if ($this->lockouts === null) {
             return;
@@ -107,18 +110,28 @@ class AttemptLogin
         // `> max` keeps the documented meaning — `max` failures happen, then the account is locked —
         // while the atomic increment means only `max` requests can ever win a slot, however many
         // arrive at once.
-        if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
-            $this->throwLocked('login', $subject, $this->field());
+        // Every counter takes the attempt before any refuses it, so they stay in step.
+        $over = null;
+
+        foreach ($subjects as $subject) {
+            if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
+                $over ??= $subject;
+            }
+        }
+
+        if ($over !== null) {
+            $this->throwLocked('login', $over, $this->field());
         }
     }
 
-    private function ensureIsNotLocked(Request $request, string $subject): void
+    /** @param  list<string>  $subjects */
+    private function ensureIsNotLocked(Request $request, array $subjects): void
     {
-        if ($this->lockouts === null || ! $this->lockouts->locked('login', $subject, $this->limiter->guard())) {
-            return;
+        foreach ($subjects as $subject) {
+            if ($this->lockouts?->locked('login', $subject, $this->limiter->guard())) {
+                $this->throwLocked('login', $subject, $this->field());
+            }
         }
-
-        $this->throwLocked('login', $subject, $this->field());
     }
 
     private function resolve(Request $request, ?Authenticatable $candidate): Authenticatable
