@@ -62,7 +62,8 @@ class ChangePassword
             throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
         }
 
-        $user->forceFill(['password' => Hash::make($password)])->save();
+        // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
+        $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
 
         // BOTH counters. The failures they hold were against a password that no longer exists, and
         // the reset path already releases both for exactly that reason. Releasing only `confirm`

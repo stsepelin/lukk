@@ -13,6 +13,11 @@ use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Timebox;
+use Illuminate\Testing\TestResponse;
+use Lukk\Contracts\PasskeyRepository;
+use Lukk\Events\PasskeyDeleted;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\PasswdColumnUser;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('password-reset');
@@ -320,4 +325,66 @@ it('answers every failed reset with the one generic token message', function () 
         'token' => 'not-a-token', 'email' => 'a@b.c',
         'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
     ])->assertStatus(422)->assertJsonValidationErrors(['email' => __('passwords.token')]);
+});
+
+function resetTo(object $test, User $user, string $password = 'new-password-1'): TestResponse
+{
+    return $test->postJson('/auth/reset-password', [
+        'email' => $user->email,
+        'token' => Password::createToken($user),
+        'password' => $password,
+        'password_confirmation' => $password,
+    ]);
+}
+
+it('keeps passkeys across a reset unless told otherwise, as it keeps the second factor', function () {
+    // NIST SP 800-63B-4 §4.2 does not ask a recovery to drop the other authenticators, and lukk already
+    // keeps TOTP across one; removing passkeys by default would be the odd one out.
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('kept', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect(app(PasskeyRepository::class)->credentialIdsFor($user->id))->toBe(['kept']);
+});
+
+it('removes every passkey on reset when asked, announcing each', function () {
+    // For an install that treats a reset as "start over": a passkey an attacker enrolled while they held
+    // the password, or registered on a squatted account, would otherwise outlive the recovery.
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Event::fake([PasskeyDeleted::class]);
+    $user = User::factory()->create();
+    $other = User::factory()->create();
+    $repo = app(PasskeyRepository::class);
+    $repo->store($user->id, new NewPasskey('a', 'PUB', 0));
+    $repo->store($user->id, new NewPasskey('b', 'PUB', 0));
+    $repo->store($other->id, new NewPasskey('theirs', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect($repo->credentialIdsFor($user->id))->toBe([])
+        ->and($repo->credentialIdsFor($other->id))->toBe(['theirs']);
+    Event::assertDispatchedTimes(PasskeyDeleted::class, 2);
+    Event::assertDispatched(PasskeyDeleted::class, fn ($e) => $e->user->is($user) && $e->credentialId === 'a');
+});
+
+it('resets without a passkeys table when asked to remove passkeys', function () {
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Schema::drop('passkeys');
+
+    resetTo($this, User::factory()->create())->assertOk();
+});
+
+it('writes the new password to the column the model names', function () {
+    // `getAuthPasswordName()` is the framework's seam for a column not called `password`; sign-in already
+    // honoured it, while a reset wrote a `password` attribute the model does not have.
+    Schema::table('users', fn (Blueprint $t) => $t->string('passwd')->nullable());
+    $user = PasswdColumnUser::query()->create(['name' => 'p', 'email' => 'passwd@y.com', 'password' => 'unused']);
+    config(['auth.providers.users.model' => PasswdColumnUser::class]);
+    app('auth')->forgetGuards();
+    DB::table('users')->where('id', $user->id)->update(['passwd' => Hash::make('old-password')]);
+
+    resetTo($this, $user)->assertOk();
+
+    expect(Hash::check('new-password-1', (string) DB::table('users')->where('id', $user->id)->value('passwd')))->toBeTrue();
 });

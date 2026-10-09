@@ -5,11 +5,16 @@ declare(strict_types=1);
 namespace Lukk\Actions;
 
 use Illuminate\Auth\Events\PasswordReset;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Contracts\PasskeyRepository;
+use Lukk\Events\PasskeyDeleted;
+use Lukk\Models\Passkey;
 
 /**
  * Reset a password via Laravel's password broker (single-use, hashed, expiring token). On
@@ -38,7 +43,8 @@ class ResetPassword
     public function __invoke(array $credentials): void
     {
         $status = Password::broker($this->config['password_reset']['broker'] ?? null)->reset($credentials, function ($user, string $password): void {
-            $user->forceFill(['password' => Hash::make($password)])->save();
+            // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
+            $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
 
             // The only self-service way out of a lock. A reset proves control of the address —
             // strictly stronger evidence than the password itself — so leaving the account locked
@@ -59,6 +65,10 @@ class ResetPassword
             if ($this->config['password_reset']['revoke_sessions'] ?? true) {
                 ($this->revokeAllSessions)($user->getAuthIdentifier());
             }
+
+            if ($this->config['password_reset']['revoke_passkeys'] ?? false) {
+                $this->revokePasskeys($user);
+            }
         });
 
         if ($status !== Password::PASSWORD_RESET) {
@@ -67,6 +77,27 @@ class ResetPassword
             // surfacing that difference would let this endpoint enumerate accounts — the
             // very thing forgot-password's generic 200 is careful to avoid.
             throw ValidationException::withMessages(['email' => [__('passwords.token')]]);
+        }
+    }
+
+    /**
+     * Opt-in: a reset that also removes every passkey, each announced as `PasskeyDeleted`. Off by
+     * default, as the second factor survives a reset too (NIST SP 800-63B-4 §4.2 asks for neither); on,
+     * a passkey an attacker enrolled while holding the password, or on a squatted account, does not
+     * outlive the recovery. Skipped where the passkeys table was never published.
+     */
+    private function revokePasskeys(Authenticatable $user): void
+    {
+        if (! Schema::hasTable((new Passkey)->getTable())) {
+            return;
+        }
+
+        $passkeys = app(PasskeyRepository::class);
+
+        foreach ($passkeys->summariesForUser($user->getAuthIdentifier()) as $summary) {
+            if ($passkeys->delete($user->getAuthIdentifier(), $summary['credential_id'])) {
+                event(new PasskeyDeleted($user, $summary['credential_id']));
+            }
         }
     }
 }

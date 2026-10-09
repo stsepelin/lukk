@@ -316,6 +316,7 @@ it('leaves no guarded config read unexercised', function () {
         'password_reset.broker' => 'optional feature; PasswordResetTest',
         'password_reset.frontend_url' => 'optional feature; PasswordResetTest',
         'password_reset.revoke_sessions' => 'optional feature; PasswordResetTest',
+        'password_reset.revoke_passkeys' => 'defaults false; PasswordResetTest',
         'password_reset.timebox_micros' => 'optional feature; PasswordResetTest (falls back to one second)',
         'registration.login' => 'optional feature; RegistrationTest',
         // Read while the routes register, before any test body can strip it.

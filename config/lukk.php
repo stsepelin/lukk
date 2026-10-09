@@ -785,6 +785,21 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Revoke Passkeys on Reset
+        |--------------------------------------------------------------------------
+        |
+        | When true, a successful reset also removes every passkey on the
+        | account, dispatching `PasskeyDeleted` for each. Off by default: a reset
+        | proves control of the mailbox, and lukk keeps the second factor across
+        | it too. Turn it on if a reset should mean "start over", so a passkey an
+        | attacker enrolled while holding the password does not survive it.
+        |
+        */
+
+        'revoke_passkeys' => (bool) env('LUKK_RESET_REVOKE_PASSKEYS', false),
+
+        /*
+        |--------------------------------------------------------------------------
         | Forgot-password Timebox
         |--------------------------------------------------------------------------
         |
