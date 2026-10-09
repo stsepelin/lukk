@@ -301,7 +301,7 @@ still find them.
 This closes login CSRF: a cross-site form could otherwise plant an attacker's session cookie. Send
 JSON (`{}` for a cookie refresh), as lukk-js does.
 
-### Three request rules a client can hit
+### Request rules a client can hit
 
 **Low impact — check custom clients.**
 
@@ -319,6 +319,36 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
   `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
   request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never
   touched a column must be renamed.
+
+### `leeway` is capped at five minutes
+
+`LUKK_LEEWAY` (and a per-guard `leeway`) is clamped to 0–300 seconds for every token lukk decodes —
+access tokens, two-factor challenges, step-up confirmations, passkey challenges. RFC 7519 §4.1.4
+allows "some small leeway"; a larger value kept an expired challenge usable for as long as it said.
+A configured value above 300 now acts as 300; fix the clock skew instead.
+
+### Per-guard overrides are honoured
+
+`features.lockout`, the `lockout` block, `rate_limits.login.*` and `rate_limits.two_factor.*` are
+read per guard. An extra guard that set
+them in its `lukk.guards` block silently got the global values before; check that what it declares
+is what you want enforced, since it now is.
+
+### `password_reset.revoke_passkeys` (new, default off)
+
+With it on, a reset removes every passkey and dispatches `PasskeyDeleted` for each. Keep
+`revoke_sessions` on with it: a session that survives the reset can step up and enroll a new
+passkey at once, so removing them achieves nothing.
+
+### A custom password column is written
+
+Reset and change-password now write the column `getAuthPasswordName()` names, as sign-in already
+read it. Nothing to do unless you worked around the 500 by adding a `password` mutator; remove it.
+
+### `lukk:secret --guard` validates the guard name
+
+The name may contain only letters, digits, `_` and `-` (a dash becomes `_` in the variable). A
+dotted name is refused rather than matched onto another guard's `LUKK_*_SECRET` line.
 
 ### New events when an authenticator is bound or removed
 

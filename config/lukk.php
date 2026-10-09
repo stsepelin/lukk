@@ -811,6 +811,8 @@ return [
         | proves control of the mailbox, and lukk keeps the second factor across
         | it too. Turn it on if a reset should mean "start over", so a passkey an
         | attacker enrolled while holding the password does not survive it.
+        | Only useful with `revoke_sessions` on: a session that outlives the
+        | reset can step up and enroll a new passkey at once.
         |
         */
 
