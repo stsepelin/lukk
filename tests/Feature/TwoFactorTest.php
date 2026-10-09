@@ -14,6 +14,7 @@ use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\ConfirmTwoFactor;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Auth\ChallengeToken;
+use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
@@ -772,4 +773,45 @@ it('assumes the password path for a challenge that does not say how the first fa
     ])->assertOk()->json();
 
     expect(claims($pair['access_token'])->amr)->toBe(['pwd', 'otp', 'mfa']);
+});
+
+it('gives one session per challenge even when two redemptions read it as unspent together', function () {
+    // Two concurrent redemptions, each with a different valid factor, both passed the up-front check
+    // and both minted a session. A denylist that never reports a jti stands in for both reads landing
+    // before either write; the second must lose the atomic spend.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('R-ONE'), Hash::make('R-TWO')])])->save();
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $inner = app(Denylist::class);
+    app()->instance(Denylist::class, new class($inner) implements Denylist
+    {
+        public function __construct(private readonly Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return false;
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return false;
+        }
+    });
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'R-ONE'])->assertOk();
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'R-TWO'])
+        ->assertStatus(422)->assertJsonValidationErrors('challenge_token');
 });

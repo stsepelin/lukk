@@ -318,3 +318,40 @@ it('carries the password fingerprint it was issued with, and only a string one',
             ->and(challenge()->passwordFingerprintOf('2fa', $forged))->toBeNull();
     }
 });
+
+it('spends a challenge once even when two requests read it as unspent at the same moment', function () {
+    // The check (`has()` in decode) and the mark (`revokeJti()`) were two steps, so two concurrent
+    // redemptions could both read "unspent" and both succeed — two sessions from one challenge, each
+    // with a different valid factor. The spend is now an atomic claim. A denylist that never reports a
+    // jti stands in for both reads landing before either write.
+    $blind = new class(app(Denylist::class)) implements Denylist
+    {
+        public function __construct(private readonly Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return false;
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return false;
+        }
+    };
+    app()->instance(Denylist::class, $blind);
+    app()->forgetInstance(ChallengeToken::class);
+    $token = challenge()->issue('2fa', 42, 300);
+
+    expect(challenge()->consume('2fa', $token))->toBe('42')
+        ->and(challenge()->consume('2fa', $token))->toBeNull();
+});

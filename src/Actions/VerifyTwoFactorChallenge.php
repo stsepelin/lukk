@@ -97,7 +97,13 @@ class VerifyTwoFactorChallenge
         // A success ends the run and returns the slot reserved above.
         $this->limiter->clear($key);
         $this->lockouts?->release('two_factor', $subject, $this->guard);
-        $this->challengeTokens->consume('2fa', $challengeToken);
+        // Spent atomically: a concurrent request presenting the same challenge with another valid factor
+        // loses here, rather than also getting a session.
+        if ($this->challengeTokens->consume('2fa', $challengeToken) === null) {
+            throw ValidationException::withMessages([
+                'challenge_token' => [__('The two-factor challenge is invalid or has expired.')],
+            ]);
+        }
 
         return $user;
     }

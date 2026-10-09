@@ -178,9 +178,18 @@ class ChallengeToken
         // declared types, not conversions. Pest ignores per line and per mutator name, so the `(int)`
         // annotation also covers the cast on `leeway` — that one is real (an uncast env string "2.5"
         // makes the TTL a float and `revokeJti(int)` a TypeError) and is pinned in `ChallengeTokenTest`.
+        $ttl = max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)); // @pest-mutate-ignore: RemoveIntegerCast
+
+        // An atomic claim, not the denylist read `decode()` made: two concurrent redemptions could both
+        // read "unspent" there and both succeed. `add()` writes only when the key is absent, so exactly
+        // one caller gets the subject back — the primitive the passkey challenge and TOTP replay marker use.
+        if (! cache()->store($this->config['denylist_store'] ?? null)->add('lukk:challenge-spent:'.$claims->jti, true, $ttl)) {
+            return null;
+        }
+
         $this->denylist->revokeJti(
             (string) $claims->jti, // @pest-mutate-ignore: RemoveStringCast
-            max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)), // @pest-mutate-ignore: RemoveIntegerCast
+            $ttl,
         );
 
         return (string) $claims->sub; // @pest-mutate-ignore: RemoveStringCast
