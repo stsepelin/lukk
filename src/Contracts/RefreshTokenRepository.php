@@ -74,6 +74,10 @@ interface RefreshTokenRepository
      */
     public function countLiveTokens(string $familyId): int;
 
+    /**
+     * Revoke every row of the family. Revocation is family-wide only: a row carrying `revokedAt` is
+     * read as "this family's revoke has already run", and presenting it does no further work.
+     */
     public function revokeFamily(string $familyId): void;
 
     /**

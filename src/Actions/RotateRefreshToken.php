@@ -108,8 +108,13 @@ class RotateRefreshToken
                 return RotationOutcome::unknown();
             }
 
+            // The row itself is revoked, so its family's revoke has already run — denylist first,
+            // then every row, twice (see DatabaseRefreshTokenRepository::revokeFamily). Running it
+            // again here wrote the denylist and two UPDATEs per request, which made one dead token
+            // replayed at an unauthenticated route a write amplifier. Only the denylist-only case
+            // below, a revoke still in flight, needs a second pass.
             if ($record->revokedAt !== null) {
-                return RotationOutcome::revoked($record->familyId);
+                return RotationOutcome::dead();
             }
 
             if ($record->expiresAt < now()->getTimestamp()) {
@@ -223,6 +228,7 @@ class RotateRefreshToken
         return match ($outcome->type) {
             'issued' => $this->pair($outcome),
             'revoked', 'reuse' => $this->killFamily($outcome->familyId, $outcome->type),
+            'dead' => throw new InvalidRefreshToken('revoked'),
             'expired' => throw new InvalidRefreshToken('expired'),
             default => throw new InvalidRefreshToken('unknown'),
         };

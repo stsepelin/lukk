@@ -11,7 +11,7 @@ namespace Lukk\Support;
 class RotationOutcome
 {
     private function __construct(
-        public readonly string $type,            // issued|unknown|revoked|expired|reuse
+        public readonly string $type,            // issued|unknown|revoked|dead|expired|reuse
         public readonly ?string $familyId = null,
         public readonly int|string|null $userId = null,
         public readonly ?string $refreshSecret = null,
@@ -44,6 +44,12 @@ class RotationOutcome
     public static function revoked(string $familyId): self
     {
         return new self('revoked', $familyId);
+    }
+
+    /** The presented row is itself revoked: the family's revoke already ran, so there is nothing left to do. */
+    public static function dead(): self
+    {
+        return new self('dead');
     }
 
     public static function reuse(string $familyId): self

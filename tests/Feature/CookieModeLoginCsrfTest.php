@@ -79,6 +79,21 @@ it('leaves body mode alone, where no cookie is set', function () use ($crossSite
         ->assertOk();
 });
 
+it('does not take a refresh cookie in body mode, where no CSRF guard stands in front of it', function () use ($crossSiteForm) {
+    // A cookie left over from cookie mode (or planted by a sibling subdomain) would otherwise be
+    // consumed by any cross-site form: the attacker cannot read the response, but the victim's next
+    // refresh presents a rotated token, and past grace that revokes the whole family.
+    config(['lukk.cookie_mode' => false]);
+    $victim = User::factory()->create()->startSession()->refreshToken;
+
+    $this->withHeaders($crossSiteForm)
+        ->withUnencryptedCookie(RefreshCookie::name(), $victim)
+        ->post('/auth/refresh')
+        ->assertUnauthorized();
+
+    expect(fn () => rotate()($victim))->not->toThrow(Throwable::class);
+});
+
 it('guards every route that sets the cookie', function (string $route) use ($crossSiteForm) {
     config(['lukk.features.registration' => true]);
 

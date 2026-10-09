@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
 use Lukk\Actions\RevokeSession;
@@ -135,6 +136,36 @@ it('kills the family if a hard-revoked token is presented', function () {
     } catch (InvalidRefreshToken $e) {
         expect($e->reason)->toBe('revoked');
     }
+});
+
+it('does no revocation work for a token whose own row is already revoked', function () {
+    // Re-revoking wrote the denylist and ran two UPDATEs per request, so one dead token replayed
+    // against an unauthenticated route was a write amplifier. EndSession already treats it as dead.
+    $pair = start()(1);
+    revokeSession()(familyId());
+
+    $denylist = Mockery::spy(app(Denylist::class));
+    app()->instance(Denylist::class, $denylist);
+    $writes = 0;
+    DB::listen(function ($query) use (&$writes) {
+        if (str_starts_with(strtolower(ltrim($query->sql)), 'update')) {
+            $writes++;
+        }
+    });
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'revoked');
+    $denylist->shouldNotHaveReceived('revokeFamily');
+    expect($writes)->toBe(0);
+});
+
+it('still revokes again when only the denylist says a revoke is in flight', function () {
+    // The row is live, but a revoke has written its denylist entry and not yet its rows: the
+    // rotation must revoke AFTER its own commit so the successor it just inserted is caught.
+    $pair = start()(1);
+    app(Denylist::class)->revokeFamily(familyId(), 60);
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'revoked');
+    expect(RefreshToken::where('family_id', familyId())->whereNull('revoked_at')->count())->toBe(0);
 });
 
 it('revoke-all revokes only that user', function () {
