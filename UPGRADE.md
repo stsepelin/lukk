@@ -251,6 +251,14 @@ names no account is now stored as `idn:sha256:<digest>` rather than the identifi
 Locks written before the upgrade keep their old key: `lukk:release`, account erasure and the export
 still find them.
 
+### Cookie mode: token routes require JSON
+
+**Medium impact — only with `cookie_mode` on, and only for clients not sending JSON.** `login`,
+`register`, `refresh`, `two-factor-challenge` and `passkeys/login` answer `415` unless the request has a
+`Content-Type: application/json` body or comes from the same origin (`Sec-Fetch-Site: same-origin`).
+This closes login CSRF: a cross-site form could otherwise plant an attacker's session cookie. Send
+JSON (`{}` for a cookie refresh), as lukk-js does.
+
 ### Three request rules a client can hit
 
 **Low impact — check custom clients.**

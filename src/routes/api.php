@@ -28,6 +28,7 @@ use Lukk\Http\Controllers\TwoFactorAuthenticationController;
 use Lukk\Http\Controllers\TwoFactorChallengedSessionController;
 use Lukk\Http\Controllers\VerifyEmailController;
 use Lukk\Http\Middleware\ForceJsonRequest;
+use Lukk\Http\Middleware\RefuseForgeableCookieGrant;
 use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
@@ -99,8 +100,8 @@ foreach (is_array($extraGuards = config('lukk.guards')) ? $extraGuards : [] as $
         ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.$guardName])
         ->group(function () use ($guardName, $sessionRoutes) {
             Route::get('jwks', JwksController::class);
-            Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-login');
-            Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-'.$guardName.'-refresh');
+            Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-'.$guardName.'-login']);
+            Route::post('refresh', [TokenController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-'.$guardName.'-refresh']);
 
             // The redemption half of the two-factor challenge, mounted wherever `login` is.
             // `login` can answer `{"two_factor": true, "challenge_token": …}` on ANY guard whose
@@ -112,7 +113,7 @@ foreach (is_array($extraGuards = config('lukk.guards')) ? $extraGuards : [] as $
             // Keys of an array `guards` are strings here: boot refuses a numeric one. The casts state it.
             if (Lukk::enforcesTwoFactor((string) $guardName)) { // @pest-mutate-ignore: RemoveStringCast
                 Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])
-                    ->middleware('throttle:lukk-'.$guardName.'-2fa');
+                    ->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-'.$guardName.'-2fa']);
             }
 
             $sessionRoutes((string) $guardName, $guardName.'-'); // @pest-mutate-ignore: RemoveStringCast
@@ -133,11 +134,11 @@ Route::domain(config('lukk.domain'))
 
         if (config('lukk.features.registration')) {
             // Public: create an account and (unless verification blocks it) start a session.
-            Route::post('register', [RegisteredUserController::class, 'store'])->middleware('throttle:lukk-register');
+            Route::post('register', [RegisteredUserController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-register']);
         }
 
-        Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-login');
-        Route::post('refresh', [TokenController::class, 'store'])->middleware('throttle:lukk-refresh');
+        Route::post('login', [AuthenticatedSessionController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-login']);
+        Route::post('refresh', [TokenController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-refresh']);
         $sessionRoutes(Lukk::defaultGuard());
 
         // `?? true` for the same reason `logout_all` has one: absent is a stale cached config, not a
@@ -193,7 +194,7 @@ Route::domain(config('lukk.domain'))
         // so it must still be able to answer. Management needs the feature switched ON: enrolling a
         // new factor on a flag nobody set is a decision the install never made.
         if (Lukk::enforcesTwoFactor(Lukk::defaultGuard())) {
-            Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware('throttle:lukk-2fa');
+            Route::post('two-factor-challenge', [TwoFactorChallengedSessionController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-2fa']);
         }
 
         if (config('lukk.features.two_factor')) {
@@ -210,7 +211,7 @@ Route::domain(config('lukk.domain'))
 
         if (config('lukk.features.passkeys')) {
             Route::post('passkeys/login-options', PasskeyLoginOptionsController::class)->middleware('throttle:lukk-passkeys');
-            Route::post('passkeys/login', [PasskeyAuthenticatedSessionController::class, 'store'])->middleware('throttle:lukk-passkeys');
+            Route::post('passkeys/login', [PasskeyAuthenticatedSessionController::class, 'store'])->middleware([RefuseForgeableCookieGrant::class, 'throttle:lukk-passkeys']);
             // Shares the confirm budget. A passkey assertion is a signature, not a guessable secret,
             // so this is DoS/CPU metering rather than brute-force defence — which is also why it is
             // not gated by the confirm lockout below.

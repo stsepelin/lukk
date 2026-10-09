@@ -13,11 +13,8 @@ use Lukk\Support\RefreshCookie;
  * Used by `/refresh`. In cookie mode the only ambient credential it accepts is the `SameSite=Strict`,
  * `__Host-`, HttpOnly cookie.
  *
- * Deliberately WITHOUT the request-shape check `/logout` applies (`ReadsLogoutCredentials`). A same-site
- * sibling page can still get the cookie sent on a form POST here, but all a forged refresh achieves
- * is a rotation: the new pair lands in a response the attacker cannot read and a cookie the victim's
- * browser keeps, so the victim's session carries on. A forged logout, by contrast, ends the session.
- * Refusing form-shaped refreshes would also break any client that refreshes without a JSON body.
+ * In cookie mode the route itself is behind `RefuseForgeableCookieGrant`, so a cross-site form can
+ * neither replay the victim's cookie nor plant the attacker's own session through a body token.
  */
 trait ReadsPresentedRefreshToken
 {
