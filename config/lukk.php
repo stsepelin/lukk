@@ -250,8 +250,8 @@ return [
         | Login
         |--------------------------------------------------------------------------
         |
-        | The failures-only limiter: only failed attempts count, a success clears
-        | the counter. "max_attempts" is keyed on the identifier + IP (the tight
+        | The failures-only limiter: only failed attempts count; a success clears
+        | the per-IP counter (the account counter only decays, see below). "max_attempts" is keyed on the identifier + IP (the tight
         | per-origin limit); "account_max_attempts" is keyed on the identifier
         | alone — an IP-independent cap so a distributed attacker can't get
         | "max_attempts" guesses per IP against one account (keep it above

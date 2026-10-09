@@ -70,7 +70,6 @@ it('skips the deep merge when the application configuration is cached', function
 
     $provider = new LukkServiceProvider($app);
     $merge = new ReflectionMethod($provider, 'mergeConfigDeep');
-    $merge->setAccessible(true);
 
     // If it did not return early it would access $app['config']; the fake app is
     // not array-accessible, so that would throw and fail this test.

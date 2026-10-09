@@ -65,6 +65,14 @@ public function isMultiFactor(PasskeyRecord $stored): bool;
 A missing or mismatched method is a **fatal at class-load time**, not a catchable exception, so it
 appears on the first request that resolves your binding rather than at boot.
 
+### Passkey login can answer with a two-factor challenge
+
+**Medium impact — if you use passkeys and two-factor together with your own client.** A passkey
+assertion that is not multi-factor (no user verification, or a credential that never showed it) on an
+account with confirmed two-factor now gets `{"two_factor": true, "challenge_token": "…"}` from
+`POST /auth/passkeys/login`, exactly like a password sign-in, instead of a session. Complete it at
+`POST /auth/two-factor-challenge`. lukk-js 0.12 handles this; an older client or your own must too.
+
 ### Passkey step-up: a new options route, and stricter rules
 
 `POST /auth/confirm-passkey/options` (authenticated) negotiates a step-up ceremony: it asks the
@@ -174,8 +182,12 @@ A test that used `/auth/logout` as a "does this token authenticate on this guard
 
 The route keeps the caller's session alive, but `LogoutResponse` ends the caller's session
 client-side: in cookie mode it cleared the refresh cookie and the client could no longer refresh. It
-now answers a bare `204` directly — the same status and empty body as before, so clients need no
-change. A rebound `LogoutResponse` still applies to `POST /auth/logout` and `DELETE /auth/sessions`.
+now answers a bare `204` directly. A rebound `LogoutResponse` still applies to `POST /auth/logout` and
+`DELETE /auth/sessions`.
+
+One case changes for clients: a bearer token with no `fid` (a co-issuer's, in the verify-only
+topology) now gets `409` instead of a `204` that revoked nothing, because there is no session to keep
+and "log out my other devices" cannot be honoured. `Lukk::actingAs()` keeps the no-op.
 
 ### New: unclaimed sessions (`claim_seconds`) and `POST /auth/session/claim`
 

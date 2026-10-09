@@ -17,7 +17,7 @@ use Lukk\Support\RecoveryCode;
  * reproduce the OTP); recovery codes are hashed (never re-displayable).
  *
  * @property ?string $two_factor_secret encrypted TOTP secret
- * @property ?string $two_factor_recovery_codes encrypted, salted+hashed code set
+ * @property ?string $two_factor_recovery_codes JSON list of password-hashed (salted) codes, not encrypted
  * @property ?Carbon $two_factor_confirmed_at
  */
 trait HasTwoFactorAuthentication
