@@ -67,7 +67,7 @@ it('announces a second factor once it is confirmed, not when it is merely enroll
 it('announces a second factor being removed', function () {
     $user = User::factory()->create();
     enabledTwoFactorFor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->deleteJson('/auth/two-factor')->assertNoContent();
 
@@ -101,7 +101,7 @@ it('announces new recovery codes, which replace an authenticator', function () {
     // Recovery codes are a recovery authenticator (§4.2); a fresh set silently replaces the old one.
     $user = User::factory()->create();
     enabledTwoFactorFor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')->assertOk();
 

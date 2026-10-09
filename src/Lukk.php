@@ -505,6 +505,18 @@ class Lukk
     }
 
     /**
+     * The clock-skew leeway, in seconds, from a lukk config block: capped at five minutes. RFC 7519 §4.1.4
+     * allows "some small leeway"; `LUKK_LEEWAY=86400` stretched every `exp` by a day. One clamp for every
+     * decoder — access tokens and challenge tokens alike.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    public static function leeway(array $config): int
+    {
+        return min(300, max(0, (int) ($config['leeway'] ?? 5)));
+    }
+
+    /**
      * The `auth.providers` entry a lukk guard resolves its users from.
      *
      * The default guard reads `lukk.user_provider`, never its own `auth.guards` entry; an extra guard

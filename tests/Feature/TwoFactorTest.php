@@ -126,7 +126,7 @@ it('rejects confirmation with a wrong code (stays unconfirmed)', function () {
 it('regenerates recovery codes, invalidating the old set', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $new = $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
         ->assertOk()
@@ -141,7 +141,7 @@ it('regenerates recovery codes, invalidating the old set', function () {
 it('disables 2FA', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->deleteJson('/auth/two-factor')->assertNoContent();
 
@@ -449,7 +449,7 @@ it('refuses to re-enrol over confirmed two-factor instead of silently disabling 
     // nothing an app could hang a "your second factor was removed" notification on.
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $access = $user->startSession()->accessToken;
+    $access = mfaSession($user);
 
     $this->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')->assertStatus(409);
 
@@ -673,7 +673,7 @@ it('generates the documented number of recovery codes when the count is unusable
 it('regenerates the documented number of recovery codes when the count is null', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
     $headers = confirmedHeaders($token);
 
     config()->set('lukk.two_factor.recovery_codes', null);
@@ -687,7 +687,7 @@ it('regenerates the documented number of recovery codes when the count is null',
 it('names the conflict when enrolling over confirmed two-factor', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $access = $user->startSession()->accessToken;
+    $access = mfaSession($user);
 
     $this->withToken($access)->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')
         ->assertStatus(409)

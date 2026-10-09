@@ -371,3 +371,13 @@ it('claims the spend in the denylist store, under its own key', function () {
 it('refuses a challenge with an empty subject', function () {
     expect(challenge()->consume('2fa', coIssuedChallenge(['sub' => ''])))->toBeNull();
 });
+
+it('caps the leeway at five minutes, as the access-token verifier does', function () {
+    // RFC 7519 §4.1.4 allows "some small leeway". The cap reached only the access-token verifier, so with
+    // `LUKK_LEEWAY=86400` a five-minute 2FA challenge or step-up confirmation stayed good for a day.
+    config(['lukk.leeway' => 86400]);
+    app()->forgetInstance(ChallengeToken::class);
+    $expired = $this->travel(-1)->hours(fn () => challenge()->issue('2fa', 42, 300));
+
+    expect(challenge()->verify('2fa', $expired))->toBeNull();
+});

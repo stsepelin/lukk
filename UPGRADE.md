@@ -279,9 +279,11 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
 - `ceremony_id` on passkey login and step-up must be a UUID, which is what lukk issues; anything else
   is a `422` on `ceremony_id`.
 - A refused passkey step-up is `422` on `credential`, not `403`.
-- A password step-up is `422` on `password` in a single-factor session (`amr` without `mfa`) on an
-  account that has a confirmed second factor or a user-verifying passkey. Confirm with that passkey,
-  or sign in again with the second factor. Migrate the `amr` column for this to apply after refresh.
+- A password step-up is `422` on `password` on an account with an enforced second factor or a
+  user-verifying passkey, unless the session's token carries `mfa` in `amr`. A token with no `amr` —
+  after a refresh on a schema without the `amr` column, or from `startSession()` — counts as
+  single-factor, so **migrate the `amr` column**, or users with a second factor must confirm with a
+  passkey or sign in again after every refresh.
 - `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
   `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
   request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never

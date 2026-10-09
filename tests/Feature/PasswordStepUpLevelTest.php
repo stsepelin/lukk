@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
 use Lukk\Actions\EnsurePasswordStepUpMeetsAccountLevel;
 use Lukk\Contracts\PasskeyRepository;
@@ -86,13 +87,38 @@ it('refuses before checking the password, so a refusal spends no lockout attempt
     expect(Lockout::count())->toBe(0);
 });
 
-it('leaves a session that carries no amr to the old rule', function () {
-    // A token minted before the `amr` column was migrated loses the claim at its first refresh, and a
-    // co-issuer's token never had one. Refusing those would strand every two-factor user on such an
-    // install; the claim cannot be removed from a token lukk signed, so its absence is not an attack.
+it('refuses a session whose token carries no amr on an account with a second factor', function () {
+    // It used to wave these through, reasoning that a signed token cannot be stripped of the claim. But
+    // an ordinary refresh drops it where the `amr` column is not migrated, and `startSession()` (a magic
+    // link, a social login) never stamps one — so a password-only attacker waited one refresh. Without
+    // the claim nothing says the session was multi-factor, so it is treated as not.
     $user = withTotp(User::factory()->create());
 
-    stepUpWithPassword($this, $user->startSession()->accessToken)->assertOk();
+    stepUpWithPassword($this, $user->startSession()->accessToken)->assertStatus(422)->assertJsonValidationErrors('password');
+});
+
+it('still accepts a session without amr on an account with nothing stronger than the password', function () {
+    stepUpWithPassword($this, User::factory()->create()->startSession()->accessToken)->assertOk();
+});
+
+it('refuses after a refresh on a schema without the amr column', function () {
+    Schema::table('refresh_tokens', fn ($t) => $t->dropColumn('amr'));
+    $user = withTotp(User::factory()->create());
+    $pair = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]);
+
+    $refreshed = rotate()($pair->refreshToken);
+
+    stepUpWithPassword($this, $refreshed->accessToken)->assertStatus(422);
+});
+
+it('does not count a second factor this guard does not enforce', function () {
+    // With two-factor switched off, login never asks for the code, so no session on this guard can ever
+    // carry `mfa`: counting the enrolled TOTP made every step-up — and erasure behind it — unreachable.
+    config(['lukk.features.two_factor' => false]);
+    $user = withTotp(User::factory()->create());
+    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+
+    stepUpWithPassword($this, $access)->assertOk();
 });
 
 it('lets a test acting as a user step up, which presents no token at all', function () {

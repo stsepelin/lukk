@@ -130,7 +130,8 @@ it('rejects responses presented to the wrong ceremony', function () {
  */
 function realPasskeyLogin(object $test, User $user, UserVerifyingAuthenticator $authenticator, bool $verifyOnLogin): TestResponse
 {
-    $access = $user->startSession()->accessToken;
+    // Enrolling needs a step-up, which on an account with a second factor needs a multi-factor session.
+    $access = mfaSession($user);
     $headers = confirmedHeaders($access);
 
     $options = $test->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json();

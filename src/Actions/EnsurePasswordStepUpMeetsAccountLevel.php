@@ -22,18 +22,27 @@ use Lukk\Support\VerifiedToken;
  * account has nothing stronger than the password. It is refused in a single-factor session on an
  * account with a confirmed second factor or a user-verifying passkey — the passkey path's own bar.
  *
- * A session whose token carries no `amr` keeps the old rule: a token minted before the `amr` column
- * existed loses the claim at its first refresh, and a co-issuer's never had one. A token lukk signed
- * cannot be stripped of the claim, so its absence is not something an attacker can arrange.
+ * A token without `amr` is treated as single-factor: nothing in it says otherwise, and the claim goes
+ * missing in ordinary ways (a refresh on a schema without the `amr` column, `startSession()`, a co-issuer).
+ * Such a session confirms with a user-verifying passkey, or signs in again with its second factor.
  */
 class EnsurePasswordStepUpMeetsAccountLevel
 {
     public function __invoke(Request $request, Authenticatable $user): void
     {
-        // `?? null` already absorbs a request with no verified token; the `?->` states that it may have none.
-        $amr = VerifiedToken::current($request)?->claims->amr ?? null; // @pest-mutate-ignore: RemoveNullSafeOperator
+        $token = VerifiedToken::current($request);
 
-        if (! is_array($amr) || in_array(AuthenticationMethods::MULTI_FACTOR, $amr, true) || ! $this->hasSecondFactor($user)) {
+        // No token at all is `Lukk::actingAs()`, which exists for tests: nothing was presented to judge.
+        if ($token === null) {
+            return;
+        }
+
+        // A token WITHOUT `amr` is not evidence of a multi-factor session. A refresh drops the claim where
+        // the `amr` column is not migrated, and `startSession()` (a magic link, a social login) never stamps
+        // one — so treating its absence as "old rule" let a password-only attacker wait one refresh.
+        $amr = $token->claims->amr ?? null;
+
+        if ((is_array($amr) && in_array(AuthenticationMethods::MULTI_FACTOR, $amr, true)) || ! $this->hasSecondFactor($user)) {
             return;
         }
 
@@ -44,7 +53,9 @@ class EnsurePasswordStepUpMeetsAccountLevel
 
     private function hasSecondFactor(Authenticatable $user): bool
     {
-        if (method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor()) {
+        // Only where this guard enforces it: with two-factor off, login never asks for the code, so no session
+        // here could ever carry `mfa`, and counting the enrolled TOTP locked every step-up away for good.
+        if (Lukk::enforcesTwoFactor() && method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor()) {
             return true;
         }
 

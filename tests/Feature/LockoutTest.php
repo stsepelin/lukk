@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Support\Timebox;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\AccountLocked;
@@ -641,4 +642,50 @@ it('lets the account\'s own success, or its own reset, release both of its count
     $this->postJson('/auth/login', ['email' => 'mine@y.com', 'password' => 'correct'])->assertOk();
 
     expect(Lockout::count())->toBe(0);
+});
+
+it('does every lockout read and write inside the sign-in timebox', function () {
+    // A real account has two counters and a non-account one, so a wrong password cost 15 queries against
+    // 7 — outside the box, where the difference was measurable and could be averaged. Inside it, the box
+    // pads both to the same wall-clock budget.
+    $inside = false;
+    $outside = 0;
+    app()->instance(Timebox::class, new class($inside) extends Timebox
+    {
+        public function __construct(public bool &$inside) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->inside = true;
+            try {
+                return $callback($this);
+            } finally {
+                $this->inside = false;
+            }
+        }
+    });
+    DB::listen(function ($query) use (&$inside, &$outside) {
+        if (! $inside && str_contains($query->sql, 'lukk_lockouts')) {
+            $outside++;
+        }
+    });
+    User::factory()->create(['email' => 'boxed@y.com']);
+
+    failLogin('boxed@y.com');
+    failLogin('nobody@y.com');
+
+    expect($outside)->toBe(0);
+});
+
+it('still answers a locked account 423 without counting it toward the throttle', function () {
+    config(['lukk.rate_limits.login.max_attempts' => 4]);
+    User::factory()->create(['email' => 'held@y.com']);
+    foreach (range(1, 3) as $i) {
+        failLogin('held@y.com');
+    }
+
+    // Locked now; these must not fill the decaying throttle and turn the answer into 429.
+    foreach (range(1, 3) as $i) {
+        failLogin('held@y.com')->assertStatus(423);
+    }
 });

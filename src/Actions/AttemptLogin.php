@@ -40,37 +40,9 @@ class AttemptLogin
 
     public function __invoke(Request $request): Authenticatable
     {
-        // Lock first: a locked account whose decaying bucket is also full would otherwise be told
-        // "try again in N seconds", which with manual-only release is exactly the untruth that
-        // choosing 423 over 429 exists to avoid.
-        // Resolved once and reused: the gate, the failure count and the release must all name the
-        // same bucket, and re-deriving it per call would mean three provider lookups.
         $this->assertIdentifierColumnExists();
 
-        // The account the identifier names, looked up ONCE: it keys the counters below and is the
-        // row the password is then checked against.
-        $candidate = $this->candidate($request);
-        $subjects = LoginRateLimiter::lockoutSubjects($candidate, (string) $request->input($this->field()));
-
-        $this->ensureIsNotLocked($request, $subjects);
-        $this->ensureIsNotThrottled($request);
-
-        // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
-        // the credential check is check-then-act: N concurrent requests all read "not locked", all
-        // reach `Hash::check`, and all count afterwards — so the realized number of password
-        // verifications was `max_attempts + concurrency`, not `max_attempts`. The increment is
-        // transactional and row-locked, so consuming it first makes the count authoritative at the
-        // moment it is taken. Costs one write per attempt, and only when the feature is on: a hard
-        // consecutive cap is not something a decaying counter can approximate.
-        $this->reserve($subjects);
-
-        try {
-            $user = $this->resolve($request, $candidate);
-        } catch (ValidationException $e) {
-            $this->limiter->increment($request);
-
-            throw $e;
-        }
+        [$user, $subjects] = $this->resolve($request);
 
         $this->limiter->clear($request);
         // "Consecutive" is the whole point of the cap: any success ends the run.
@@ -134,26 +106,52 @@ class AttemptLogin
         }
     }
 
-    private function resolve(Request $request, ?Authenticatable $candidate): Authenticatable
+    /** @return array{0: Authenticatable, 1: list<string>} the user, and the lockout subjects it counted against */
+    private function resolve(Request $request): array
     {
-        // Every failure costs the same WALL CLOCK, not merely the same number of key derivations.
-        // Counting derivations was the wrong invariant: an unknown identifier hashes at the
-        // CONFIGURED cost while a real account is checked at the cost embedded in its stored hash,
-        // so a row left behind by a `BCRYPT_ROUNDS` bump answers several times faster and an
-        // unreadable one (`!`, `*`, an import) answers instantly — a single-request account oracle,
-        // which is exactly what the equalizer exists to close.
+        // Every failure costs the same WALL CLOCK, not merely the same number of key derivations —
+        // and the box holds EVERYTHING that differs between a real account and an unknown one: the
+        // provider lookup, the lockout reads and writes (a real account has two counters, a non-account
+        // one: 15 queries against 7), and the key derivation. An unknown identifier hashes at the
+        // CONFIGURED cost while a real account is checked at the cost embedded in its stored hash, so a
+        // row left behind by a `BCRYPT_ROUNDS` bump answers several times faster and an unreadable one
+        // (`!`, `*`, an import) answers instantly.
         //
         // A Timebox pads a fast path up to the budget and never shortens a slow one, so a budget set
-        // below the real hashing cost is ineffective rather than harmful — and `throw`s still
-        // propagate, after the padding, so `fail()` keeps its timing too.
-        return app(Timebox::class)->call(function (Timebox $timebox) use ($request, $candidate) {
-            $user = $this->resolveWithin($request, $candidate);
+        // below the real cost is ineffective rather than harmful — and `throw`s still propagate, after
+        // the padding, so a 422, 423 or 429 keeps its timing too.
+        return app(Timebox::class)->call(function (Timebox $timebox) use ($request) {
+            // The account the identifier names, looked up ONCE: it keys the counters below and is the
+            // row the password is then checked against.
+            $candidate = $this->candidate($request);
+            $subjects = LoginRateLimiter::lockoutSubjects($candidate, (string) $request->input($this->field()));
+
+            // Lock first: a locked account whose decaying bucket is also full would otherwise be told
+            // "try again in N seconds", which with manual-only release is exactly the untruth that
+            // choosing 423 over 429 exists to avoid.
+            $this->ensureIsNotLocked($request, $subjects);
+            $this->ensureIsNotThrottled($request);
+
+            // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
+            // the credential check is check-then-act: N concurrent requests all read "not locked", all
+            // reach `Hash::check`, and all count afterwards. The increment is transactional and
+            // row-locked, so consuming it first makes the count authoritative at the moment it is taken.
+            $this->reserve($subjects);
+
+            try {
+                $user = $this->resolveWithin($request, $candidate);
+            } catch (ValidationException $e) {
+                // Only a failed credential feeds the decaying throttle; a 423 or 429 above never reaches here.
+                $this->limiter->increment($request);
+
+                throw $e;
+            }
 
             // A success announces itself in its status code, so padding it hides nothing and only
             // taxes every legitimate sign-in. The box is for telling FAILURES apart.
             $timebox->returnEarly();
 
-            return $user;
+            return [$user, $subjects];
             // No `max(0, …)`: a Timebox only sleeps a positive remainder, so a negative budget is
             // already no box. The cast is load-bearing — a string from an uncast `env()` would be a
             // TypeError under strict types.

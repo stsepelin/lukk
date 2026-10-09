@@ -7,6 +7,7 @@ namespace Lukk\Tokens\Jwt;
 use Firebase\JWT\JWT;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenVerifier;
+use Lukk\Lukk;
 use Throwable;
 
 /**
@@ -38,7 +39,7 @@ class FirebaseTokenVerifier implements TokenVerifier
     {
         // Capped at five minutes: RFC 7519 §4.1.4 allows "some small leeway", and `LUKK_LEEWAY=86400`
         // stretched every exp by a day.
-        $leeway = min(300, max(0, (int) ($this->config['leeway'] ?? 5)));
+        $leeway = Lukk::leeway($this->config);
         JWT::$leeway = $leeway;
 
         // Non-null so firebase/php-jwt populates it with the verified header.
