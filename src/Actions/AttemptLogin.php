@@ -369,13 +369,16 @@ class AttemptLogin
     private function storeRaw(Model $user, string $column, string $hash): void
     {
         $user->setRawAttributes([...$user->getAttributes(), $column => $hash]);
+        // Already stored: left dirty, a later `save()` of this instance would write it again, over a
+        // reset that landed meanwhile, and observers keyed on `isDirty()` would see a password change.
+        $user->syncOriginalAttribute($column);
     }
 
     /**
      * The account the identifier names, or null — the one provider lookup a sign-in makes.
      *
-     * It keys the persistent lockout and the cache buckets (`LoginRateLimiter::lockoutSubject()`
-     * explains why the identifier alone is not safe to key on), and the stock path then checks the
+     * It keys the persistent lockout (`LoginRateLimiter::lockoutSubject()` explains why the identifier
+     * alone is not safe to key on there), and the stock path then checks the
      * password against this same row rather than querying again. The lookup sits outside the
      * Timebox; a hit and a miss are one indexed SELECT each, and the derivation the box exists to
      * hide happens inside it.

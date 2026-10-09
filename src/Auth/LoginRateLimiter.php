@@ -19,7 +19,7 @@ use Lukk\Lukk;
  *     isn't locked, but a botnet is still bounded.
  * The identifier (email/username, per `lukk.username`) is trimmed, lowercased, and transliterated
  * so trailing whitespace or Unicode look-alikes can't mint a fresh bucket. Only failed attempts
- * increment; a success clears both.
+ * increment; a success clears the per-IP bucket, and the IP-independent one only decays.
  */
 class LoginRateLimiter
 {
@@ -98,13 +98,12 @@ class LoginRateLimiter
      * Hashing also puts the `|` delimiter out of reach of an identifier field that carries no
      * charset rule, so a submitted identifier can no longer shape the key's structure.
      *
-     * **Hashing alone does not make these buckets per-account.** `normalize()` is many-to-one by
-     * design — `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither
-     * of which a binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` would share
-     * a bucket, and a successful sign-in to the look-alike would `clear()` the victim's counter. The
-     * fold is deliberate for identifiers that name no account: without it an attacker spreads guesses
-     * across spellings and evades the bucket. So `AttemptLogin` resolves the account first and passes
-     * `lockoutSubject()`, which keys on identity when there is one and on the fold when there is not.
+     * **Hashing does not make these buckets per-account.** `normalize()` is many-to-one by design —
+     * `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither of which a
+     * binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` share a bucket. The fold
+     * is deliberate: without it an attacker spreads guesses across spellings and evades the bucket, and
+     * keying on the resolved account instead makes the throttle's timing an existence oracle (see the
+     * note above `tooManyAttempts()`). A success therefore never clears the shared IP-independent one.
      *
      * Equality-compared only, so nothing else about the limiter changes. Existing buckets are
      * orphaned on deploy, which costs at most one decay window of counting.

@@ -251,18 +251,18 @@ return [
         |--------------------------------------------------------------------------
         |
         | The failures-only limiter: only failed attempts count, a success clears
-        | the counter. "max_attempts" is keyed on the account + IP (the tight
-        | per-origin limit); "account_max_attempts" is keyed on the account
+        | the counter. "max_attempts" is keyed on the identifier + IP (the tight
+        | per-origin limit); "account_max_attempts" is keyed on the identifier
         | alone — an IP-independent cap so a distributed attacker can't get
         | "max_attempts" guesses per IP against one account (keep it above
         | max_attempts for legit multi-device users). "ip_max_attempts" is a
         | separate coarse per-IP cap on ALL login requests, so password spraying
         | (varying the email) can't slip past the per-account limit.
         |
-        | "The account" is the one the identifier names, so a look-alike address
-        | (another case, a Cyrillic а) that is a DIFFERENT account counts
-        | separately and cannot clear this one. An identifier naming no account
-        | is counted under its case- and script-folded form instead.
+        | Both buckets key on the case- and script-folded identifier, so 429
+        | answers the same whether or not an account exists. A success clears
+        | only the per-IP bucket; the account bucket decays, so a look-alike
+        | account sharing the fold cannot sign in to reset this one's count.
         |
         */
 

@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Timebox;
+use Lukk\Actions\AttemptLogin;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
@@ -916,3 +917,16 @@ class MutatingPasswordUser extends User
         $this->attributes['password'] = Hash::make($value);
     }
 }
+
+it('hands back a user whose upgraded password is not left dirty', function () {
+    // The hash is already stored. Left dirty, any later `save()` of this instance in the same request —
+    // a consumer's hook stamping `last_login_at` — writes it AGAIN, over a reset that landed meanwhile,
+    // and fires every observer keyed on `isDirty('password')` as if the password had changed.
+    User::factory()->create(['email' => 'clean@y.com', 'password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);
+    raiseBcryptCostTo(5);
+
+    $user = app(AttemptLogin::class)(Request::create('/auth/login', 'POST', ['email' => 'clean@y.com', 'password' => 'password']));
+
+    expect(password_get_info($user->getAuthPassword())['options']['cost'])->toBe(5)
+        ->and($user->isDirty('password'))->toBeFalse();
+});
