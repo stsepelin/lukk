@@ -77,6 +77,13 @@ that check, and one that always answers `false` refuses every non-zero counter.
 A missing or mismatched method is a **fatal at class-load time**, not a catchable exception, so it
 appears on the first request that resolves your binding rather than at boot.
 
+### A rebound `PasskeyRepository` is called on every erasure, export and reset
+
+**Only if you implement `Lukk\Contracts\PasskeyRepository` yourself.** `deleteForUser()` (account
+deletion), `summariesForUser()` (account export) and, with `password_reset.revoke_passkeys` on,
+`summariesForUser()` + `delete()` now run on every install, where they used to be skipped unless a
+`passkeys` table existed. They must answer an empty store without throwing — `[]` and `0`.
+
 ### Passkey login can answer with a two-factor challenge
 
 **Medium impact — if you use passkeys and two-factor together with your own client.** A passkey

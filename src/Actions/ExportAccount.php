@@ -118,9 +118,9 @@ class ExportAccount
             // for the mirror-image reason. A feature switched off after use leaves its rows behind,
             // and injecting null when the flag is off made the export silently omit passkeys that
             // still exist: under-disclosure under Art. 15 of exactly the rows erasure would destroy.
-            // An install that never published the migration has no table, and that is the only case
-            // worth skipping.
-            'passkeys' => $this->tableExists('passkeys') ? $this->passkeys->summariesForUser($userId) : [],
+            // An install that never published the migration has no table, which the database store
+            // answers itself, so a rebound store that is not that table is exported too.
+            'passkeys' => $this->passkeys->summariesForUser($userId),
             'two_factor' => [
                 'enabled' => method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor(),
                 'confirmed_at' => $this->iso($user->two_factor_confirmed_at ?? null),

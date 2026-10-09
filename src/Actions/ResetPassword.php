@@ -8,13 +8,11 @@ use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Events\PasskeyDeleted;
-use Lukk\Models\Passkey;
 
 /**
  * Reset a password via Laravel's password broker (single-use, hashed, expiring token). On
@@ -88,14 +86,11 @@ class ResetPassword
      * Opt-in: a reset that also removes every passkey, each announced as `PasskeyDeleted`. Off by
      * default, as the second factor survives a reset too (NIST SP 800-63B-4 §4.2 asks for neither); on,
      * a passkey an attacker enrolled while holding the password, or on a squatted account, does not
-     * outlive the recovery. Skipped where the passkeys table was never published.
+     * outlive the recovery. An unpublished passkeys table is the database store's to answer (it has
+     * none to list), so a rebound store is covered too.
      */
     private function revokePasskeys(Authenticatable $user): void
     {
-        if (! Schema::hasTable((new Passkey)->getTable())) {
-            return;
-        }
-
         $passkeys = app(PasskeyRepository::class);
 
         foreach ($passkeys->summariesForUser($user->getAuthIdentifier()) as $summary) {

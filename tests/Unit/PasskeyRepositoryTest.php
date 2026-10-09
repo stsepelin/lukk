@@ -7,6 +7,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Models\Passkey;
+use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\Admin;
 
@@ -170,4 +171,13 @@ it('still stamps last use when the count does not move', function () {
     $repo->updateSignCount('cred-synced', 0);
 
     expect($repo->summariesForUser(1)[0]['last_used_at'])->toBe(now()->getTimestamp());
+});
+
+it('reads and erases nothing, without throwing, where the passkeys table was never published', function () {
+    // The table gate lives here, in the database store, so the actions can call any store unconditionally.
+    Schema::drop('passkeys');
+    $repo = app(DatabasePasskeyRepository::class);
+
+    expect($repo->summariesForUser(1))->toBe([])
+        ->and($repo->deleteForUser(1))->toBe(0);
 });

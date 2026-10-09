@@ -85,10 +85,9 @@ class DeleteAccount
             // Guarded on the TABLE, not on the feature flag. A feature switched off after use leaves
             // its rows behind, and those rows are still personal data — a passkey carries a
             // human-chosen device name and a last-used timestamp. An install that never published
-            // the migration has no table, and that is the only case worth skipping.
-            if ($this->tableExists('passkeys')) {
-                $this->passkeys->deleteForUser($userId);
-            }
+            // the migration has no table — which the database store answers itself, so a store
+            // that is not that table (a rebound repository) is erased too.
+            $this->passkeys->deleteForUser($userId);
 
             // All THREE key spaces a single account occupies. The raw identifier is never one of
             // them — `LoginRateLimiter::lockoutSubject()` prefixes `id:` for a resolvable account

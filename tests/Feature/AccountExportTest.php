@@ -11,6 +11,8 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
 use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
@@ -202,4 +204,15 @@ it('asks the lockout store about all three key spaces, as strings', function () 
     // No identifier: the third key space is empty, which the repository skips.
     exporter('email', $spy)(new GenericUser(['id' => 5]));
     expect($spy->summarised)->toBe(['id:5', '5', '', '']);
+});
+
+it('exports the passkeys of a store that is not the passkeys table', function () {
+    // A rebound PasskeyRepository has no `passkeys` table; gating on that table exported nothing.
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    expect(collect(app(ExportAccount::class)($user)['passkeys'])->pluck('credential_id')->all())->toBe(['elsewhere']);
 });

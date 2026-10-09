@@ -76,6 +76,13 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
     public function summariesForUser(int|string $userId): array
     {
+        // Export and reset call this whether or not passkeys were ever set up, so the absent table
+        // is answered here — the only store that has one — rather than by the callers, which then
+        // skipped any store that was not this table.
+        if (! $this->published()) {
+            return [];
+        }
+
         return $this->scoped()->where('user_id', $userId)
             ->get(['credential_id', 'name', 'last_used_at'])
             ->map(fn (Passkey $row) => [
@@ -124,6 +131,11 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
     public function deleteForUser(int|string $userId): int
     {
+        // Erasure calls this on every install; see summariesForUser().
+        if (! $this->published()) {
+            return 0;
+        }
+
         return $this->scoped()->where('user_id', $userId)->delete();
     }
 
@@ -133,7 +145,7 @@ class DatabasePasskeyRepository implements PasskeyRepository
         // such table. `lukk:prune` is SCHEDULED DAILY by default — throwing here broke the scheduled
         // prune for every install that never enabled passkeys, taking the refresh-token and lockout
         // sweeps down with it.
-        if (! Schema::hasTable((new Passkey)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -243,6 +255,19 @@ class DatabasePasskeyRepository implements PasskeyRepository
         }
 
         return $providers;
+    }
+
+    /**
+     * Whether the publish-only migration has run, on the model's own connection and table name.
+     *
+     * Deliberately NOT memoized: a static cache is answered once per PROCESS, so a worker started
+     * before the migration would keep skipping erasure for its whole life.
+     */
+    private function published(): bool
+    {
+        $model = new Passkey;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
     }
 
     /**

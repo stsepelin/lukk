@@ -17,6 +17,7 @@ use Illuminate\Testing\TestResponse;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Events\PasskeyDeleted;
 use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
 use Lukk\Tests\Fixtures\PasswdColumnUser;
 use Lukk\Tests\Fixtures\User;
 
@@ -399,4 +400,17 @@ it('keeps passkeys on an install whose config has lost the revoke_passkeys key',
     resetTo($this, $user)->assertOk();
 
     expect(app(PasskeyRepository::class)->credentialIdsFor($user->id))->toBe(['kept']);
+});
+
+it('removes the passkeys of a store that is not the passkeys table when asked', function () {
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect($store->rows)->toBe([]);
 });

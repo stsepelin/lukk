@@ -21,6 +21,8 @@ use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Lukk;
 use Lukk\Models\Lockout;
 use Lukk\Models\RefreshToken;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
 use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
@@ -557,4 +559,18 @@ it('erases the lockout counters in all three key spaces, keyed as strings', func
 
     app(DeleteAccount::class)(new GenericUser(['id' => 5]));
     expect($spy->forgotten)->toBe(['id:5', '5', '', '']);
+});
+
+it('erases the passkeys of a store that is not the passkeys table', function () {
+    // A rebound PasskeyRepository has no `passkeys` table; gating on that table left its rows — personal
+    // data, each one linkable to the person — behind an erasure that reported success.
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    deleteAccount()($user);
+
+    expect($store->rows)->toBe([]);
 });
