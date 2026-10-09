@@ -43,6 +43,9 @@ function countingHasher(): object
 
         public int $makes = 0;
 
+        /** A hasher that cannot judge the stored value — a rebound one with its own opinions. */
+        public bool $rehashThrows = false;
+
         public function __construct(private readonly Hasher $inner) {}
 
         public function info($hashedValue): array
@@ -71,6 +74,10 @@ function countingHasher(): object
 
         public function needsRehash($hashedValue, array $options = []): bool
         {
+            if ($this->rehashThrows) {
+                throw new RuntimeException('cannot read this hash');
+            }
+
             return $this->inner->needsRehash($hashedValue, $options);
         }
     };
@@ -1029,4 +1036,16 @@ it('answers a long password on a password-less account like any other failure', 
     DB::table('users')->where('id', $user->id)->update(['password' => null]);
 
     $this->postJson('/auth/login', ['email' => 'nopw@y.com', 'password' => str_repeat('a', 100)])->assertStatus(422);
+});
+
+it('pays the equalizing derivation when the hasher cannot judge the stored hash', function () {
+    // A stored value the hasher cannot even assess is treated as weak, so the failure costs the same
+    // derivation an unknown identifier does rather than answering early.
+    User::factory()->create(['email' => 'opaque@y.com']);
+    $hasher = countingHasher();
+    $hasher->rehashThrows = true;
+
+    $this->postJson('/auth/login', ['email' => 'opaque@y.com', 'password' => 'wrong'])->assertStatus(422);
+
+    expect($hasher->makes)->toBe(1);
 });

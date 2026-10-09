@@ -250,9 +250,15 @@ it('refuses, rather than 500s on, an auth_time no integer can hold', function (m
     'huge float' => [1e30],
     'just past int range' => [9.3e18],
     'numeric string' => ['1e999'],
-    // Accepted before: the cast truncated it to a recent second. No sign-in this server stamps has a fraction.
-    'a fraction of a second ago' => [fn () => time() - 0.5],
+    'before the epoch' => [-1],
 ]);
+
+it('takes a fractional auth_time, which OIDC allows, as the second it falls in', function () {
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-frac'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => time() - 0.5], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertOk();
+});
 
 it('allows a sign-in up to the leeway ahead of this clock, and no further', function (int $ahead, int $status) {
     // Clock skew between servers in one deployment, nothing more.

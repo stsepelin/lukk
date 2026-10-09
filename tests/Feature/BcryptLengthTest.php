@@ -145,7 +145,7 @@ it('refuses a NUL byte under a custom rule set, where the default create would 5
 
     // Short, so only the NUL check can refuse it; and long, so the answer stays single.
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'nul@y.com', 'password' => "abc\0def", 'password_confirmation' => "abc\0def"])
-        ->assertStatus(422)->assertJsonValidationErrors('password');
+        ->assertStatus(422)->assertJsonPath('errors.password.0', 'The password field format is invalid.');
     $nul = "abc\0".str_repeat('d', 80);
     $errors = $this->postJson('/auth/register', ['name' => 'n', 'email' => 'nul2@y.com', 'password' => $nul, 'password_confirmation' => $nul])
         ->assertStatus(422)->json('errors.password');

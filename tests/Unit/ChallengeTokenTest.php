@@ -381,3 +381,12 @@ it('caps the leeway at five minutes, as the access-token verifier does', functio
 
     expect(challenge()->verify('2fa', $expired))->toBeNull();
 });
+
+it('refuses a challenge expiring past any timestamp, whose remaining life no cache will take as a TTL', function () {
+    // `consume()` hands `exp - now + leeway` to the cache AFTER the second factor has verified; Redis
+    // answers an `exp` near PHP_INT_MAX with "invalid expire time", a 500 there. The access verifier
+    // already bounds time claims to the end of year 9999.
+    expect(challenge()->consume('2fa', coIssuedChallenge(['exp' => PHP_INT_MAX])))->toBeNull()
+        ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300800])))->toBeNull()
+        ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300799])))->toBe('42');
+});

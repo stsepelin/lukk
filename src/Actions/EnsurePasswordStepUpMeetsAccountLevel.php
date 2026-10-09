@@ -75,13 +75,23 @@ class EnsurePasswordStepUpMeetsAccountLevel
      */
     private function recent(mixed $authTime): bool
     {
-        // An integer or nothing: an out-of-range float from a co-issuer would make a cast warn (a 500),
-        // and a fraction is no sign-in time this server ever stamped.
-        $signedIn = filter_var($authTime, FILTER_VALIDATE_INT);
-
-        if ($signedIn === false) {
+        // A NumericDate, as OIDC Core §2 defines `auth_time`: a number — a fraction allowed, floored —
+        // within the range a timestamp can mean, the bound the access verifier applies. Out of it, a
+        // co-issuer's value made the integer cast warn into a 500.
+        if (! is_numeric($authTime)) {
             return false;
         }
+
+        $time = (float) $authTime;
+
+        // Only so the cast below cannot warn: anything past the end of year 9999 (INF included) is refused
+        // by the future check anyway, and anything before the epoch by the age, so any bound in between is
+        // equivalent. A numeric string or JSON number is never NAN.
+        if ($time > 253402300799) { // @pest-mutate-ignore: GreaterToGreaterOrEqual,IncrementInteger,DecrementInteger
+            return false;
+        }
+
+        $signedIn = (int) floor($time);
 
         $config = Lukk::guardConfig();
         $age = now()->getTimestamp() - $signedIn;

@@ -333,7 +333,7 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
   passkey or sign in again after every refresh.
 - Even in an `mfa` session, that allowance lasts only `confirm.mfa_max_age` (one day) after the sign-in,
   read from the new `auth_time` claim. Older sessions confirm with a passkey or sign in again.
-  An `auth_time` more than `leeway` in the future, or not an integer, counts as no recent sign-in.
+  An `auth_time` more than `leeway` in the future, or not a timestamp at all, counts as no recent sign-in.
   `auth_time` is derived as `expires_at − refresh_ttl`, so **lowering `refresh_ttl` pushes older
   sessions' `auth_time` forward**: after you lower it, those sessions need a fresh multi-factor
   sign-in (or a passkey) to step up.

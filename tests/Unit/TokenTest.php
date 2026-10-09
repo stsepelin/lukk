@@ -430,4 +430,10 @@ it('refuses a time claim no integer can hold, and keeps a fractional one RFC 751
     'exp as a huge numeric string' => ['exp', '1e30', false],
     'fractional exp' => ['exp', time() + 900.5, true],
     'fractional iat' => ['iat', time() - 0.5, true],
+    // The edges, both ways.
+    'iat at the epoch' => ['iat', 0, true],
+    'iat before it' => ['iat', -1, false],
+    'iat a fraction before it' => ['iat', -0.5, false],
+    'exp at the end of year 9999' => ['exp', 253402300799, true],
+    'exp a second later' => ['exp', 253402300800, false],
 ]);

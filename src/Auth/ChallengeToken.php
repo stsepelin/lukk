@@ -216,7 +216,11 @@ class ChallengeToken
             // never expires — against "challenge single-use + short TTL". `consume()` also reads it
             // AFTER the second factor has verified, where an uncaught throw 500s the request and
             // leaves the challenge unburned.
-            if (! is_int($claims->exp ?? null) || ! is_string($claims->jti ?? null)) {
+            //
+            // And no later than the end of year 9999, the bound the access verifier applies: `consume()` turns
+            // the remaining life into a cache TTL, and Redis refuses one near PHP_INT_MAX — another 500 after
+            // the second factor has verified.
+            if (! is_int($claims->exp ?? null) || $claims->exp > 253402300799 || ! is_string($claims->jti ?? null)) {
                 return null;
             }
         } catch (Throwable) {

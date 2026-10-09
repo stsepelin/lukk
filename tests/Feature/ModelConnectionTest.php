@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
+use Lukk\Tests\Fixtures\AuthConnection;
 use Lukk\Tests\Fixtures\OtherConnectionRefreshToken;
 use Lukk\Tests\Fixtures\OtherConnectionUser;
 use Lukk\Tests\Fixtures\User;
@@ -133,4 +134,21 @@ it('rolls back the reset-row delete on the broker\'s own connection when the dis
     expect(fn () => app(DeleteAccount::class)($user))->toThrow(RuntimeException::class, 'disposal failed');
 
     expect(DB::connection('lukk_other')->table('password_reset_tokens')->count())->toBe(1);
+});
+
+it('erases on a broker connection named by an enum, which Laravel accepts', function () {
+    onOtherConnection(fn () => Schema::create('password_reset_tokens', function (Blueprint $table) {
+        $table->string('email')->primary();
+        $table->string('token');
+        $table->timestamp('created_at')->nullable();
+    }));
+    config(['auth.passwords.users.connection' => AuthConnection::Other]);
+    app()->forgetInstance('auth.password');
+    Password::clearResolvedInstances();
+    $user = User::factory()->create(['email' => 'enum@y.com']);
+    Password::broker()->createToken($user);
+
+    app(DeleteAccount::class)($user);
+
+    expect(DB::connection('lukk_other')->table('password_reset_tokens')->count())->toBe(0);
 });

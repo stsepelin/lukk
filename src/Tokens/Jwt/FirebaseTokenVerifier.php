@@ -149,7 +149,7 @@ class FirebaseTokenVerifier implements TokenVerifier
      */
     private static function isNumericDate(mixed $value): bool
     {
-        if (! is_int($value) && ! is_float($value) && ! is_numeric($value)) {
+        if (! is_numeric($value)) {
             return false;
         }
 

@@ -67,8 +67,10 @@ class RegisterRequest extends FormRequest
      */
     public function after(): array
     {
+        // Equivalent without the return: the default rules already carry all three checks, so any
+        // password they refuse has an error, and the closure below skips a password that has one.
         if (Lukk::$registerValidation === null) {
-            return [];
+            return []; // @pest-mutate-ignore: RemoveEarlyReturn
         }
 
         return [function (Validator $validator): void {

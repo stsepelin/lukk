@@ -179,10 +179,11 @@ class DeleteAccount
      */
     private function acrossConnections(Closure $callback): void
     {
-        $default = DB::getDefaultConnection();
-        $broker = (string) (config("auth.passwords.{$this->brokerName()}.connection") ?? $default);
+        // Uncast: Laravel takes an enum as a connection name, and `(string)` on one threw before anything
+        // was erased. Null (or '') is the default connection, which then just nests as a savepoint.
+        $broker = config("auth.passwords.{$this->brokerName()}.connection");
 
-        DB::connection($broker)->transaction(fn () => DB::connection($default)->transaction($callback));
+        DB::connection($broker)->transaction(fn () => DB::connection()->transaction($callback));
     }
 
     /**
