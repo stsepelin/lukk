@@ -284,6 +284,8 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
   after a refresh on a schema without the `amr` column, or from `startSession()` — counts as
   single-factor, so **migrate the `amr` column**, or users with a second factor must confirm with a
   passkey or sign in again after every refresh.
+- Even in an `mfa` session, that allowance lasts only `confirm.mfa_max_age` (one day) after the sign-in,
+  read from the new `auth_time` claim. Older sessions confirm with a passkey or sign in again.
 - `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
   `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
   request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never

@@ -85,6 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Passkey options carry a `timeout`** equal to `passkeys.challenge_ttl` (WebAuthn L3 §5.4, §5.5). Without it the browser's own default — often five minutes — applied while lukk forgot the challenge after two, so a slow PIN or biometric entry ended in "could not be verified".
 
+- **Access tokens carry `auth_time`, and the multi-factor step-up allowance ages out.** `auth_time` (OpenID Connect Core §2) is when the session was signed in: stamped at sign-in, reserved like `amr`, and recomputed on rotation from the family's fixed expiry, so it needs no column. A password-only step-up on an account with a second factor is accepted inside an `mfa` session only for `confirm.mfa_max_age` (default 86400, `LUKK_CONFIRM_MFA_MAX_AGE`) after that sign-in — NIST SP 800-63B-4 §2.2.3 lets an AAL2 session reauthenticate with one factor while it is an AAL2 session, whose overall limit SHOULD be about a day. `mfa` used to vouch for the whole 30-day refresh life.
+
 - **Every lockout read and write happens inside the sign-in timebox**, with the account lookup. A real account has two lockout counters and an unknown identifier one, so with `features.lockout` on a wrong password cost 15 queries against 7, outside the box where the gap could be averaged into an existence oracle.
 
 - **The leeway cap reaches every decoder.** It was applied only to access tokens, so with a large `LUKK_LEEWAY` a two-factor challenge, step-up confirmation or passkey challenge stayed valid for up to a day past its expiry. `Lukk::leeway()` is the one clamp.

@@ -42,7 +42,8 @@ class EnsurePasswordStepUpMeetsAccountLevel
         // one — so treating its absence as "old rule" let a password-only attacker wait one refresh.
         $amr = $token->claims->amr ?? null;
 
-        if ((is_array($amr) && in_array(AuthenticationMethods::MULTI_FACTOR, $amr, true)) || ! $this->hasSecondFactor($user)) {
+        if ((is_array($amr) && in_array(AuthenticationMethods::MULTI_FACTOR, $amr, true) && $this->recent($token->claims->auth_time ?? null))
+            || ! $this->hasSecondFactor($user)) {
             return;
         }
 
@@ -65,5 +66,16 @@ class EnsurePasswordStepUpMeetsAccountLevel
         return (bool) (Lukk::guardConfig()['features']['passkeys'] ?? false) // @pest-mutate-ignore: RemoveBooleanCast
             && app(PasskeyRepository::class)->credentialIdsFor($user->getAuthIdentifier()) !== []
             && app(PasskeyAssurance::class)->hasMultiFactorCredential($user);
+    }
+
+    /**
+     * Whether the multi-factor sign-in is recent enough to vouch for this one-factor reauthentication.
+     * §2.2.3 allows it within an AAL2 session, whose overall limit SHOULD be about 24 hours; `mfa` rides
+     * every rotation for the whole refresh lifetime, so it is honoured only for `confirm.mfa_max_age`.
+     */
+    private function recent(mixed $authTime): bool
+    {
+        return is_numeric($authTime)
+            && now()->getTimestamp() - (int) $authTime <= (int) (Lukk::guardConfig()['confirm']['mfa_max_age'] ?? 86400);
     }
 }

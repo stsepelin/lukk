@@ -473,6 +473,21 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Multi-factor Session Age
+        |--------------------------------------------------------------------------
+        |
+        | On an account with a second factor, a password-only step-up is accepted
+        | only inside a session signed in with both factors — and only for this
+        | many seconds after that sign-in (NIST SP 800-63B-4 §2.2.3: an AAL2
+        | session's overall limit SHOULD be about 24 hours). After it, confirm
+        | with a user-verifying passkey or sign in again with the second factor.
+        |
+        */
+
+        'mfa_max_age' => (int) env('LUKK_CONFIRM_MFA_MAX_AGE', 86400),
+
+        /*
+        |--------------------------------------------------------------------------
         | Confirmation Header
         |--------------------------------------------------------------------------
         |

@@ -148,3 +148,42 @@ it('leaves a request that carries no verified token to the old rule', function (
 
     expect(true)->toBeTrue();
 });
+
+it('honours the multi-factor allowance only for a day after the multi-factor sign-in', function () {
+    // §2.2.3 lets an AAL2 session reauthenticate with one factor — while it is still an AAL2 session,
+    // whose overall limit SHOULD be about 24 hours. `mfa` rides every rotation for the whole refresh
+    // lifetime, so without an age a sign-in from 29 days ago still let a password bind authenticators.
+    // Signed in in the past and refreshed now: the JWT library checks times against the real clock.
+    $user = withTotp(User::factory()->create());
+    $fresh = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]);
+    $old = $this->travel(-(86_400 + 60))->seconds(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+
+    stepUpWithPassword($this, $fresh->accessToken)->assertOk();
+    app('auth')->forgetGuards();
+    stepUpWithPassword($this, rotate()($old->refreshToken)->accessToken)->assertStatus(422);
+});
+
+it('reads the age from confirm.mfa_max_age', function () {
+    config(['lukk.confirm.mfa_max_age' => 600]);
+    $user = withTotp(User::factory()->create());
+    $old = $this->travel(-700)->seconds(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+
+    stepUpWithPassword($this, rotate()($old->refreshToken)->accessToken)->assertStatus(422);
+});
+
+it('stamps auth_time at sign-in and carries it through rotation', function () {
+    $this->freezeSecond();
+    [$signedIn, $pair] = $this->travel(-120)->seconds(fn () => [now()->getTimestamp(), start()(User::factory()->create()->id, ['amr' => ['pwd']])]);
+
+    expect(claims(rotate()($pair->refreshToken)->accessToken)->auth_time)->toBe($signedIn)
+        ->and(claims(start()(User::factory()->create()->id)->accessToken)->auth_time)->toBe(now()->getTimestamp());
+});
+
+it('does not let a claims hook forge auth_time', function () {
+    Lukk\Lukk::tokenClaimsUsing(fn () => ['auth_time' => 4_000_000_000]);
+    $this->freezeSecond();
+
+    $pair = start()(User::factory()->create()->id, ['amr' => ['pwd']]);
+
+    expect(verifier()->verify($pair->accessToken)->auth_time)->toBe(now()->getTimestamp());
+});

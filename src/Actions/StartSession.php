@@ -82,6 +82,12 @@ class StartSession
         if ($authenticationMethods !== null) {
             $claims['amr'] = self::decodeAmr($authenticationMethods);
         }
+
+        // `auth_time` (OpenID Connect Core §2): when this session was authenticated. Reserved like `amr`
+        // — a hook neither supplies nor survives it — and recomputed on rotation from the family's fixed
+        // expiry rather than stored, so it needs no column.
+        unset($claims['auth_time']);
+        $claims['auth_time'] = now()->getTimestamp();
         $abilities = $granted ?? Lukk::abilitiesFor($userId, $context);
 
         // Unclaimed until first used (`claim_seconds`). Marked BEFORE the row exists: a cache failure then

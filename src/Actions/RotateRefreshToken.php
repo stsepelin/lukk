@@ -256,7 +256,12 @@ class RotateRefreshToken
         // how this session was authenticated, and a `tokenClaimsUsing` hook may neither forge one nor
         // erase the real one.
         $claims = Lukk::customClaimsFor($record->userId);
-        unset($claims['amr']);
+        unset($claims['amr'], $claims['auth_time']);
+
+        // When the SESSION was authenticated, which a refresh does not repeat: the family's expiry is fixed
+        // at sign-in (`refresh_ttl` from then) and inherited by every successor, so it dates the sign-in
+        // without a column. A `refresh_ttl` changed since shifts it by the difference.
+        $claims['auth_time'] = $record->expiresAt - (int) ($this->config['refresh_ttl'] ?? 2592000);
 
         // Re-validated on the way OUT, not trusted because it was validated on the way in. The
         // column is written through `RefreshTokenRepository`, a documented swap seam, and
