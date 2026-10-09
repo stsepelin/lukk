@@ -84,6 +84,16 @@ deletion), `summariesForUser()` (account export) and, with `password_reset.revok
 `summariesForUser()` + `delete()` now run on every install, where they used to be skipped unless a
 `passkeys` table existed. They must answer an empty store without throwing — `[]` and `0`.
 
+### Under bcrypt, passwords over 72 bytes are refused — including at sign-in
+
+bcrypt reads only the first 72 bytes, so lukk could verify a longer password only in part (NIST
+SP 800-63B-4 §3.1.1.2 requires the whole of it). Registration, reset and change-password answer 422
+for one; with `Lukk::registerValidation()` set, lukk adds that check (and "must be a string") after
+your rules, since they replace its own. **Sign-in refuses one against a bcrypt hash**: lukk never
+stored such a password, but an import or a hasher with `hashing.bcrypt.limit` off may have — those
+users get "These credentials do not match" and must reset. 36 two-byte characters already reach the
+limit. Argon2 is unaffected.
+
 ### Passkey login can answer with a two-factor challenge
 
 **Medium impact — if you use passkeys and two-factor together with your own client.** A passkey

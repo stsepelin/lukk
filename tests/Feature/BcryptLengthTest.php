@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Password;
+use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
 
 /*
@@ -54,4 +55,38 @@ it('leaves a driver without the limit alone', function () use ($long) {
     app('hash')->forgetDrivers();
 
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'argon@y.com', 'password' => $long, 'password_confirmation' => $long])->assertSuccessful();
+});
+
+it('refuses it at registration even when registerValidation replaces the rules', function () use ($long) {
+    // The hook replaces the rule set wholesale, and a consumer's set naturally omits a bcrypt detail;
+    // the default create then stored the password truncated.
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed']]);
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'hook@y.com', 'password' => $long, 'password_confirmation' => $long])
+        ->assertStatus(422)->assertJsonValidationErrors('password');
+    expect(User::where('email', 'hook@y.com')->exists())->toBeFalse();
+});
+
+it('adds nothing for a password the hook already refused, nor one that fits', function () {
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed']]);
+    $fits = str_repeat('b', 72);
+
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'fit@y.com', 'password' => $fits, 'password_confirmation' => $fits])->assertSuccessful();
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'arr@y.com', 'password' => ['x'], 'password_confirmation' => ['x']])->assertStatus(422);
+});
+
+it('keeps to the hook\'s own message when it already refused the password', function () use ($long) {
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'min:200']]);
+
+    $errors = $this->postJson('/auth/register', ['name' => 'n', 'email' => 'min@y.com', 'password' => $long])
+        ->assertStatus(422)->json('errors.password');
+    expect($errors)->toHaveCount(1);
+});
+
+it('leaves an absent password to a hook that does not require one', function () {
+    // A passwordless sign-up (magic link, SSO) creates its own user; nothing here is lukk's to hash.
+    Lukk::registerValidation(fn () => ['email' => ['required', 'email']]);
+    Lukk::registerUsing(fn (array $payload) => User::forceCreate(['name' => 'n', 'email' => $payload['email'], 'password' => '']));
+
+    $this->postJson('/auth/register', ['email' => 'nopw@y.com'])->assertSuccessful();
 });

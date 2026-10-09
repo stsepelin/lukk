@@ -7,6 +7,7 @@ namespace Lukk\Http\Requests;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
+use Illuminate\Validation\Validator;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
 
@@ -50,6 +51,40 @@ class RegisterRequest extends FormRequest
                 // on a public endpoint rather than a 422. Nothing else in the rule set rejects one.
                 'not_regex:/\0/', HashablePassword::rule(), Password::defaults()],
         ];
+    }
+
+    /**
+     * What lukk's own create needs of the password, whatever rule set is in force.
+     *
+     * `registerValidation()` replaces the rules wholesale, and a consumer's set naturally omits a
+     * hashing detail: under bcrypt an over-72-byte password was then stored truncated (NIST
+     * SP 800-63B-4 §3.1.1.2), and an array one 500'd in the default create. Only with the hook set —
+     * the default rules already say both — and only for a password that is present, so a set that
+     * does not require one still decides that itself.
+     *
+     * @return array<int, \Closure>
+     */
+    public function after(): array
+    {
+        if (Lukk::$registerValidation === null) {
+            return [];
+        }
+
+        return [function (Validator $validator): void {
+            $password = $this->input('password');
+
+            if ($password === null || $validator->errors()->has('password')) {
+                return;
+            }
+
+            if (! is_string($password)) {
+                $validator->errors()->add('password', __('validation.string', ['attribute' => 'password']));
+
+                return;
+            }
+
+            (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', $message));
+        }];
     }
 
     /**

@@ -992,3 +992,41 @@ it('signs in when the hash upgrade fails, and reports the failure', function () 
 
     Exceptions::assertReported(RuntimeException::class);
 });
+
+it('refuses a password bcrypt would verify only in part', function () {
+    // bcrypt reads 72 bytes, so a row whose password was set longer elsewhere (an import, a hasher with
+    // `limit` off) accepted every string sharing that prefix. NIST SP 800-63B-4 §3.1.1.2: verify the
+    // ENTIRE password. A verifier that cannot, must not say yes.
+    $prefix = str_repeat('a', 72);
+    $user = User::factory()->create(['email' => 'long@y.com']);
+    DB::table('users')->where('id', $user->id)->update(['password' => password_hash($prefix.'-original', PASSWORD_BCRYPT, ['cost' => 4])]);
+
+    $this->postJson('/auth/login', ['email' => 'long@y.com', 'password' => $prefix.'-anything-else'])->assertStatus(422);
+    $this->postJson('/auth/login', ['email' => 'long@y.com', 'password' => $prefix.'-original'])->assertStatus(422);
+});
+
+it('still signs in a password of exactly 72 bytes under bcrypt', function () {
+    $password = str_repeat('é', 36); // 72 bytes, 36 characters
+    $user = User::factory()->create(['email' => 'edge@y.com']);
+    DB::table('users')->where('id', $user->id)->update(['password' => password_hash($password, PASSWORD_BCRYPT, ['cost' => 4])]);
+
+    $this->postJson('/auth/login', ['email' => 'edge@y.com', 'password' => $password])->assertOk();
+});
+
+it('leaves a long password alone where the stored hash is not bcrypt', function () {
+    // Argon2 reads the whole input; only a bcrypt hash truncates.
+    $password = str_repeat('a', 100);
+    $user = User::factory()->create(['email' => 'argon@y.com']);
+    DB::table('users')->where('id', $user->id)->update(['password' => password_hash($password, PASSWORD_ARGON2ID)]);
+    config(['hashing.driver' => 'argon2id']);
+
+    $this->postJson('/auth/login', ['email' => 'argon@y.com', 'password' => $password])->assertOk();
+});
+
+it('answers a long password on a password-less account like any other failure', function () {
+    // The stored value is null there; a 500 would single out the passkey-only and SSO accounts.
+    $user = User::factory()->create(['email' => 'nopw@y.com']);
+    DB::table('users')->where('id', $user->id)->update(['password' => null]);
+
+    $this->postJson('/auth/login', ['email' => 'nopw@y.com', 'password' => str_repeat('a', 100)])->assertStatus(422);
+});

@@ -212,6 +212,12 @@ class AttemptLogin
             $valid = false;
         }
 
+        // bcrypt reads 72 bytes, so against a bcrypt row a longer password is verified only in part:
+        // every string sharing the prefix says yes. NIST SP 800-63B-4 §3.1.1.2 requires verifying the
+        // ENTIRE password, and lukk never stores one this long (`HashablePassword`), so such a row came
+        // from elsewhere and its owner resets. Decided AFTER the check, so the derivation is still paid.
+        $valid = $valid && ! $this->verifiedOnlyInPart($user, $credentials['password']);
+
         if (! $valid) {
             // Equalize the COST, not just the count. `Hash::check` runs at the cost embedded in the
             // stored hash; `Hash::make` above runs at the configured one. A row left behind by a
@@ -249,6 +255,13 @@ class AttemptLogin
         }
 
         return $user;
+    }
+
+    /** Would a bcrypt stored hash ignore part of this password? */
+    private function verifiedOnlyInPart(Authenticatable $user, mixed $password): bool
+    {
+        return is_string($password) && strlen($password) > 72
+            && password_get_info((string) $user->getAuthPassword())['algo'] === PASSWORD_BCRYPT;
     }
 
     /** Would the hasher rehash this stored value — weaker than configured, or not one it can read? */
