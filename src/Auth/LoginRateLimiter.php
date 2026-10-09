@@ -160,6 +160,21 @@ class LoginRateLimiter
     }
 
     /**
+     * Every login counter an account's own success, reset or password change releases: its account
+     * counter, and the fold of its own identifier (`lukk.username`). The cast matters: a numeric
+     * identifier column (a phone number) arrives as an int.
+     *
+     * @return list<string>
+     */
+    public static function subjectsOf(Authenticatable $user): array
+    {
+        // Property access reaches an Eloquent attribute and a GenericUser's alike.
+        $identifier = $user->{Lukk::usernameField()} ?? null;
+
+        return self::lockoutSubjects($user, is_scalar($identifier) ? (string) $identifier : '');
+    }
+
+    /**
      * Every persistent-lockout counter a login attempt touches: the identifier FOLD always, and the
      * account too when the identifier resolves to one. Either being locked refuses the attempt.
      *

@@ -355,3 +355,19 @@ it('spends a challenge once even when two requests read it as unspent at the sam
     expect(challenge()->consume('2fa', $token))->toBe('42')
         ->and(challenge()->consume('2fa', $token))->toBeNull();
 });
+
+it('claims the spend in the denylist store, under its own key', function () {
+    config(['cache.stores.denylist' => ['driver' => 'array'], 'lukk.denylist_store' => 'denylist']);
+    app()->forgetInstance(ChallengeToken::class);
+    $token = challenge()->issue('2fa', 42, 300);
+    $jti = json_decode(base64_decode(strtr(explode('.', $token)[1], '-_', '+/')), true)['jti'];
+
+    challenge()->consume('2fa', $token);
+
+    expect(cache()->store('denylist')->get('lukk:challenge-spent:'.$jti))->toBeTrue()
+        ->and(cache()->store()->get('lukk:challenge-spent:'.$jti))->toBeNull();
+});
+
+it('refuses a challenge with an empty subject', function () {
+    expect(challenge()->consume('2fa', coIssuedChallenge(['sub' => ''])))->toBeNull();
+});

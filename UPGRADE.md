@@ -267,7 +267,8 @@ still find them.
 
 **Medium impact — only with `cookie_mode` on, and only for clients not sending JSON.** `login`,
 `register`, `refresh`, `two-factor-challenge` and `passkeys/login` answer `415` unless the request has a
-`Content-Type: application/json` body or comes from the same origin (`Sec-Fetch-Site: same-origin`).
+`Content-Type: application/json` body or comes from the same origin or the user's own navigation
+(`Sec-Fetch-Site: same-origin` or `none`).
 This closes login CSRF: a cross-site form could otherwise plant an attacker's session cookie. Send
 JSON (`{}` for a cookie refresh), as lukk-js does.
 

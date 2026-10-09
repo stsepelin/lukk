@@ -44,6 +44,9 @@ it('counts bytes, not characters', function () {
 
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'fits@y.com', 'password' => $fits, 'password_confirmation' => $fits])->assertSuccessful();
     $this->postJson('/auth/register', ['name' => 'n', 'email' => 'over@y.com', 'password' => $over, 'password_confirmation' => $over])->assertStatus(422);
+    // And the boundary in single bytes: 72 is accepted, 73 is not.
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'b72@y.com', 'password' => str_repeat('b', 72), 'password_confirmation' => str_repeat('b', 72)])->assertSuccessful();
+    $this->postJson('/auth/register', ['name' => 'n', 'email' => 'b73@y.com', 'password' => str_repeat('b', 73), 'password_confirmation' => str_repeat('b', 73)])->assertStatus(422);
 });
 
 it('leaves a driver without the limit alone', function () use ($long) {

@@ -139,14 +139,9 @@ class ChallengeToken
         }
 
         // Re-validated, never trusted: the claim rides a token this process signed, but `decode()`
-        // does not type-check it and a co-issuer sharing the secret can mint any shape.
-        //
-        // The `is_array` test comes FIRST because a `(array)` cast would widen rather than validate:
-        // it promotes a bare string to `["pwd"]` and a numeric-keyed object to a list, so shapes
-        // `encodeAmr` refuses on every other path would have been accepted here.
-        if (! is_array($claims->amr)) {
-            return null;
-        }
+        // does not type-check it and a co-issuer sharing the secret can mint any shape. `encodeAmr`
+        // refuses anything but a non-empty list of short strings — never cast it to an array first,
+        // which would promote a bare string to `["pwd"]`.
 
         return StartSession::decodeAmr(StartSession::encodeAmr($claims->amr));
     }

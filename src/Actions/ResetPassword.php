@@ -14,7 +14,6 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Events\PasskeyDeleted;
-use Lukk\Lukk;
 use Lukk\Models\Passkey;
 
 /**
@@ -58,7 +57,7 @@ class ResetPassword
             // (The identifier argument is unused when a user is passed.)
             // Both of its counters: the account's, and the fold of its own identifier, which login also
             // counts (`LoginRateLimiter::lockoutSubjects()`).
-            foreach (LoginRateLimiter::lockoutSubjects($user, (string) ($user->getAttribute(Lukk::usernameField()) ?? '')) as $subject) {
+            foreach (LoginRateLimiter::subjectsOf($user) as $subject) {
                 $this->lockouts?->release('login', $subject, $this->guard);
             }
             // The step-up lock counts failures against the password that just changed, so those

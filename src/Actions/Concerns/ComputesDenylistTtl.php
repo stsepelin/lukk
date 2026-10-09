@@ -69,12 +69,17 @@ trait ComputesDenylistTtl
             return 0;
         }
 
-        $exp = $token?->claims->exp ?? null;
+        // `?? null` already absorbs a missing token; the `?->` states that it may be one.
+        $exp = $token?->claims->exp ?? null; // @pest-mutate-ignore: RemoveNullSafeOperator
 
+        // A shortcut: with no numeric `exp` the arithmetic below casts null to 0 and `max(0, …)` answers 0 anyway.
         if (! is_numeric($exp)) {
-            return 0;
+            // Any value at or below the configured window is equivalent: the caller takes the larger.
+            return 0; // @pest-mutate-ignore: RemoveEarlyReturn,DecrementInteger,IncrementInteger
         }
 
-        return max(0, (int) $exp - now()->getTimestamp() + (int) ($config['leeway'] ?? 5));
+        // `exp` is an int on every verified token and `leeway` an int in config; the casts state the types.
+        // No clamp at 0: a verified token has life left, and the caller takes the larger of this and the window.
+        return (int) $exp - now()->getTimestamp() + (int) ($config['leeway'] ?? 5); // @pest-mutate-ignore: RemoveIntegerCast
     }
 }

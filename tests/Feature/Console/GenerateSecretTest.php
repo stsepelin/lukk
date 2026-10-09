@@ -129,7 +129,9 @@ it('refuses a guard name that cannot be an env variable, rather than rewriting a
     // character, so `LUKK_AXB_SECRET` — another guard's secret — was the line overwritten.
     file_put_contents(secretEnvPath(), "LUKK_AXB_SECRET=keep-me\n");
 
-    command('lukk:secret', ['--guard' => $guard])->assertFailed();
+    command('lukk:secret', ['--guard' => $guard])
+        ->expectsOutputToContain('A guard name may only contain letters, digits')
+        ->assertFailed();
 
     expect(file_get_contents(secretEnvPath()))->toBe("LUKK_AXB_SECRET=keep-me\n");
 })->with(['a dot' => ['a.b'], 'a space' => ['a b'], 'a regex quantifier' => ['a+']]);

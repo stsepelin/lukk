@@ -8,6 +8,7 @@ use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Passkeys\PasskeyChallengeStore;
+use Lukk\Passkeys\SpomkyWebAuthnCeremony;
 use Lukk\Support\PasskeyRecord;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\Fixtures\UserVerifyingAuthenticator;
@@ -242,3 +243,16 @@ it('tells the browser how long the server keeps the challenge', function () {
     expect($this->postJson('/auth/passkeys/login-options')->json('options.timeout'))->toBe(90_000)
         ->and($this->withToken($access)->withHeaders(confirmedHeaders($access))->postJson('/auth/passkeys/registration-options')->json('timeout'))->toBe(90_000);
 });
+
+it('sends no timeout when none, or a non-positive one, is configured', function (mixed $timeout, ?int $sent) {
+    $ceremony = new SpomkyWebAuthnCeremony([
+        'rp_id' => 'localhost', 'rp_name' => 'lukk', 'origins' => ['https://localhost'], 'user_verification' => 'preferred', 'timeout' => $timeout,
+    ]);
+
+    expect($ceremony->authenticationOptions(str_repeat('A', 43), [])['timeout'] ?? null)->toBe($sent);
+})->with([
+    'positive' => [1, 1],
+    'zero' => [0, null],
+    'negative' => [-5, null],
+    'not an integer' => ['90000', null],
+]);

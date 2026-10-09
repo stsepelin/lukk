@@ -84,3 +84,16 @@ it('guards every route that sets the cookie', function (string $route) use ($cro
 
     $this->withHeaders($crossSiteForm)->post($route, [])->assertStatus(415);
 })->with(['/auth/login', '/auth/refresh', '/auth/register', '/auth/two-factor-challenge', '/auth/passkeys/login']);
+
+it('says why it refused', function () use ($crossSiteForm) {
+    $this->withHeaders($crossSiteForm)->post('/auth/login', [])->assertStatus(415)->assertExactJson(['message' => 'This request must be sent as JSON.']);
+});
+
+it('treats a cached config without cookie_mode as body mode', function () use ($crossSiteForm) {
+    $lukk = config('lukk');
+    unset($lukk['cookie_mode']);
+    config(['lukk' => $lukk]);
+    User::factory()->create(['email' => 'stale@y.com']);
+
+    $this->withHeaders($crossSiteForm)->post('/auth/login', ['email' => 'stale@y.com', 'password' => 'password'])->assertOk();
+});

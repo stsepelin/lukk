@@ -30,7 +30,8 @@ class EnsurePasswordStepUpMeetsAccountLevel
 {
     public function __invoke(Request $request, Authenticatable $user): void
     {
-        $amr = VerifiedToken::current($request)?->claims->amr ?? null;
+        // `?? null` already absorbs a request with no verified token; the `?->` states that it may have none.
+        $amr = VerifiedToken::current($request)?->claims->amr ?? null; // @pest-mutate-ignore: RemoveNullSafeOperator
 
         if (! is_array($amr) || in_array(AuthenticationMethods::MULTI_FACTOR, $amr, true) || ! $this->hasSecondFactor($user)) {
             return;
@@ -49,7 +50,8 @@ class EnsurePasswordStepUpMeetsAccountLevel
 
         // The store first: building the WebAuthn ceremony validates the passkey config, and an account
         // with no passkeys must not have its password step-up fail on a passkey setting.
-        return (bool) (Lukk::guardConfig()['features']['passkeys'] ?? false)
+        // The cast only states the type; `&&` reads the flag's truthiness either way.
+        return (bool) (Lukk::guardConfig()['features']['passkeys'] ?? false) // @pest-mutate-ignore: RemoveBooleanCast
             && app(PasskeyRepository::class)->credentialIdsFor($user->getAuthIdentifier()) !== []
             && app(PasskeyAssurance::class)->hasMultiFactorCredential($user);
     }

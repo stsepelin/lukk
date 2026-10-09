@@ -181,7 +181,8 @@ class StartSession
             return null;
         }
 
-        $decoded = json_decode($stored, true);
+        // A JSON list decodes to a PHP list with or without `assoc`, and `encodeAmr` refuses anything else.
+        $decoded = json_decode($stored, true); // @pest-mutate-ignore: TrueToFalse
 
         return self::encodeAmr($decoded) === null ? null : $decoded;
     }

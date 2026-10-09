@@ -2,9 +2,11 @@
 
 declare(strict_types=1);
 
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Testing\TestResponse;
+use Lukk\Actions\EnsurePasswordStepUpMeetsAccountLevel;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
@@ -91,4 +93,32 @@ it('leaves a session that carries no amr to the old rule', function () {
     $user = withTotp(User::factory()->create());
 
     stepUpWithPassword($this, $user->startSession()->accessToken)->assertOk();
+});
+
+it('lets a test acting as a user step up, which presents no token at all', function () {
+    $user = withTotp(User::factory()->create());
+    Lukk\Lukk::actingAs($user);
+
+    $this->postJson('/auth/confirm-password', ['password' => 'password'])->assertOk();
+});
+
+it('ignores passkeys on an install whose config has lost the passkeys flag', function () {
+    // A stale cached config without `features.passkeys` means the feature is off: a passkey row cannot
+    // raise the bar for a password step-up then.
+    $lukk = config('lukk');
+    unset($lukk['features']['passkeys']);
+    config(['lukk' => $lukk]);
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('phone', 'PUB+uv', 0));
+    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+
+    stepUpWithPassword($this, $access)->assertOk();
+});
+
+it('leaves a request that carries no verified token to the old rule', function () {
+    $user = withTotp(User::factory()->create());
+
+    app(EnsurePasswordStepUpMeetsAccountLevel::class)(Request::create('/auth/confirm-password', 'POST'), $user);
+
+    expect(true)->toBeTrue();
 });

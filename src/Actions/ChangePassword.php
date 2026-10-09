@@ -74,7 +74,7 @@ class ChangePassword
         // line required proving the current password.
         $this->lockouts?->release('confirm', $subject, $this->guard);
         // (The identifier argument is unused when a user is passed.)
-        foreach (LoginRateLimiter::lockoutSubjects($user, (string) ($user->getAttribute(Lukk::usernameField()) ?? '')) as $subject) {
+        foreach (LoginRateLimiter::subjectsOf($user) as $subject) {
             $this->lockouts?->release('login', $subject, $this->guard);
         }
 

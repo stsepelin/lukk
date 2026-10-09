@@ -111,16 +111,16 @@ class AttemptLogin
         // while the atomic increment means only `max` requests can ever win a slot, however many
         // arrive at once.
         // Every counter takes the attempt before any refuses it, so they stay in step.
-        $over = null;
+        $over = [];
 
         foreach ($subjects as $subject) {
             if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
-                $over ??= $subject;
+                $over[] = $subject;
             }
         }
 
-        if ($over !== null) {
-            $this->throwLocked('login', $over, $this->field());
+        if ($over !== []) {
+            $this->throwLocked('login', $over[0], $this->field());
         }
     }
 

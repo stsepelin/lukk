@@ -5,7 +5,9 @@ declare(strict_types=1);
 use Illuminate\Http\Request;
 use Lukk\Actions\Concerns\ComputesDenylistTtl;
 use Lukk\Actions\RevokeSession;
+use Lukk\Actions\StartSession;
 use Lukk\Support\Abilities;
+use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
 use Lukk\Tests\Fixtures\User;
 
@@ -126,4 +128,62 @@ it('caps the clock-skew leeway at a few minutes', function () {
     $expired = $this->travel(-1)->hours(fn () => issuer()->accessToken(ctx('1'))['token']);
 
     expect(verifier()->verify($expired))->toBeNull();
+});
+
+it('covers a presented token lukk never recorded minting, such as a co-issuer\'s', function () {
+    // The longest-lifetime record only knows tokens THIS deployment minted through its own actions. A
+    // token minted elsewhere — a co-issuer sharing the key, or the issuer called directly — is covered by
+    // the lifetime it presents.
+    config(['lukk.access_ttl' => 3600]);
+    $token = issuer()->accessToken(ctx('1'))['token'];
+    config(['lukk.access_ttl' => 60]);
+
+    $request = Request::create('/auth/sessions', 'DELETE');
+    $claims = verifier()->verify($token);
+    VerifiedToken::put($request, new VerifiedToken(guard: 'api', userId: '1', userClass: User::class, familyId: 'fam', abilities: Abilities::fromArray([]), claims: $claims));
+    app()->instance('request', $request);
+
+    expect(LongestAccessTtl::current())->toBe(0)
+        ->and(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBeGreaterThanOrEqual(3600)->toBeLessThanOrEqual(3605);
+});
+
+it('reads the recorded lifetime as an integer, whatever the store hands back', function () {
+    // Redis returns what it stores as a string.
+    cache()->store()->put('lukk:longest-access-ttl:api', '1800', 60);
+
+    expect(LongestAccessTtl::current())->toBe(1800);
+});
+
+it('decodes a stored amr up to its cap, and a list as a list', function () {
+    expect(StartSession::decodeAmr('["pwd","otp","mfa"]'))->toBe(['pwd', 'otp', 'mfa'])
+        ->and(StartSession::decodeAmr(str_pad('["pwd"]', StartSession::MAX_AMR_LENGTH, ' ')))->toBe(['pwd'])
+        ->and(StartSession::decodeAmr(str_pad('["pwd"]', StartSession::MAX_AMR_LENGTH + 1, ' ')))->toBeNull();
+});
+
+it('adds the configured leeway to a presented token\'s remaining life, five seconds when unset', function () {
+    $this->freezeSecond();
+    config(['lukk.access_ttl' => 3600]);
+    $token = issuer()->accessToken(ctx('1'))['token'];
+    $request = Request::create('/auth/sessions', 'DELETE');
+    VerifiedToken::put($request, new VerifiedToken(guard: 'api', userId: '1', userClass: User::class, familyId: 'fam', abilities: Abilities::fromArray([]), claims: verifier()->verify($token)));
+    app()->instance('request', $request);
+
+    expect(denylistTtl(['access_ttl' => 60]))->toBe(3605)
+        ->and(denylistTtl(['access_ttl' => 60, 'leeway' => 9]))->toBe(3609);
+});
+
+it('falls back to the configured window when the request presents no token', function () {
+    app()->instance('request', Request::create('/'));
+
+    expect(denylistTtl(['access_ttl' => 60, 'leeway' => 5]))->toBe(65);
+});
+
+it('records the lifetime a rotation mints, as a sign-in does', function () {
+    config(['lukk.access_ttl' => 60]);
+    $pair = start()(1);
+    config(['lukk.access_ttl' => 1800]);
+
+    rotate()($pair->refreshToken);
+
+    expect(LongestAccessTtl::current())->toBe(1800);
 });

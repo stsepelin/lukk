@@ -388,3 +388,15 @@ it('writes the new password to the column the model names', function () {
 
     expect(Hash::check('new-password-1', (string) DB::table('users')->where('id', $user->id)->value('passwd')))->toBeTrue();
 });
+
+it('keeps passkeys on an install whose config has lost the revoke_passkeys key', function () {
+    $lukk = config('lukk');
+    unset($lukk['password_reset']['revoke_passkeys']);
+    config(['lukk' => $lukk]);
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('kept', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect(app(PasskeyRepository::class)->credentialIdsFor($user->id))->toBe(['kept']);
+});

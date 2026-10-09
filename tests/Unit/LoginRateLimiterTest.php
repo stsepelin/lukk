@@ -2,9 +2,11 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Http\Request;
 use Lukk\Auth\LoginRateLimiter;
+use Lukk\Tests\Fixtures\User;
 
 it('reports the wait of whichever bucket blocks longer', function () {
     // The IP bucket and the per-account bucket fill at different times; the caller has to wait out
@@ -100,4 +102,21 @@ it('derives no legacy subject from an identifier that is blank', function () {
     expect(LoginRateLimiter::legacyLockoutSubject('   '))->toBe('')
         ->and(LoginRateLimiter::legacyLockoutSubject(' Ada@Example.test '))->toBe('idn:ada@example.test')
         ->and(LoginRateLimiter::lockoutSubject(null, '   '))->toBe('');
+});
+
+it('names an account\'s own counters from its identifier, a numeric one included', function () {
+    config(['lukk.username' => 'phone']);
+
+    expect(LoginRateLimiter::subjectsOf(new GenericUser(['id' => 5, 'phone' => 5551234])))
+        ->toBe([LoginRateLimiter::lockoutSubject(null, '5551234'), 'id:5'])
+        ->and(LoginRateLimiter::subjectsOf(new GenericUser(['id' => 5])))->toBe(['id:5']);
+
+    config(['lukk.username' => 'email']);
+    $user = User::factory()->make(['id' => 9, 'email' => 'Ada@Example.test']);
+    expect(LoginRateLimiter::subjectsOf($user))->toBe([LoginRateLimiter::lockoutSubject(null, 'ada@example.test'), 'id:9']);
+});
+
+it('counts an identifier that names no account once per attempt, not twice', function () {
+    // For a non-account the account subject IS the fold, so the two must not both be counted.
+    expect(LoginRateLimiter::lockoutSubjects(null, 'Ghost@Y.com'))->toBe([LoginRateLimiter::lockoutSubject(null, 'ghost@y.com')]);
 });
