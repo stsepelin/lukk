@@ -13,6 +13,7 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\PasswordChanged;
 use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 
 /**
  * Change the password of an already-authenticated user, having re-verified the current one.
@@ -59,7 +60,9 @@ class ChangePassword
             $this->throwLocked('confirm', $subject, 'current_password');
         }
 
-        if (! $this->users->validateCredentials($user, ['password' => $current])) {
+        // `||` keeps the derivation first; a bcrypt row longer than 72 bytes verifies only in part.
+        if (! $this->users->validateCredentials($user, ['password' => $current])
+            || HashablePassword::verifiesOnlyInPart($user, $current)) {
             throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
         }
 

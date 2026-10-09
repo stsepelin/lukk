@@ -18,6 +18,7 @@ use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 use RuntimeException;
 
 /**
@@ -216,7 +217,7 @@ class AttemptLogin
         // every string sharing the prefix says yes. NIST SP 800-63B-4 §3.1.1.2 requires verifying the
         // ENTIRE password, and lukk never stores one this long (`HashablePassword`), so such a row came
         // from elsewhere and its owner resets. Decided AFTER the check, so the derivation is still paid.
-        $valid = $valid && ! $this->verifiedOnlyInPart($user, $credentials['password']);
+        $valid = $valid && ! HashablePassword::verifiesOnlyInPart($user, $credentials['password']);
 
         if (! $valid) {
             // Equalize the COST, not just the count. `Hash::check` runs at the cost embedded in the
@@ -255,13 +256,6 @@ class AttemptLogin
         }
 
         return $user;
-    }
-
-    /** Would a bcrypt stored hash ignore part of this password? */
-    private function verifiedOnlyInPart(Authenticatable $user, mixed $password): bool
-    {
-        return is_string($password) && strlen($password) > 72
-            && password_get_info((string) $user->getAuthPassword())['algo'] === PASSWORD_BCRYPT;
     }
 
     /** Would the hasher rehash this stored value — weaker than configured, or not one it can read? */

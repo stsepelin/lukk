@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
 use Lukk\Lukk;
 use Lukk\Tests\Fixtures\User;
@@ -89,4 +90,19 @@ it('leaves an absent password to a hook that does not require one', function () 
     Lukk::registerUsing(fn (array $payload) => User::forceCreate(['name' => 'n', 'email' => $payload['email'], 'password' => '']));
 
     $this->postJson('/auth/register', ['email' => 'nopw@y.com'])->assertSuccessful();
+});
+
+it('refuses a password bcrypt would verify only in part at step-up and change-password', function () {
+    // The same truncation sign-in now refuses (NIST SP 800-63B-4 §3.1.1.2): a row written outside lukk
+    // with a longer password accepted any string sharing its first 72 bytes as the CURRENT password.
+    $prefix = str_repeat('a', 72);
+    $user = User::factory()->create();
+    DB::table('users')->where('id', $user->id)
+        ->update(['password' => password_hash($prefix.'-original', PASSWORD_BCRYPT, ['cost' => 4])]);
+    $access = $user->startSession()->accessToken;
+
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => $prefix.'-guess'])
+        ->assertStatus(422)->assertJsonValidationErrors('password');
+    $this->withToken($access)->postJson('/auth/password', ['current_password' => $prefix.'-guess', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1'])
+        ->assertStatus(422)->assertJsonValidationErrors('current_password');
 });

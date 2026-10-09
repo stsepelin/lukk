@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Support\HashablePassword;
 
 /**
  * Re-verify the authenticated user's password for a step-up ("sudo") confirmation.
@@ -46,7 +47,9 @@ class ConfirmPassword
             $this->throwLocked('confirm', $subject, 'password');
         }
 
-        if (! $this->users->validateCredentials($user, ['password' => $password])) {
+        // `||` keeps the derivation first; a bcrypt row longer than 72 bytes verifies only in part.
+        if (! $this->users->validateCredentials($user, ['password' => $password])
+            || HashablePassword::verifiesOnlyInPart($user, $password)) {
             throw ValidationException::withMessages(['password' => [__('The provided password is incorrect.')]]);
         }
 

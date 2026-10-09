@@ -89,7 +89,7 @@ deletion), `summariesForUser()` (account export) and, with `password_reset.revok
 bcrypt reads only the first 72 bytes, so lukk could verify a longer password only in part (NIST
 SP 800-63B-4 §3.1.1.2 requires the whole of it). Registration, reset and change-password answer 422
 for one; with `Lukk::registerValidation()` set, lukk adds that check (and "must be a string") after
-your rules, since they replace its own. **Sign-in refuses one against a bcrypt hash**: lukk never
+your rules, since they replace its own. **Sign-in, step-up and change-password refuse one against a bcrypt hash**: lukk never
 stored such a password, but an import or a hasher with `hashing.bcrypt.limit` off may have — those
 users get "These credentials do not match" and must reset. 36 two-byte characters already reach the
 limit. Argon2 is unaffected.
