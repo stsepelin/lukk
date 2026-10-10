@@ -173,7 +173,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->where('family_id', $familyId)
             ->whereNull('rotated_at')
             ->whereNull('revoked_at')
-            ->where('expires_at', '>=', now()->getTimestamp())
+            // A Carbon, not a Unix integer: `expires_at` is a datetime column. The integer failed the whole
+            // query on PostgreSQL (a 500 on every in-grace re-consumption, so the client's retry past grace
+            // revoked the family), matched nothing on MySQL (the fork signal never fired), and matched
+            // everything on sqlite. `pruneExpired()` compares the same way.
+            ->where('expires_at', '>=', now())
             ->count();
     }
 

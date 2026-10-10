@@ -393,3 +393,19 @@ it('never leaves a live token behind when a logout-all lands after rotation chec
     expect(DB::table('refresh_tokens')->where('family_id', $familyId)->count())->toBe(2)
         ->and(DB::table('refresh_tokens')->where('family_id', $familyId)->whereNull('revoked_at')->count())->toBe(0);
 });
+
+it('mints a sibling for a re-consumption inside grace, and counts the family\'s live tokens right', function (string $engine) {
+    // The grace window exists for exactly this: two tabs refreshing with one token. countLiveTokens
+    // compared the datetime `expires_at` with an integer — PostgreSQL refused the query (a 500, after
+    // which the client's retry past grace revoked the whole family), MySQL counted nothing (so the
+    // fork signal could never fire), sqlite counted expired rows.
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+    $first = app(RotateRefreshToken::class)($pair->refreshToken);
+    $sibling = app(RotateRefreshToken::class)($pair->refreshToken);
+
+    expect($sibling->refreshToken)->not->toBe($first->refreshToken)
+        ->and(app(RefreshTokenRepository::class)->countLiveTokens(
+            (string) DB::table('refresh_tokens')->value('family_id'),
+        ))->toBe(2);
+})->with([[fn () => ConcurrencyTestCase::engine()]]);

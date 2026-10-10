@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Exceptions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\Denylist;
+use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
@@ -512,4 +513,12 @@ it('records the rotated token\'s lifetime in the configured denylist store', fun
     rotate()($pair->refreshToken);
 
     expect(Cache::store('lukk-deny')->get('lukk:access-ttls:api'))->not->toBeNull();
+});
+
+it('does not count an expired row among the family\'s live tokens', function () {
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+    RefreshToken::query()->whereNull('rotated_at')->update(['expires_at' => now()->subMinute()]);
+
+    expect(app(RefreshTokenRepository::class)->countLiveTokens(familyId()))->toBe(0);
 });
