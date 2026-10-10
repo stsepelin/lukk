@@ -390,3 +390,14 @@ it('takes an auth_time that is not a number for no sign-in, even when the allowa
 
     stepUpWithPassword($this, $token)->assertStatus(422);
 })->with(['a word' => ['yesterday'], 'a list' => [[1, 2]]]);
+
+it('tells each route the way out it actually has', function () {
+    // The change-password route takes no step-up confirmation, so "confirm with a passkey" pointed at
+    // something that cannot satisfy it there: only a fresh multi-factor sign-in does.
+    $user = withTotp(User::factory()->create());
+    $access = start()($user->id, ['amr' => ['pwd']])->accessToken;
+
+    stepUpWithPassword($this, $access)->assertJsonValidationErrors(['password' => 'This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.']);
+    app('auth')->forgetGuards();
+    changePasswordFrom($this, $access)->assertJsonValidationErrors(['current_password' => 'This account has a second factor. Sign in again with your second factor, or with a passkey that verifies you, then change the password.']);
+});

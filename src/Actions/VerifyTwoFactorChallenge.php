@@ -28,7 +28,7 @@ class VerifyTwoFactorChallenge
         private readonly int $maxAttempts,
         private readonly int $decaySeconds,
         // Null unless `features.lockout` is on. The per-account limiter below bounds a rate; this
-        // bounds a consecutive run, which is what NIST SP 800-63B §5.2.2 actually requires.
+        // bounds a consecutive run, which is what NIST SP 800-63B-4 §3.2.2 actually requires.
         private readonly ?LockoutRepository $lockouts = null,
         private readonly ?string $guard = null,
     ) {}

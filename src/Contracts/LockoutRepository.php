@@ -66,7 +66,7 @@ interface LockoutRepository
      * raw identifier is never a key, so a sweep keyed on it silently matches nothing.
      *
      * Guard-scoped, because two accounts sharing a corporate email share a subject — an unguarded
-     * sweep let erasing one clear a held NIST §5.2.2 lock on a different, live account.
+     * sweep let erasing one clear a held NIST SP 800-63B-4 §3.2.2 lock on a different, live account.
      *
      * @param  array<int, string>  $subjects
      * @return int rows deleted

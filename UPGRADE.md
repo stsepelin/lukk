@@ -425,7 +425,10 @@ mails the owner should act on `id:` subjects and ignore the other.
 
 **Low impact — if an audit log listens to it.** Clearing a counter that never reached the cap (every
 successful sign-in after a typo did this) or a lock already past `release_after` no longer fires it.
-A rebound `LockoutRepository` should follow the same rule: fire for a held lock only.
+A rebound `LockoutRepository` should follow the same rule: fire for a held lock only. `lukk:release` now
+prints "No login lock was held for […]; cleared its failure count." (exit 0) when it cleared only a
+counter or an already-expired lock; scripts matching "Released the … lock" see that line only for a
+real release.
 
 ### A null `lukk.path` mounts the routes at `auth`
 
@@ -467,7 +470,8 @@ do; noted because the transactions now appear on those connections.
   algorithm, a `$2b$` import with `hashing.bcrypt.verify` on), as sign-in already did.
 - A recovery code stored under a hasher the app has since left is simply no match.
 - Registration, reset and change-password refuse a new password that is not a string (`422`).
-- A sign-in identifier or password that is not valid UTF-8 is refused with `422` before any lookup.
+- A sign-in identifier that is not valid UTF-8 is refused with `422` before any lookup (the password is
+  not checked for it: one set as non-UTF-8 bytes keeps working).
 
 ### `auth_time` may be fractional; `confirm.mfa_max_age` may be a float
 
@@ -488,7 +492,8 @@ SQLite a typo used to read as a string literal that matched every row. Productio
 account with an enforced TOTP or a user-verifying passkey now requires the session to be a recent
 multi-factor one (`amr` carries `mfa`, signed in within `confirm.mfa_max_age`), exactly as a password
 step-up does. Otherwise it answers `422` on `current_password` before checking anything; the client
-should have the user sign in again with their second factor (or confirm with a passkey) first.
+should have the user sign in again with their second factor or a user-verifying passkey (a step-up
+confirmation does not satisfy this route).
 Accounts with nothing stronger than the password are unaffected.
 
 ### Two-factor confirm and recovery-code regeneration answer `409` where they did nothing useful

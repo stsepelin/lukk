@@ -217,7 +217,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | Only used when features.lockout is on. "max_attempts" is the consecutive
-    | failure cap — NIST SP 800-63B §5.2.2 says no more than 100, so treat that
+    | failure cap — NIST SP 800-63B-4 §3.2.2 says no more than 100, so treat that
     | as a ceiling, not a target. The counter is cleared by any successful
     | authentication, never by time.
     |
@@ -226,7 +226,7 @@ return [
     | code clears it.
     |
     | The two settings pull against each other, so choose deliberately. 0 is the
-    | strict §5.2.2 reading — a run broken only by a SUCCESS — but it means an
+    | strict §3.2.2 reading — a run broken only by a SUCCESS — but it means an
     | attacker who locks an account has denied it until someone intervenes.
     | Setting it trades that for a decaying cap: 100 / 3600 is no longer "100
     | consecutive, ever", it is 100 per hour, which is exactly OWASP ASVS V2.2.1
@@ -983,7 +983,7 @@ return [
         | Account Lockout
         |--------------------------------------------------------------------------
         |
-        | NIST SP 800-63B §5.2.2 requires a verifier to limit CONSECUTIVE failed
+        | NIST SP 800-63B-4 §3.2.2 requires a verifier to limit CONSECUTIVE failed
         | authentication attempts on one account to no more than 100. The throttles
         | above are decaying windows — they bound a rate, not a run — so satisfying
         | the clause needs a persistent counter. Requires the published lockout

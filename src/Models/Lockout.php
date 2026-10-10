@@ -11,7 +11,7 @@ use Illuminate\Support\Carbon;
 /**
  * A consecutive-failure counter for one authenticator on one account.
  *
- * "Consecutive" is the whole point (NIST SP 800-63B §5.2.2): the counter is cleared by any
+ * "Consecutive" is the whole point (NIST SP 800-63B-4 §3.2.2): the counter is cleared by any
  * successful authentication and is never decayed by time, so it counts a genuine run of failures
  * rather than a rate. That's also why it lives in the database — a cache entry expires, and a cache
  * flush would silently release every lock.

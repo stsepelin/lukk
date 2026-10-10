@@ -28,11 +28,17 @@ use Lukk\Support\VerifiedToken;
  *
  * Changing the password runs the same check: the new password REPLACES an authenticator, which is the
  * act §4.1.2.1 prices at the account's maximum AAL, and proving the current password is one factor.
- * `$field` names the input the refusal is reported on (`current_password` there).
+ * `$field` names the input the refusal is reported on (`current_password` there), and `$message` the way
+ * out that route offers: it takes no step-up confirmation, so only a fresh multi-factor sign-in satisfies it.
  */
 class EnsurePasswordStepUpMeetsAccountLevel
 {
-    public function __invoke(Request $request, Authenticatable $user, string $field = 'password'): void
+    /**
+     * @param  string  $field  the input the refusal is reported on
+     * @param  string|null  $message  the refusal, naming the way out the calling route actually offers;
+     *                                null for the step-up's own (a passkey confirmation is one there)
+     */
+    public function __invoke(Request $request, Authenticatable $user, string $field = 'password', ?string $message = null): void
     {
         $token = VerifiedToken::current($request);
 
@@ -52,7 +58,7 @@ class EnsurePasswordStepUpMeetsAccountLevel
         }
 
         throw ValidationException::withMessages([$field => [
-            __('This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.'),
+            $message ?? __('This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.'),
         ]]);
     }
 

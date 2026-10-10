@@ -1050,15 +1050,25 @@ it('pays the equalizing derivation when the hasher cannot judge the stored hash'
     expect($hasher->makes)->toBe(1);
 });
 
-it('refuses an identifier or password that is not valid UTF-8 before it reaches the database', function (string $field) {
+it('refuses an identifier that is not valid UTF-8 before it reaches the database', function () {
     // A form body can carry any bytes. PostgreSQL rejects an invalid UTF-8 sequence in a query parameter
     // (SQLSTATE 22021), so an `\xFF` in the identifier was a 500 there — sqlite merely finds no row,
     // which is why this asserts that the lookup never ran rather than a status alone.
     User::factory()->create(['email' => 'a@x.com']);
     DB::enableQueryLog();
 
-    $this->post('/auth/login', ['email' => 'a@x.com', 'password' => 'password', $field => "\xFF@x.com"], ['Accept' => 'application/json'])
-        ->assertStatus(422)->assertJsonValidationErrors($field);
+    $this->post('/auth/login', ['email' => "\xFF@x.com", 'password' => 'password'], ['Accept' => 'application/json'])
+        ->assertStatus(422)->assertJsonValidationErrors('email');
 
     expect(collect(DB::getQueryLog())->filter(fn ($q) => str_contains($q['query'], 'users')))->toBeEmpty();
-})->with(['email', 'password']);
+});
+
+it('signs in with a password that is not valid UTF-8, as registration and reset accept one', function () {
+    // The password never reaches SQL, and the setters take any bytes — a legacy ISO-8859-1 form client, or
+    // a password set before this release. Refusing those bytes here locked such an account out for good,
+    // and a reset to the same password looped.
+    $user = User::factory()->create(['password' => Hash::make("\xE9t\xE9")]);
+
+    $this->post('/auth/login', ['email' => $user->email, 'password' => "\xE9t\xE9"], ['Accept' => 'application/json'])
+        ->assertOk()->assertJsonStructure(['access_token']);
+});

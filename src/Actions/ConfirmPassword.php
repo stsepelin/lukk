@@ -16,7 +16,7 @@ use Lukk\Support\HashablePassword;
  *
  * This checks the SAME secret as login, so it needs the same defences: the route is throttled
  * (`lukk-confirm`, per user and per IP), and — when `features.lockout` is on — a run of failures
- * here counts toward the same NIST SP 800-63B §5.2.2 cap. Without both, a caller holding an access
+ * here counts toward the same NIST SP 800-63B-4 §3.2.2 cap. Without both, a caller holding an access
  * token had an unmetered password oracle sitting behind the sudo gate.
  */
 class ConfirmPassword

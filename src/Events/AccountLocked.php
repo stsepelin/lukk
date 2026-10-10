@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Events;
 
 /**
- * A consecutive-failure run hit the cap and the account is now locked (NIST SP 800-63B §5.2.2).
+ * A consecutive-failure run hit the cap and the account is now locked (NIST SP 800-63B-4 §3.2.2).
  *
  * Fired once, on the transition. A locked-out user gets no other signal — they simply can't
  * authenticate — so this is where an app sends the "someone is trying to get into your account"

@@ -21,7 +21,7 @@ use Lukk\Models\Lockout;
  * authentication, a password reset, `lukk:release`, or this API. Any positive value auto-releases
  * that many seconds after the lock was set, which bounds the denial an attacker gets by burning a
  * known account's budget on purpose. That bound has a cost: a run broken by TIME rather than by a
- * success is no longer "consecutive" in the strict NIST SP 800-63B §5.2.2 sense, so the two knobs
+ * success is no longer "consecutive" in the strict NIST SP 800-63B-4 §3.2.2 sense, so the two knobs
  * pull against each other and the docs say so.
  */
 class DatabaseLockoutRepository implements LockoutRepository
@@ -105,17 +105,22 @@ class DatabaseLockoutRepository implements LockoutRepository
         // announced only where a lock was HELD. Fired for any deleted counter, every successful sign-in
         // after a typo told an audit log that a locked account had been unlocked. A lock already past
         // `release_after` ended then, and that expiry announces nothing; deleting its row is no release.
-        $row = $this->find($purpose, $subject, $guard);
-        $held = $row?->locked_at !== null && ! $this->expired($row);
+        //
+        // "Held" is decided BY the deleting statements, never by a read before them: a SELECT then an
+        // unconditional DELETE lifted a lock taken in between with no announcement. The held lock goes
+        // first and is announced; the second statement takes only what is NOT held, so a lock that
+        // arrives between the two is left standing rather than lifted silently.
+        $held = $this->held($this->query($purpose, $subject, $guard))->delete();
+        $cleared = $this->query($purpose, $subject, $guard)
+            ->where(fn ($q) => $q->whereNull('locked_at')->orWhere(fn ($spent) => $this->spent($spent)))
+            ->delete();
 
-        $released = $this->query($purpose, $subject, $guard)->delete();
-
-        // Only the request that deleted the row announces it, so a concurrent release is not counted twice.
-        if ($released > 0 && $held) {
+        // Only the request that deleted the lock announces it, so a concurrent release is not counted twice.
+        if ($held > 0) {
             event(new AccountReleased($purpose, $subject, $guard));
         }
 
-        return $released;
+        return $held + $cleared;
     }
 
     public function availableIn(string $purpose, string $subject, ?string $guard): ?int
@@ -148,7 +153,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         }
 
         // Every purpose, but only THIS guard. Two accounts sharing a corporate email share a lockout
-        // subject, so an unguarded sweep let erasing one account clear a held NIST §5.2.2 login lock
+        // subject, so an unguarded sweep let erasing one account clear a held NIST SP 800-63B-4 §3.2.2 login lock
         // on a different, live, possibly privileged one — reachable by anyone controlling any
         // account with that identifier.
         return Lockout::query()->whereIn('subject', $subjects)->where('guard', (string) $guard)->delete();
@@ -263,6 +268,37 @@ class DatabaseLockoutRepository implements LockoutRepository
         // '' rather than null — see the migration: a null in a unique index doesn't dedupe.
         return Lockout::query()
             ->where('purpose', $purpose)->where('subject', $subject)->where('guard', (string) $guard);
+    }
+
+    /**
+     * @param  Builder<covariant \Lukk\Models\Lockout>  $query
+     * @return Builder<covariant \Lukk\Models\Lockout>
+     */
+    private function held(Builder $query): Builder
+    {
+        return $query->whereNotNull('locked_at')->when(
+            $this->releaseAfter > 0,
+            fn ($q) => $q->where('locked_at', '>=', $this->lapsedBefore()),
+        );
+    }
+
+    /**
+     * A lock `release_after` has already lifted — the complement of `held()` among locked rows. Never
+     * matches with `release_after` at 0, where only a release ends a lock.
+     *
+     * @param  Builder<covariant \Lukk\Models\Lockout>  $query
+     */
+    private function spent(Builder $query): void
+    {
+        $this->releaseAfter > 0
+            ? $query->whereNotNull('locked_at')->where('locked_at', '<', $this->lapsedBefore())
+            : $query->whereRaw('1 = 0');
+    }
+
+    /** Locks set before this instant have auto-released (`expired()`, as a bound for a WHERE clause). */
+    private function lapsedBefore(): Carbon
+    {
+        return Carbon::now()->subSeconds($this->releaseAfter);
     }
 
     private function expired(Lockout $row): bool

@@ -61,7 +61,7 @@ class AttemptLogin
     }
 
     /**
-     * NIST SP 800-63B §5.2.2. Distinct from the throttles above: those bound a RATE and clear
+     * NIST SP 800-63B-4 §3.2.2. Distinct from the throttles above: those bound a RATE and clear
      * themselves, this bounds a RUN and is held until something releases it. 423 rather than 429
      * because "retry later" may be untrue — with `release_after` at 0 it needs intervention.
      */

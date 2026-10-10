@@ -133,7 +133,7 @@ class LoginRateLimiter
      * index compares binary) both fold onto `admin@x.com` — so two real accounts shared one lock
      * row. Since a password reset releases on that subject, whoever controlled a look-alike account
      * could lock the victim, reset their own password, clear the victim's lock, and repeat: the
-     * §5.2.2 cap degraded back to the decaying throttle it exists to replace.
+     * §3.2.2 cap degraded back to the decaying throttle it exists to replace.
      *
      * The fallback keeps the two properties that made normalization right in the first place: an
      * identifier naming no account still gets a counter, so being locked is not an existence

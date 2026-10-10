@@ -355,7 +355,7 @@ class LukkServiceProvider extends ServiceProvider
             $lockout = (array) (Lukk::guardConfig()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
             // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
             // account on its owner's first typo — the `Limit(0)` failure class this package already
-            // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
+            // guards elsewhere. 100 is also §3.2.2's ceiling, so clamp rather than trust.
             // Any default of 100 or more clamps to the same 100 below; the value names the ceiling.
             $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100; // @pest-mutate-ignore: IncrementInteger
             // `0` means "manual release only", and the repository reads EVERY value at or below it that way
