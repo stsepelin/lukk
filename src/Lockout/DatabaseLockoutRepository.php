@@ -295,10 +295,17 @@ class DatabaseLockoutRepository implements LockoutRepository
             : $query->whereRaw('1 = 0');
     }
 
-    /** Locks set before this instant have auto-released (`expired()`, as a bound for a WHERE clause). */
+    /**
+     * Locks set before this instant have auto-released (`expired()`, as a bound for a WHERE clause).
+     *
+     * Rounded UP to the second. The bound is bound as `Y-m-d H:i:s`, dropping the fraction `expired()`
+     * compares with, so between L+R and L+R+1 the release still took the lock for held — and announced it
+     * — while `locked()` already called it lifted. `locked_at` is stored to the whole second, so
+     * `locked_at >= ceil(now − R)` is exactly `expired()`'s "not yet past L+R".
+     */
     private function lapsedBefore(): Carbon
     {
-        return Carbon::now()->subSeconds($this->releaseAfter);
+        return Carbon::now()->subSeconds($this->releaseAfter)->ceilSecond();
     }
 
     private function expired(Lockout $row): bool

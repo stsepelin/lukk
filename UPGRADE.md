@@ -470,8 +470,9 @@ do; noted because the transactions now appear on those connections.
   algorithm, a `$2b$` import with `hashing.bcrypt.verify` on), as sign-in already did.
 - A recovery code stored under a hasher the app has since left is simply no match.
 - Registration, reset and change-password refuse a new password that is not a string (`422`).
-- A sign-in identifier that is not valid UTF-8 is refused with `422` before any lookup (the password is
-  not checked for it: one set as non-UTF-8 bytes keeps working).
+- Input that is not valid UTF-8 is refused with `422` before it reaches SQL: the sign-in identifier, a
+  passkey `credential.id` (sign-in and step-up), a passkey name, and registration's `name` and non-email
+  username. The sign-in password is not checked for it: one set as non-UTF-8 bytes keeps working.
 
 ### `auth_time` may be fractional; `confirm.mfa_max_age` may be a float
 

@@ -945,3 +945,25 @@ it('tells the ceremony whose credential a step-up expects, and nobody\'s at sign
     passkeyLogin($this, 'cred-owner', uv: true, signCount: 2)->assertOk();
     expect(FakeWebAuthnCeremony::$lastOwner)->toBeNull();
 });
+
+it('refuses a credential id that is not valid UTF-8 before it reaches the database', function (string $uri) {
+    // A form body can carry any bytes, and PostgreSQL refuses an invalid sequence in a query parameter
+    // (SQLSTATE 22021): `credential[id]=%FF` was a 500 on the public passkey sign-in route.
+    $user = User::factory()->create();
+    $headers = $uri === '/auth/confirm-passkey' ? ['Authorization' => 'Bearer '.$user->startSession()->accessToken] : [];
+    DB::enableQueryLog();
+
+    $this->post($uri, ['ceremony_id' => (string) Str::uuid(), 'credential' => ['id' => "\xFF"]], ['Accept' => 'application/json', ...$headers])
+        ->assertStatus(422)->assertJsonValidationErrors('credential.id');
+
+    expect(collect(DB::getQueryLog())->filter(fn ($q) => str_contains($q['query'], 'passkeys')))->toBeEmpty();
+})->with(['/auth/passkeys/login', '/auth/confirm-passkey']);
+
+it('refuses a passkey name that is not valid UTF-8, rather than 500ing on the insert', function () {
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))
+        ->post('/auth/passkeys', ['credential' => ['id' => 'x'], 'name' => "\xFF"], ['Accept' => 'application/json'])
+        ->assertStatus(422)->assertJsonValidationErrors('name');
+});

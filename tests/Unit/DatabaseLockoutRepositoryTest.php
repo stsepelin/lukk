@@ -307,3 +307,43 @@ it('leaves standing a lock that arrives mid-release when locks never lapse, howe
     expect($repo->locked('login', 'ada', null))->toBeTrue();
     Event::assertNotDispatched(AccountReleased::class);
 });
+
+it('agrees with locked() to the sub-second on whether a lock is still held at release_after', function (float $offset, bool $held) {
+    // `locked()` compares with microseconds; the release's SQL bound was bound as `Y-m-d H:i:s`, dropping
+    // them. Between L+R and L+R+1 the lock read as lifted while the release still announced it — and
+    // `lukk:release` printed "no lock was held" beside the event. Whatever the instant, the two agree.
+    Event::fake([AccountReleased::class]);
+    $locked = Carbon::parse('2026-10-10 12:00:00');
+    Carbon::setTestNow($locked);
+    $repo = lockouts(after: 30);
+    lockSubject($repo);
+    Carbon::setTestNow($locked->copy()->addMicroseconds((int) round((30 + $offset) * 1_000_000)));
+
+    expect($repo->locked('login', 'ada', null))->toBe($held);
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    expect(Event::dispatched(AccountReleased::class)->isNotEmpty())->toBe($held);
+})->with([
+    'half a second before release_after' => [-0.5, true],
+    'exactly at release_after' => [0.0, true],
+    'half a second past it' => [0.5, false],
+    'a whole second past it' => [1.0, false],
+]);
+
+it('does not sweep as spent a lock that arrives mid-release exactly at its release_after', function () {
+    // At exactly L+R the lock is still held (`expired()` wants it PAST), so the second statement, which
+    // takes only spent locks, must leave it.
+    Event::fake([AccountReleased::class]);
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:00:30'));
+    $repo = lockouts(max: 3, after: 30);
+    $repo->recordFailure('login', 'ada', null);
+    $seen = 0;
+    DB::listen(function ($query) use (&$seen) {
+        if (str_contains($query->sql, '"lukk_lockouts"') && ! str_contains($query->sql, 'sqlite_master') && ++$seen === 2) {
+            DB::table('lukk_lockouts')->update(['locked_at' => Carbon::parse('2026-10-10 12:00:00')]);
+        }
+    });
+
+    $repo->release('login', 'ada', null);
+
+    expect($repo->locked('login', 'ada', null))->toBeTrue();
+});

@@ -40,12 +40,17 @@ class RegisterRequest extends FormRequest
         $field = Lukk::usernameField();
 
         return [
-            'name' => ['required', 'string', 'max:255'],
+            // Valid UTF-8 (a `u` pattern matches nothing else): PostgreSQL refuses an invalid sequence
+            // in a query parameter (SQLSTATE 22021), so `\xFF` here was a 500 on the INSERT.
+            'name' => ['required', 'string', 'max:255', 'regex:/^/u'],
             // max:255 here too — `email`/`unique` on an unbounded string is real work on an
             // unauthenticated endpoint, and every realistic identifier fits (ASVS V2.1).
+            // A non-email identifier must be valid UTF-8 as well, for the same reason: `unique` queries
+            // with the value. Laravel skips `unique` once an earlier rule on the attribute has failed, so
+            // refusing it first is enough — and `email` already refuses such an address.
             $field => $field === 'email'
                 ? ['required', 'string', 'max:255', 'email', Rule::unique($this->userModel(), 'email')]
-                : ['required', 'string', 'max:255', Rule::unique($this->userModel(), $field)],
+                : ['required', 'string', 'max:255', 'regex:/^/u', Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
             // The type and NUL-byte checks are `after()`'s, which runs for every rule set, this one included.
             'password' => ['required', 'confirmed', 'max:255', HashablePassword::rule(), Password::defaults()],

@@ -297,3 +297,25 @@ it('refuses a password that is not a string under the default rules, whatever Pa
         Password::$defaultCallback = null;
     }
 });
+
+it('refuses a name that is not valid UTF-8 before the insert', function () {
+    // PostgreSQL refuses an invalid UTF-8 sequence in a query parameter (SQLSTATE 22021): a 500 on a
+    // public route. `email` already refuses such an address; the name reached the INSERT.
+    $this->post('/auth/register', [
+        'name' => "\xFF", 'email' => 'new@example.test', 'password' => 'password-123', 'password_confirmation' => 'password-123',
+    ], ['Accept' => 'application/json'])->assertStatus(422)->assertJsonValidationErrors('name');
+
+    expect(User::where('email', 'new@example.test')->exists())->toBeFalse();
+});
+
+it('never runs the uniqueness query for an address the earlier rules refused', function () {
+    // `unique` asks the database with the value, and PostgreSQL refuses an invalid UTF-8 sequence (SQLSTATE
+    // 22021). Laravel skips `unique` once an earlier rule failed; this pins that the address never gets there.
+    DB::enableQueryLog();
+
+    $this->post('/auth/register', [
+        'name' => 'Ada', 'email' => "\xFF@x.com", 'password' => 'password-123', 'password_confirmation' => 'password-123',
+    ], ['Accept' => 'application/json'])->assertStatus(422)->assertJsonValidationErrors('email');
+
+    expect(collect(DB::getQueryLog())->filter(fn ($q) => str_contains($q['query'], 'users')))->toBeEmpty();
+});
