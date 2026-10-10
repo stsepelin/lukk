@@ -18,6 +18,7 @@ use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
 use Lukk\Models\Lockout;
 use Lukk\Models\Passkey;
+use Lukk\Models\RefreshToken;
 use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Passkeys\PasskeyChallengeStore;
 use Lukk\Support\Abilities;
@@ -906,12 +907,13 @@ it('refuses an assertion whose counter another concurrent assertion already reac
     Event::assertDispatched(PasskeyCloneDetected::class);
 });
 
-it('refuses, without a clone alarm, an assertion whose credential was deleted mid-ceremony', function () {
+it('refuses, without a clone alarm, an assertion whose credential was deleted mid-ceremony', function (int $stored, int $presented) {
     // The counter write found no row: nothing raced it, the passkey is simply gone. Refusing is right;
-    // telling the application a key was cloned is not.
+    // telling the application a key was cloned is not. And refusing must not hinge on the counter
+    // advancing: a synced passkey reports 0 forever, and its deleted credential signed in.
     Event::fake([PasskeyCloneDetected::class]);
     $user = User::factory()->create();
-    storePasskey($user->id, 'cred-gone', 4);
+    storePasskey($user->id, 'cred-gone', $stored);
     app()->instance(PasskeyRepository::class, new class extends DatabasePasskeyRepository
     {
         public function updateSignCount(string $credentialId, int $signCount): bool
@@ -922,9 +924,13 @@ it('refuses, without a clone alarm, an assertion whose credential was deleted mi
         }
     });
 
-    passkeyLogin($this, 'cred-gone', uv: false, signCount: 5)->assertStatus(422);
+    passkeyLogin($this, 'cred-gone', uv: false, signCount: $presented)->assertStatus(422);
     Event::assertNotDispatched(PasskeyCloneDetected::class);
-});
+    expect(RefreshToken::query()->count())->toBe(0);
+})->with([
+    'an advancing counter' => [4, 5],
+    'a synced passkey, which reports 0' => [0, 0],
+]);
 
 it('tells the ceremony whose credential a step-up expects, and nobody\'s at sign-in', function () {
     // WebAuthn L3 §7.2 step 6: when the user is identified first, the credential must be theirs and the

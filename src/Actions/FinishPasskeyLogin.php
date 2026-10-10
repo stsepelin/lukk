@@ -60,15 +60,21 @@ class FinishPasskeyLogin
         // Never lower the ratchet, and notice losing a race: two assertions presenting the same next counter
         // (a clone and the real key at once) both passed the check above against the same stale read, and only
         // one can move the counter. The one that cannot is the clone signal WebAuthn L3 §7.2 describes.
-        if (! $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount))
-            && $newSignCount > $stored->signCount) {
-            // Or the credential was deleted mid-ceremony, which also writes nothing: refused either
-            // way, but only a row still there is a lost race worth an alarm.
-            if ($this->passkeys->existsByCredentialId($stored->credentialId)) {
-                event(new PasskeyCloneDetected($stored->userId, $stored->credentialId));
+        //
+        // A write that changed nothing is also what a credential deleted mid-ceremony looks like — and that
+        // must be refused whatever its counter did: a synced passkey reports 0 forever, so gating the check
+        // on an advancing counter let a passkey the user had just removed (a stolen one, say) still sign in.
+        // Only a row still there is a lost race worth the alarm; a counter that did not move is not one.
+        if (! $this->passkeys->updateSignCount($stored->credentialId, max($stored->signCount, $newSignCount))) {
+            if (! $this->passkeys->existsByCredentialId($stored->credentialId)) {
+                $this->fail();
             }
 
-            $this->fail();
+            if ($newSignCount > $stored->signCount) {
+                event(new PasskeyCloneDetected($stored->userId, $stored->credentialId));
+
+                $this->fail();
+            }
         }
 
         return new VerifiedPasskey($stored->userId, $stored->credentialId, $assertion->multiFactor);
