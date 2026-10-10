@@ -67,9 +67,7 @@ class ConfirmPasswordUnchanged
      */
     public function __invoke(int|string $userId, ?string $fingerprint, TokenPair $pair, string $field, string $message): void
     {
-        $current = $this->stored($userId);
-
-        if ($fingerprint !== null && $current !== null && PasswordFingerprint::matches($fingerprint, $current)) {
+        if ($this->holds($userId, $fingerprint)) {
             return;
         }
 
@@ -88,6 +86,27 @@ class ConfirmPasswordUnchanged
         }
 
         throw ValidationException::withMessages([$field => [$message]]);
+    }
+
+    /**
+     * Whether the password `$fingerprint` was taken from is still the account's, read from the primary.
+     *
+     * Also asked on its own BEFORE a step that spends something — the two-factor challenge asks it before
+     * verifying the factor, so a challenge that is already stale is refused without burning a recovery
+     * code or a TOTP code. That early answer does not replace the check after the session is written:
+     * only that order closes the race with a concurrent change (see the class docblock).
+     *
+     * @param  string|null  $fingerprint  null (a challenge that carries none) is never taken as unchanged
+     */
+    public function holds(int|string $userId, ?string $fingerprint): bool
+    {
+        if ($fingerprint === null) {
+            return false;
+        }
+
+        $current = $this->stored($userId);
+
+        return $current !== null && PasswordFingerprint::matches($fingerprint, $current);
     }
 
     /**

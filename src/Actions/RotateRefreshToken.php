@@ -17,6 +17,7 @@ use Lukk\Support\RefreshTokenRecord;
 use Lukk\Support\RotationOutcome;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
+use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use RuntimeException;
 use Throwable;
 
@@ -57,7 +58,7 @@ class RotateRefreshToken
         private readonly ?ClaimSession $claim = null,
     ) {}
 
-    public function __invoke(string $presentedSecret): TokenPair
+    public function __invoke(#[\SensitiveParameter] string $presentedSecret): TokenPair
     {
         $hash = $this->issuer->hash($presentedSecret);
         $grace = (int) ($this->config['grace_seconds'] ?? 30);
@@ -208,7 +209,7 @@ class RotateRefreshToken
             // mutating the fallback is equivalent. Pest ignores per line and per mutator name, not per
             // literal, so this necessarily covers the `+ 1` as well — that one is real, and is pinned
             // by the exact sibling counts asserted in `RotateRefreshTokenTest`.
-            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access); // @pest-mutate-ignore: DecrementInteger,IncrementInteger
+            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access, $record->expiresAt); // @pest-mutate-ignore: DecrementInteger,IncrementInteger
         });
 
         // ADVISORY, so it must not be able to cost the caller its session. Dispatched synchronously
@@ -256,6 +257,14 @@ class RotateRefreshToken
 
         if ($record === null || $abilities === null && $this->rejectable($record, $grace)) {
             return [$abilities, []];
+        }
+
+        // The signing key too: the mint below signs under the row lock, and an asymmetric key is a file
+        // read plus, with a passphrase, a decrypt — neither belongs inside `FOR UPDATE`. After the reject
+        // short-circuit, so an unreadable key cannot pre-empt reuse detection; a failure here consumes
+        // nothing, and the client's retry is an ordinary one. A rebound issuer owns its own key handling.
+        if ($this->issuer instanceof FirebaseTokenIssuer) {
+            $this->issuer->warm();
         }
 
         // `amr` after the consumer's claims, like `scope` and `pin`: it is the family's own record of
@@ -344,10 +353,17 @@ class RotateRefreshToken
         // the analyser rather than any runtime check.
         assert($outcome->access !== null && $outcome->refreshSecret !== null); // @pest-mutate-ignore: BooleanAndToBooleanOr,RemoveFunctionCall
 
-        // After commit, never under the row lock: see `LongestAccessTtl`.
-        LongestAccessTtl::record((int) $outcome->access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null); // @pest-mutate-ignore: RemoveIntegerCast
+        // After commit, never under the row lock: see `LongestAccessTtl`. ADVISORY, like the fork event
+        // above: the successor is committed and the parent consumed, so a cache error here answering 500
+        // sent the client's retry past the grace window, where it reads as a replay and revokes the
+        // family. Reported, and the rotation stands.
+        try {
+            LongestAccessTtl::record((int) $outcome->access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null); // @pest-mutate-ignore: RemoveIntegerCast
+        } catch (Throwable $e) {
+            report($e);
+        }
 
-        return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
+        return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in'], $outcome->expiresAt);
     }
 
     private function killFamily(string $familyId, string $reason): never

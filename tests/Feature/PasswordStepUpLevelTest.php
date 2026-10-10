@@ -319,3 +319,74 @@ it('takes a multi-factor token with no usable auth_time for no recent sign-in', 
 
     stepUpWithPassword($this, $token)->assertStatus(422);
 })->with(['absent' => ['absent'], 'a word' => ['yesterday'], 'a list' => [[1, 2]]]);
+
+/*
+ * Changing the password is the same act at a higher price: the new password REPLACES the authenticator,
+ * so §4.1.2.1 puts it at the account's maximum AAL too. Without the check, a password-only session on an
+ * account with a second factor took the account over knowing only the current password.
+ */
+
+function changePasswordFrom(object $test, string $access, string $current = 'password'): TestResponse
+{
+    return $test->withToken($access)->postJson('/auth/password', [
+        'current_password' => $current,
+        'password' => 'new-password-1',
+        'password_confirmation' => 'new-password-1',
+    ]);
+}
+
+it('refuses a password change from a session that is not a recent multi-factor one', function (string $session) {
+    $user = withTotp(User::factory()->create());
+    $access = match ($session) {
+        'pwd' => start()($user->id, ['amr' => ['pwd']])->accessToken,
+        'no amr' => $user->startSession()->accessToken,
+        'stale mfa' => rotate()($this->travel(-(86_400 + 60))->seconds(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]))->refreshToken)->accessToken,
+    };
+
+    changePasswordFrom($this, $access)->assertStatus(422)->assertJsonValidationErrors('current_password');
+
+    expect(Hash::check('password', $user->refresh()->password))->toBeTrue();
+})->with([
+    'a password-only session' => ['pwd'],
+    'a session without amr' => ['no amr'],
+    'a multi-factor sign-in older than mfa_max_age' => ['stale mfa'],
+]);
+
+it('refuses a password change in a password-only session on an account with a multi-factor passkey', function () {
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('phone', 'PUB+uv', 0));
+
+    changePasswordFrom($this, start()($user->id, ['amr' => ['pwd']])->accessToken)
+        ->assertStatus(422)->assertJsonValidationErrors('current_password');
+});
+
+it('changes the password from a recent multi-factor session', function () {
+    $user = withTotp(User::factory()->create());
+
+    changePasswordFrom($this, start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']])->accessToken)->assertOk();
+
+    expect(Hash::check('new-password-1', $user->refresh()->password))->toBeTrue();
+});
+
+it('changes the password of an account with nothing stronger than the password', function () {
+    changePasswordFrom($this, start()(User::factory()->create()->id, ['amr' => ['pwd']])->accessToken)->assertOk();
+});
+
+it('refuses a password change before checking the current password, so it spends no lockout attempt', function () {
+    config(['lukk.features.lockout' => true]);
+    $user = withTotp(User::factory()->create());
+
+    changePasswordFrom($this, start()($user->id, ['amr' => ['pwd']])->accessToken, 'wrong')
+        ->assertStatus(422)->assertJsonValidationErrors('current_password');
+
+    expect(Lockout::count())->toBe(0);
+});
+
+it('takes an auth_time that is not a number for no sign-in, even when the allowance never ends', function (mixed $authTime) {
+    // Cast, `yesterday` and `[1, 2]` would read as moments near the epoch — inside a "never" allowance.
+    config(['lukk.confirm.mfa_max_age' => PHP_INT_MAX]);
+    $user = withTotp(User::factory()->create());
+    $token = issuer()->accessToken(ctx($user->id, 'fam-nan'), ['amr' => ['pwd', 'otp', 'mfa'], 'auth_time' => $authTime], null)['token'];
+
+    stepUpWithPassword($this, $token)->assertStatus(422);
+})->with(['a word' => ['yesterday'], 'a list' => [[1, 2]]]);

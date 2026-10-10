@@ -11,6 +11,7 @@ use Lukk\Actions\RegenerateRecoveryCodes;
 use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Http\Concerns\PreventsCaching;
 use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
+use Lukk\Support\RecoveryCode;
 
 /**
  * Two-factor recovery codes: `index` reports how many remain (a safe count —
@@ -33,7 +34,8 @@ class RecoveryCodeController
 
         return $this->noStore(response()->json([
             'remaining' => $user->recoveryCodesRemaining(),
-            'total' => (int) (config('lukk.two_factor.recovery_codes') ?? 8),
+            // The size of the set generation actually issues, clamped the same way.
+            'total' => RecoveryCode::setSize((int) (config('lukk.two_factor.recovery_codes') ?? 8)),
         ]));
     }
 

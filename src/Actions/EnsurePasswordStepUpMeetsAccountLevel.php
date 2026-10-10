@@ -25,10 +25,14 @@ use Lukk\Support\VerifiedToken;
  * A token without `amr` is treated as single-factor: nothing in it says otherwise, and the claim goes
  * missing in ordinary ways (a refresh on a schema without the `amr` column, `startSession()`, a co-issuer).
  * Such a session confirms with a user-verifying passkey, or signs in again with its second factor.
+ *
+ * Changing the password runs the same check: the new password REPLACES an authenticator, which is the
+ * act §4.1.2.1 prices at the account's maximum AAL, and proving the current password is one factor.
+ * `$field` names the input the refusal is reported on (`current_password` there).
  */
 class EnsurePasswordStepUpMeetsAccountLevel
 {
-    public function __invoke(Request $request, Authenticatable $user): void
+    public function __invoke(Request $request, Authenticatable $user, string $field = 'password'): void
     {
         $token = VerifiedToken::current($request);
 
@@ -47,7 +51,7 @@ class EnsurePasswordStepUpMeetsAccountLevel
             return;
         }
 
-        throw ValidationException::withMessages(['password' => [
+        throw ValidationException::withMessages([$field => [
             __('This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.'),
         ]]);
     }

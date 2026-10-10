@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Actions\Concerns;
 
+use Lukk\Lukk;
 use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
 
@@ -33,7 +34,10 @@ trait ComputesDenylistTtl
         // `access_ttl` lowered since (see `LongestAccessTtl`).
         // The guard and store the CALLER was built for, never the ambient ones: an action resolved under one
         // guard and run under another (a queued job) read the wrong record and under-covered.
-        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + (int) ($config['leeway'] ?? 5);
+        // The leeway the VERIFIER allows (`Lukk::leeway()`, clamped 0..300), not the raw value: a negative
+        // one shortened the entry below the token's real life, so a revoked family's access token verified
+        // again for its last minutes.
+        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + Lukk::leeway($config);
 
         // The configured window is only exact while every access token's `exp` really is
         // `iat + lukk.access_ttl`. Two ordinary things break that, and both under-cover the revoke:
@@ -81,8 +85,8 @@ trait ComputesDenylistTtl
             return 0; // @pest-mutate-ignore: RemoveEarlyReturn,DecrementInteger,IncrementInteger
         }
 
-        // `exp` is an int on every verified token and `leeway` an int in config; the casts state the types.
+        // `exp` is an int on every verified token; the cast states the type. The leeway is the verifier's, as above.
         // No clamp at 0: a verified token has life left, and the caller takes the larger of this and the window.
-        return (int) $exp - now()->getTimestamp() + (int) ($config['leeway'] ?? 5); // @pest-mutate-ignore: RemoveIntegerCast
+        return (int) $exp - now()->getTimestamp() + Lukk::leeway($config); // @pest-mutate-ignore: RemoveIntegerCast
     }
 }

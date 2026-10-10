@@ -17,6 +17,7 @@ use Illuminate\Support\Carbon;
  * @property ?array<int, string> $transports
  * @property ?string $aaguid
  * @property ?Carbon $last_used_at
+ * @property ?Carbon $created_at
  */
 class Passkey extends Model
 {

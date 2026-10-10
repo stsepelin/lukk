@@ -107,7 +107,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
-            // `?? null` because a pre-0.8 schema has no such column — the attribute is simply absent.
+            // `?? null` because a pre-0.7 schema has no such column — the attribute is simply absent.
             amr: $row->amr ?? null,
             createdAt: $row->created_at?->getTimestamp(),
             // The family's original is the row `StartSession` inserted with no predecessor. Unlike
@@ -282,7 +282,19 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one still
         // resolves to `reuse` (fires the reuse event + family cascade) instead of a generic `unknown`
         // reject — they self-delete once they expire. Guard-agnostic: prunes every guard's expired rows.
-        return $this->query()->where('expires_at', '<', now())->delete();
+        //
+        // Nothing to prune where the publish-only migration never ran: the sweep is scheduled on every
+        // install, a verify-only resource server included, and there it threw every day. Asked on the
+        // model's own connection and table, as the passkey and lockout sweeps ask; not memoized, so a
+        // worker started before the migration sees it once it has run.
+        $query = $this->query();
+        $model = $query->getModel();
+
+        if (! Schema::connection($model->getConnectionName())->hasTable($model->getTable())) {
+            return 0;
+        }
+
+        return $query->where('expires_at', '<', now())->delete();
     }
 
     /**
@@ -307,7 +319,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     }
 
     /**
-     * Does this install's `refresh_tokens` table carry the 0.8 `amr` column?
+     * Does this install's `refresh_tokens` table carry the 0.7 `amr` column?
      *
      * Answered from a hydrated row wherever one has been read (free, and the rotation path always
      * reads one first), and only otherwise by asking the schema.

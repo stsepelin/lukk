@@ -7,6 +7,7 @@ use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
@@ -16,6 +17,8 @@ use Lukk\Actions\EnableTwoFactor;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TwoFactorProvider;
+use Lukk\Events\RecoveryCodesGenerated;
+use Lukk\Events\TwoFactorAuthenticationConfirmed;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
 use Lukk\Tests\Fixtures\UndecryptableTwoFactorUser;
@@ -747,6 +750,11 @@ it('reports the configured recovery-code total as a number, and eight when unset
 })->with([
     'a string from env' => ['10', 10],
     'unset' => [null, 8],
+    // Clamped as generation clamps it: a set of 500 configured is a set of 100 issued, and a "codes
+    // left" indicator reading 100 of 500 told the user four fifths of their codes were gone.
+    'above the cap' => [500, 100],
+    'zero' => [0, 1],
+    'negative' => [-3, 1],
 ]);
 
 it('assumes the password path for a challenge that does not say how the first factor was proved', function () {
@@ -833,4 +841,82 @@ it('answers 422, not 500, for a recovery code stored under a hasher the app has 
     $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
 
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])->assertStatus(422);
+});
+
+it('refuses to re-confirm two-factor that is already on', function () {
+    // It answered 204, overwrote `two_factor_confirmed_at` and fired `TwoFactorAuthenticationConfirmed`
+    // again — telling the user an authenticator had been added when nothing changed. Mirrors enrolment,
+    // which refuses an account that already has it.
+    Event::fake([TwoFactorAuthenticationConfirmed::class]);
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+    $confirmedAt = $user->refresh()->two_factor_confirmed_at->getTimestamp();
+    $token = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']])->accessToken;
+    $headers = confirmedHeaders($token);
+    $this->travel(60)->seconds();
+
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/confirm', ['code' => currentOtp($secret)])
+        ->assertStatus(409)->assertJsonValidationErrors(['code' => 'Two-factor authentication is already enabled.']);
+
+    expect($user->refresh()->two_factor_confirmed_at->getTimestamp())->toBe($confirmedAt);
+    Event::assertNotDispatched(TwoFactorAuthenticationConfirmed::class);
+});
+
+it('answers a pending secret it cannot decrypt with 422, not a 500', function () {
+    // APP_KEY rotated without `previous_keys`, or a corrupt row: `twoFactorSecret()` throws. The challenge
+    // path already reads that as "no secret"; confirmation did not, and 500'd.
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext', 'two_factor_confirmed_at' => null])->save();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/confirm', ['code' => '123456'])
+        ->assertStatus(422)->assertJsonValidationErrors('code');
+
+    expect($user->refresh()->two_factor_confirmed_at)->toBeNull();
+});
+
+it('refuses to regenerate recovery codes for an account with no two-factor at all', function () {
+    // Eight codes that nothing ever asks for, and a `RecoveryCodesGenerated` notice about an authenticator
+    // the account does not have. 409, as for enabling two-factor twice.
+    Event::fake([RecoveryCodesGenerated::class]);
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertStatus(409)->assertJsonMissingPath('recovery_codes')
+        ->assertJsonValidationErrors(['two_factor' => 'Two-factor authentication is not enabled.']);
+
+    expect($user->refresh()->two_factor_recovery_codes)->toBeNull();
+    Event::assertNotDispatched(RecoveryCodesGenerated::class);
+});
+
+it('regenerates recovery codes during enrolment, before the code is confirmed', function () {
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($token);
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor')->assertOk();
+
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/recovery-codes')
+        ->assertOk()->assertJsonCount(8, 'recovery_codes');
+});
+
+it('refuses to regenerate recovery codes for a pending secret it cannot decrypt, rather than 500ing', function () {
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext', 'two_factor_confirmed_at' => null])->save();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertStatus(409);
+});
+
+it('regenerates recovery codes for a confirmed account whose TOTP secret cannot be decrypted', function () {
+    // Confirmed is enough: the codes are that account's way back in when its authenticator is unusable.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext'])->save();
+    $token = mfaSession($user);
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertOk()->assertJsonCount(8, 'recovery_codes');
 });

@@ -10,13 +10,16 @@ use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Contracts\TokenIssuer;
 use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
+use Lukk\Support\Abilities;
 use Lukk\Support\RefreshTokenRecord;
+use Lukk\Support\TokenContext;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -521,4 +524,80 @@ it('does not count an expired row among the family\'s live tokens', function () 
     RefreshToken::query()->whereNull('rotated_at')->update(['expires_at' => now()->subMinute()]);
 
     expect(app(RefreshTokenRepository::class)->countLiveTokens(familyId()))->toBe(0);
+});
+
+it('reads and decrypts an asymmetric signing key before it takes the row lock', function () {
+    // The issuer is bound, not shared, so every rotation built a fresh KeyRing whose memo was empty: the
+    // first sign — inside the transaction — read the key file and, with a passphrase, decrypted it while
+    // holding `SELECT … FOR UPDATE`. Here the file vanishes once the lock is taken; a key already in hand
+    // signs anyway, and one read under the lock fails there.
+    $kp = rsaKeypair('s3cret');
+    $path = tempnam(sys_get_temp_dir(), 'lukk-key');
+    file_put_contents($path, $kp['private']);
+    config(['lukk.algorithm' => 'RS256', 'lukk.keys' => [
+        'active' => 'k1', 'private' => $path, 'passphrase' => 's3cret', 'public' => ['k1' => $kp['public']],
+    ]]);
+    $pair = start()(1);
+    app()->bind(RefreshTokenRepository::class, fn () => new class($path) extends DatabaseRefreshTokenRepository
+    {
+        public function __construct(private readonly string $path)
+        {
+            parent::__construct();
+        }
+
+        public function findByHashForUpdate(string $hash): ?RefreshTokenRecord
+        {
+            @unlink($this->path);
+
+            return parent::findByHashForUpdate($hash);
+        }
+    });
+
+    $next = rotate()($pair->refreshToken);
+
+    expect(verifier()->verify($next->accessToken)?->sub)->toBe('1');
+});
+
+it('does not read the signing key for a token it is going to refuse, so reuse detection still runs', function () {
+    // Warming the key ahead of the transaction must not move a key failure ahead of the reuse branch: a
+    // replay must still revoke its family when the key cannot be read.
+    $kp = rsaKeypair();
+    $path = tempnam(sys_get_temp_dir(), 'lukk-key');
+    file_put_contents($path, $kp['private']);
+    config(['lukk.algorithm' => 'RS256', 'lukk.keys' => [
+        'active' => 'k1', 'private' => $path, 'passphrase' => null, 'public' => ['k1' => $kp['public']],
+    ]]);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+    $this->travel(31)->seconds();
+    unlink($path);
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'reuse');
+});
+
+it('rotates through a rebound issuer that has no key to warm', function () {
+    // The warm-up is the default issuer's; a replacement owns its own key handling and need not offer one.
+    $pair = start()(1);
+    $inner = app(TokenIssuer::class);
+    app()->bind(TokenIssuer::class, fn () => new class($inner) implements TokenIssuer
+    {
+        public function __construct(private readonly TokenIssuer $inner) {}
+
+        public function accessToken(TokenContext $context, array $claims = [], ?Abilities $abilities = null): array
+        {
+            return $this->inner->accessToken($context, $claims, $abilities);
+        }
+
+        public function newRefreshSecret(): string
+        {
+            return $this->inner->newRefreshSecret();
+        }
+
+        public function hash(#[SensitiveParameter] string $secret): string
+        {
+            return $this->inner->hash($secret);
+        }
+    });
+
+    expect(rotate()($pair->refreshToken)->refreshToken)->toBeString();
 });

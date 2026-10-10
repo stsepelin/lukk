@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Http\Controllers;
 
+use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\StartSession;
 use Lukk\Actions\VerifyTwoFactorChallenge;
@@ -15,7 +16,8 @@ use Lukk\Support\AuthenticationMethods;
 
 /**
  * Completes a two-factor login: `store` exchanges the challenge token plus a TOTP
- * or recovery code for a full token pair (`amr: ["pwd","otp"]`).
+ * or recovery code for a full token pair (`amr: ["pwd","otp","mfa"]`, or the
+ * passkey's methods in place of `pwd` when a passkey sign-in was routed here).
  */
 class TwoFactorChallengedSessionController
 {
@@ -40,6 +42,18 @@ class TwoFactorChallengedSessionController
         // is durable now, so that would ride every rotation for the family's whole life. A challenge
         // that does not say — an older one, or a co-issuer's — is assumed to be the password path.
         $firstFactor = $this->challengeTokens->firstFactorOf('2fa', $challenge) ?? AuthenticationMethods::password();
+
+        // A challenge whose password has been replaced since — or that never said which one it stands in
+        // for — is refused BEFORE the second factor is checked. It used to be refused only after: by then
+        // the factor was spent (a single-use recovery code burned, a TOTP code marked used) and a session
+        // started only to be revoked. A challenge that does not decode is left to the verification below,
+        // which answers it the same way. The check after the session is written still runs: it is the one
+        // that closes the race with a change landing in between.
+        $subject = $this->challengeTokens->verify('2fa', $challenge);
+
+        if ($subject !== null && ! $this->passwordUnchanged->holds($subject, $checked)) {
+            throw ValidationException::withMessages(['challenge_token' => [__('The two-factor challenge is invalid or has expired.')]]);
+        }
 
         $user = ($this->verifyChallenge)(
             $challenge,

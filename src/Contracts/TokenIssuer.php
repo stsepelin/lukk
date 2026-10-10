@@ -28,5 +28,5 @@ interface TokenIssuer
 
     public function newRefreshSecret(): string;
 
-    public function hash(string $secret): string;
+    public function hash(#[\SensitiveParameter] string $secret): string;
 }

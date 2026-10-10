@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Lukk\Models\RefreshToken;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Tests\Fixtures\TenantBRefreshToken;
 use Lukk\Tests\Fixtures\User;
@@ -94,3 +95,61 @@ it('answers per connection, not once for the whole application', function () {
         1, (string) Str::uuid(), null, str_repeat('a', 64), time() + 600, null, '["pwd"]'
     ));
 });
+
+/** A refresh-token table on the default connection that predates the `amr` column. */
+class LegacyTableRefreshToken extends RefreshToken
+{
+    protected $table = 'xrefresh_tokens';
+}
+
+/** The current schema, on a connection whose name runs into the legacy table's in an unseparated key. */
+class TestingxConnectionRefreshToken extends RefreshToken
+{
+    protected $connection = 'testingx';
+
+    protected $table = 'refresh_tokens';
+}
+
+function refreshTokensTable(string $connection, string $table, bool $amr): void
+{
+    DB::connection($connection)->getSchemaBuilder()->create($table, function ($t) use ($amr) {
+        $t->ulid('id')->primary();
+        $t->unsignedBigInteger('user_id')->index();
+        $t->string('guard')->nullable();
+        $t->uuid('family_id')->index();
+        $t->char('token_hash', 64)->unique();
+        $t->ulid('previous_id')->nullable();
+        $t->text('scope')->nullable();
+        if ($amr) {
+            $t->text('amr')->nullable();
+        }
+        $t->timestamp('rotated_at')->nullable();
+        $t->timestamp('revoked_at')->nullable();
+        $t->timestamp('expires_at');
+        $t->timestamps();
+    });
+}
+
+it('answers per table as well as per connection, with keys that cannot run together', function (string $warm) {
+    // Two tables on one connection — a renamed model beside the original — must not share an answer
+    // either, and neither may a connection and table whose names merely concatenate to the same string
+    // (`testing` + `xrefresh_tokens`, `testingx` + `refresh_tokens`).
+    config(['database.connections.testingx' => array_merge(config('database.connections.testing'), ['database' => ':memory:'])]);
+    DB::purge('testingx');
+    refreshTokensTable('testing', 'xrefresh_tokens', amr: false);
+    refreshTokensTable('testingx', 'refresh_tokens', amr: true);
+
+    // Warm the memo on a schema that HAS the column.
+    Lukk\Lukk::useRefreshTokenModel($warm);
+    (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat('a', 64), time() + 600, null, '["pwd"]');
+
+    // Then write to the legacy table, which does not.
+    Lukk\Lukk::useRefreshTokenModel(LegacyTableRefreshToken::class);
+
+    expectNoThrow(fn () => (new DatabaseRefreshTokenRepository)->persist(
+        1, (string) Str::uuid(), null, str_repeat('b', 64), time() + 600, null, '["pwd"]'
+    ));
+})->with([
+    'another table on the same connection' => [RefreshToken::class],
+    'a connection whose name runs into the table' => [TestingxConnectionRefreshToken::class],
+]);

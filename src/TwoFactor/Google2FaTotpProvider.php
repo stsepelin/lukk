@@ -31,12 +31,12 @@ class Google2FaTotpProvider implements TwoFactorProvider
         return $this->engine->generateSecretKey(32); // 32 base32 chars = 160-bit seed
     }
 
-    public function otpauthUri(string $holder, string $secret): string
+    public function otpauthUri(string $holder, #[\SensitiveParameter] string $secret): string
     {
         return $this->engine->getQRCodeUrl($this->config['issuer'], $holder, $secret);
     }
 
-    public function verify(string $secret, string $code): bool
+    public function verify(#[\SensitiveParameter] string $secret, #[\SensitiveParameter] string $code): bool
     {
         try {
             $matches = $this->engine->verifyKey($secret, $code, $this->config['window']);

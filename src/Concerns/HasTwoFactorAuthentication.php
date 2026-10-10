@@ -48,7 +48,7 @@ trait HasTwoFactorAuthentication
         // Clamped, like the lockout's max_attempts. `range(1, 0)` counts DOWN and returns [1, 0],
         // so a configured 0 silently produced two codes, and a negative value produced |n|+1 — the
         // opposite of what was asked for either way.
-        $count = max(1, min(100, $count));
+        $count = RecoveryCode::setSize($count);
 
         $codes = array_map(fn () => RecoveryCode::generate(), range(1, $count));
 
@@ -74,7 +74,7 @@ trait HasTwoFactorAuthentication
     /**
      * Verify a recovery code and, on a match, consume it (single-use).
      */
-    public function useRecoveryCode(string $code): bool
+    public function useRecoveryCode(#[\SensitiveParameter] string $code): bool
     {
         // Find the match BEFORE taking the lock. One password-hash derivation per stored code — up to
         // a hundred — held the user's row under `lockForUpdate()` for seconds on every wrong guess,

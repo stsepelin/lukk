@@ -356,7 +356,7 @@ class AttemptLogin
      * Eloquent users only: another provider gives no conditional write to make, and lukk does not risk
      * the revert for a cost upgrade.
      */
-    private function rehash(Authenticatable $user, string $password): void
+    private function rehash(Authenticatable $user, #[\SensitiveParameter] string $password): void
     {
         // Only a successful check reaches here, so the password is a string; the cast states it.
         $stored = (string) $user->getAuthPassword(); // @pest-mutate-ignore: RemoveStringCast
@@ -400,9 +400,9 @@ class AttemptLogin
      *
      * It keys the persistent lockout (`LoginRateLimiter::lockoutSubject()` explains why the identifier
      * alone is not safe to key on there), and the stock path then checks the
-     * password against this same row rather than querying again. The lookup sits outside the
-     * Timebox; a hit and a miss are one indexed SELECT each, and the derivation the box exists to
-     * hide happens inside it.
+     * password against this same row rather than querying again. The lookup runs inside the
+     * Timebox, with the derivation the box exists to hide; a hit and a miss are one indexed SELECT
+     * each, so it adds nothing the box has to cover.
      *
      * A `Lukk::authenticateUsing` app may name a `lukk.username` that is no column. The lockout
      * documents that it must match, so for such an app the lookup runs only when the lockout is on;

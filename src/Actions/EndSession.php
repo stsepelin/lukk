@@ -54,7 +54,7 @@ class EndSession
      *                                   budget — nothing has been looked up, and the caller must
      *                                   retry rather than believe it logged out
      */
-    public function __invoke(string $bearer, array $refreshTokens, string $caller): void
+    public function __invoke(#[\SensitiveParameter] string $bearer, #[\SensitiveParameter] array $refreshTokens, string $caller): void
     {
         // The bearer first, and never metered: a logout named by a valid access token must not be
         // refused because someone else on the same address spent a budget.
@@ -109,7 +109,7 @@ class EndSession
      *
      * @return bool whether the bearer itself was revoked, and so cannot be presented again
      */
-    private function endBearerSession(string $bearer): bool
+    private function endBearerSession(#[\SensitiveParameter] string $bearer): bool
     {
         // The empty test is a short-circuit, not a decision: `verify('')` cannot return claims — an
         // empty string is not a three-segment JWS, and the verifier turns every throw into null — so
@@ -142,7 +142,8 @@ class EndSession
         }
 
         $remaining = (int) $claims->exp - now()->getTimestamp();
-        $this->denylist->revokeJti($jti, max(1, $remaining + (int) ($this->config['leeway'] ?? 5)));
+        // The verifier's leeway (clamped 0..300): a raw negative one let the token outlive its entry.
+        $this->denylist->revokeJti($jti, max(1, $remaining + Lukk::leeway($this->config)));
 
         return true;
     }

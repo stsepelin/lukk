@@ -32,8 +32,11 @@ class RequireConfirmation
     {
         // The casts and the '' default only state types: a real header's value is a string, and a
         // missing header fails verification whatever the default is.
-        $token = (string) $request->header((string) (config('lukk.confirm.header') ?? 'X-Lukk-Confirmation'), ''); // @pest-mutate-ignore: RemoveStringCast,EmptyStringToNotEmpty
-        $challenges = $this->challenges();
+        // The header is the authenticating guard's setting, read from the same config the verifier is
+        // built from (see `challenges()`): read globally, a guard's own `confirm.header` was ignored.
+        $config = $this->guardConfig();
+        $token = (string) $request->header((string) ($config['confirm']['header'] ?? 'X-Lukk-Confirmation'), ''); // @pest-mutate-ignore: RemoveStringCast,EmptyStringToNotEmpty
+        $challenges = new ChallengeToken($config, $this->denylist);
         $subject = $challenges->verify('reauth', $token);
 
         abort_if(
@@ -77,7 +80,8 @@ class RequireConfirmation
     }
 
     /**
-     * The challenge verifier for the guard that ACTUALLY authenticated this request.
+     * The config of the guard that ACTUALLY authenticated this request — the challenge verifier is built
+     * from it, and the confirmation header is read from it.
      *
      * Resolving `ChallengeToken` from the container would build it from `GuardContext`, which is
      * set by the `lukk.set-guard` middleware — and that only runs inside lukk's own route groups,
@@ -92,11 +96,13 @@ class RequireConfirmation
      * authenticated THIS request — whereas `GuardContext` is only reset by `lukk.set-guard`, and a
      * long-lived worker (Octane) would carry the previous request's value into a consumer route
      * that never runs it.
+     *
+     * @return array<string, mixed>
      */
-    private function challenges(): ChallengeToken
+    private function guardConfig(): array
     {
         // Documented to return a string, though it is config underneath; a null there resolves through
         // `GuardContext` to the default guard's config either way, so the cast only states the type.
-        return new ChallengeToken(Lukk::guardConfig((string) $this->auth->getDefaultDriver()), $this->denylist); // @pest-mutate-ignore: RemoveStringCast
+        return Lukk::guardConfig((string) $this->auth->getDefaultDriver()); // @pest-mutate-ignore: RemoveStringCast
     }
 }

@@ -2,8 +2,13 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
+use Illuminate\Cache\ArrayStore;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Exceptions;
 use Lukk\Actions\Concerns\ComputesDenylistTtl;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\StartSession;
@@ -272,4 +277,158 @@ it('records lifetimes in a store that cannot lock', function () {
     LongestAccessTtl::record(1800, 'api', 'lukk-lockless');
 
     expect(LongestAccessTtl::current('api', 'lukk-lockless'))->toBe(1800);
+});
+
+/** A denylist store that reads but refuses every write, as a full or failing cache does. */
+function unwritableDenylistStore(): void
+{
+    Cache::extend('unwritable', fn () => Cache::repository(new class extends ArrayStore
+    {
+        public function put($key, $value, $seconds): bool
+        {
+            throw new RuntimeException('cache is down');
+        }
+
+        public function forever($key, $value): bool
+        {
+            throw new RuntimeException('cache is down');
+        }
+    }));
+    config(['cache.stores.lukk-unwritable' => ['driver' => 'unwritable'], 'lukk.denylist_store' => 'lukk-unwritable']);
+}
+
+it('does not let a failure to record the lifetime cost a committed rotation its answer', function () {
+    // Recorded after the commit. A throw there left the successor committed and the parent consumed while
+    // the client got a 500 — and its retry past the grace window is indistinguishable from a replay, so
+    // reuse detection revoked the whole family. The record is advisory: reported, never fatal.
+    $pair = start()(1);
+    unwritableDenylistStore();
+    Exceptions::fake();
+
+    $next = rotate()($pair->refreshToken);
+
+    Exceptions::assertReported(fn (RuntimeException $e) => $e->getMessage() === 'cache is down');
+    expect(rotate()($next->refreshToken)->refreshToken)->toBeString();
+});
+
+it('does not let a failure to record the lifetime fail a sign-in whose session already exists', function () {
+    unwritableDenylistStore();
+    Exceptions::fake();
+
+    $pair = start()(1);
+
+    Exceptions::assertReported(fn (RuntimeException $e) => $e->getMessage() === 'cache is down');
+    expect($pair->refreshToken)->toBeString();
+});
+
+it('still records a new lifetime when the index lock cannot be had in time', function () {
+    // The lock only serialises the index write. Waiting it out and THROWING made a busy store fail the
+    // mint; the unlocked add can at worst lose a concurrent value, which the next mint of it restores.
+    Cache::extend('contended', fn () => Cache::repository(new class extends ArrayStore
+    {
+        public function lock($name, $seconds = 0, $owner = null)
+        {
+            return new class(parent::lock($name, $seconds, $owner)) implements Lock
+            {
+                public function __construct(private readonly Lock $inner) {}
+
+                public function get($callback = null)
+                {
+                    return false;
+                }
+
+                public function block($seconds, $callback = null)
+                {
+                    throw new LockTimeoutException;
+                }
+
+                public function release()
+                {
+                    return $this->inner->release();
+                }
+
+                public function owner()
+                {
+                    return $this->inner->owner();
+                }
+
+                public function forceRelease()
+                {
+                    $this->inner->forceRelease();
+                }
+            };
+        }
+    }));
+    config(['cache.stores.lukk-contended' => ['driver' => 'contended']]);
+    Exceptions::fake();
+
+    LongestAccessTtl::record(1800, 'api', 'lukk-contended');
+
+    expect(LongestAccessTtl::current('api', 'lukk-contended'))->toBe(1800);
+    Exceptions::assertNothingReported();
+});
+
+it('clamps the leeway it adds exactly as the verifier clamps the one it allows', function (mixed $leeway, int $ttl) {
+    // The verifier reads `Lukk::leeway()`, 0..300. A raw negative leeway here SHORTENED the entry below
+    // the token's real life, so a revoked family's access token verified again for its last minutes.
+    expect(denylistTtl(['access_ttl' => 300, 'leeway' => $leeway]))->toBe($ttl);
+})->with([
+    'negative' => [-120, 300],
+    'past the cap' => [86_400, 600],
+]);
+
+it('keeps a revoked family denylisted to the end of its access token under a negative leeway', function () {
+    config(['lukk.access_ttl' => 300, 'lukk.leeway' => -120]);
+    $pair = start()(1);
+    $familyId = verifier()->verify($pair->accessToken)->fid;
+
+    revokeSession()($familyId);
+    // The token is accepted until `exp` (the verifier floors the leeway at 0); 280 s in, it has 20 left.
+    $this->travel(280)->seconds();
+
+    expect(app(Denylist::class)->has('fid', $familyId))->toBeTrue();
+});
+
+it('keeps a co-issued token denylisted to its end at logout under a negative leeway', function () {
+    config(['lukk.leeway' => -120]);
+    $cfg = Lukk\Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'jti' => 'co-issued',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
+    $this->travel(580)->seconds();
+
+    expect(app(Denylist::class)->has('jti', 'co-issued'))->toBeTrue();
+});
+
+it('writes nothing for a lifetime that is not positive, not even to the index', function () {
+    LongestAccessTtl::record(0, 'api');
+    LongestAccessTtl::record(-5, 'api');
+
+    expect(Cache::get('lukk:access-ttls:api'))->toBeNull();
+});
+
+it('touches the index only when a lifetime is new to it', function () {
+    // Every mint records; rewriting the index each time would take the lock on every sign-in and refresh.
+    $store = new class extends LocklessStore
+    {
+        public int $indexWrites = 0;
+
+        public function forever($key, $value): bool
+        {
+            $this->indexWrites++;
+
+            return parent::forever($key, $value);
+        }
+    };
+    Cache::extend('counting', fn () => Cache::repository($store));
+    config(['cache.stores.lukk-counting' => ['driver' => 'counting']]);
+
+    LongestAccessTtl::record(900, 'api', 'lukk-counting');
+    LongestAccessTtl::record(900, 'api', 'lukk-counting');
+    LongestAccessTtl::record(300, 'api', 'lukk-counting');
+
+    expect($store->indexWrites)->toBe(2);
 });

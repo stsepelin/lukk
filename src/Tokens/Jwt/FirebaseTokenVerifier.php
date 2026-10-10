@@ -35,7 +35,7 @@ class FirebaseTokenVerifier implements TokenVerifier
     }
 
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, scope?: mixed, pin?: mixed, iss?: mixed, aud?: mixed})|null */
-    public function verify(string $jwt): ?object
+    public function verify(#[\SensitiveParameter] string $jwt): ?object
     {
         // Capped at five minutes: RFC 7519 §4.1.4 allows "some small leeway", and `LUKK_LEEWAY=86400`
         // stretched every exp by a day.
@@ -80,12 +80,19 @@ class FirebaseTokenVerifier implements TokenVerifier
         // blank entry finds the other side's already removed. Together they stop a blank
         // `LUKK_AUDIENCE=` on both sides from intersecting on '' and admitting a token minted for nobody.
         $accepted = array_filter((array) ($this->config['audience'] ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
+
+        // RFC 7519 §4.1.3 makes `aud` a StringOrURI or an ARRAY of them. A JSON object decodes to an object,
+        // and the `(array)` cast below would turn its property VALUES into a list that intersects.
+        if (is_object($claims->aud ?? null)) {
+            return null;
+        }
+
         $presented = array_filter((array) ($claims->aud ?? [])); // @pest-mutate-ignore: UnwrapArrayFilter
 
         // Scalars only, BEFORE `array_intersect`, which compares its elements as strings: a nested
         // array or object in `aud` raised "Array to string conversion" and so a 500, exactly as a
         // non-scalar `jti`/`fid` did below — and two lines earlier, so the guard down there never got
-        // the chance. RFC 7519 §4.1.3 makes `aud` a StringOrURI or an array of them; RFC 8725 §3.11
+        // the chance. RFC 7519 §4.1.3 makes `aud` a StringOrURI or an array of them; RFC 8725 §3.10
         // says check the type before using it.
         foreach ($presented as $audience) {
             if (! is_scalar($audience)) {
@@ -122,7 +129,7 @@ class FirebaseTokenVerifier implements TokenVerifier
         // conversion", which `HandleExceptions` promotes to an ErrorException — a 500 on every
         // request presenting it. Worse than the 500, the cast yields the literal `Array`, so the
         // lookup asks for `lukk:dl:fid:Array` and a REVOKED FAMILY stops matching. `ChallengeToken`
-        // already hardens exactly this on its own decode path (RFC 8725 §3.11); the asymmetry
+        // already hardens exactly this on its own decode path (RFC 8725 §3.10); the asymmetry
         // between the two was unintentional.
         //
         // Reachable only by a co-issuer holding the signing key — the topology this class exists to

@@ -21,7 +21,7 @@ class ChallengeTwoFactor
         private readonly TwoFactorProvider $totp,
     ) {}
 
-    public function __invoke(int|string $userId, ?string $code, ?string $recoveryCode): Authenticatable
+    public function __invoke(int|string $userId, #[\SensitiveParameter] ?string $code, #[\SensitiveParameter] ?string $recoveryCode): Authenticatable
     {
         $user = $this->users->retrieveById($userId);
 

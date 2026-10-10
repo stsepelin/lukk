@@ -45,7 +45,7 @@ class ChangePassword
         private readonly ?string $guard = null,
     ) {}
 
-    public function __invoke(Authenticatable $user, string $current, string $password, ?string $currentFamilyId): void
+    public function __invoke(Authenticatable $user, #[\SensitiveParameter] string $current, #[\SensitiveParameter] string $password, ?string $currentFamilyId): void
     {
         $subject = (string) $user->getAuthIdentifier();
 

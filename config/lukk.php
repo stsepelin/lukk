@@ -821,17 +821,20 @@ return [
 
         /*
         |--------------------------------------------------------------------------
-        | Forgot-password Timebox
+        | Forgot- and reset-password Timebox
         |--------------------------------------------------------------------------
         |
-        | How long every `forgot-password` request takes, in microseconds, whether
-        | or not the address has an account. A hit hashes the reset token and
-        | dispatches the notification; a miss does neither, so without this the
-        | response time says which addresses exist. Set it ABOVE the broker's own
-        | box (`auth.timebox_duration`, 200 ms by default) plus one bcrypt
-        | derivation at your cost plus the notification dispatch. Queue the
-        | notification: a synchronous SMTP transport can overrun any budget, and
-        | a Timebox only pads — it never shortens. Zero switches it off.
+        | How long every `forgot-password` request, and every FAILED
+        | `reset-password` request, takes, in microseconds, whether or not the
+        | address has an account. A forgot hit hashes the reset token and
+        | dispatches the notification; a reset against a known address with a
+        | pending token checks the presented token's hash. A miss does neither,
+        | so without this the response time says which addresses exist. Set it
+        | ABOVE the broker's own box (`auth.timebox_duration`, 200 ms by default)
+        | plus one bcrypt derivation at your cost plus the notification dispatch.
+        | Queue the notification: a synchronous SMTP transport can overrun any
+        | budget, and a Timebox only pads — it never shortens. A successful reset
+        | is not held. Zero switches it off.
         |
         */
 
@@ -994,11 +997,13 @@ return [
         | RETENTION: a counter row is created for every failed identifier, existing or
         | not — including addresses that name no account, which is deliberate (a
         | lock that only existed for real accounts would answer "does this account
-        | exist?"). The table therefore accumulates plaintext identifiers an attacker
-        | probed, third parties' addresses among them. "lukk:prune" drops spent rows
-        | (--lockout-days, default 30); if that retention doesn't suit your privacy
-        | posture, shorten it or swap LockoutRepository for one that stores an HMAC
-        | of the subject.
+        | exist?"). Subjects are not stored as plaintext addresses: an account is
+        | keyed by its id, anything else by a SHA-256 digest of the folded
+        | identifier — but a digest of a guessable address is still linkable to it,
+        | so the table accumulates pseudonymous records of identifiers an attacker
+        | probed, third parties' among them. "lukk:prune" drops spent rows (--lockout-days, default 30); if
+        | that retention doesn't suit your privacy posture, shorten it, or swap
+        | LockoutRepository for one that keys on an HMAC under a secret.
         |
         | The counter keys on the "username" field above. If you use
         | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set

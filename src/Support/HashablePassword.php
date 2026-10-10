@@ -27,7 +27,7 @@ class HashablePassword
      * verifies. Decided by the STORED hash, not the configured driver — an argon2id install can still
      * hold bcrypt rows. Call it after the check, so the derivation is paid either way.
      */
-    public static function verifiesOnlyInPart(Authenticatable $user, mixed $password): bool
+    public static function verifiesOnlyInPart(Authenticatable $user, #[\SensitiveParameter] mixed $password): bool
     {
         // By prefix, not `password_get_info()`: that names only `$2y$`, while `password_verify` accepts
         // and truncates `$2a$`/`$2b$`/`$2x$` too — the very hashes an import from Node, Python or Ruby

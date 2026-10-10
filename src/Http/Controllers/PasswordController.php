@@ -6,6 +6,7 @@ namespace Lukk\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
 use Lukk\Actions\ChangePassword;
+use Lukk\Actions\EnsurePasswordStepUpMeetsAccountLevel;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Http\Concerns\PreventsCaching;
 use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
@@ -25,9 +26,18 @@ class PasswordController
     use ResolvesAuthenticatedUser;
     use ResolvesCurrentFamily;
 
-    public function update(ChangePasswordRequest $request, ChangePassword $change, TokenVerifier $verifier): JsonResponse
-    {
+    public function update(
+        ChangePasswordRequest $request,
+        ChangePassword $change,
+        TokenVerifier $verifier,
+        EnsurePasswordStepUpMeetsAccountLevel $meetsAccountLevel,
+    ): JsonResponse {
         $validated = $request->validated();
+
+        // The new password replaces an authenticator, so the session must meet the account's maximum AAL
+        // (NIST SP 800-63B-4 §4.1.2.1) — the bar the password step-up applies. Before the current password
+        // is checked: a refusal spends no lockout attempt and says nothing about the password.
+        $meetsAccountLevel($request, $this->authenticated($request), 'current_password');
 
         $change(
             $this->authenticated($request),

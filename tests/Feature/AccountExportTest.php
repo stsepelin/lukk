@@ -226,3 +226,56 @@ it('exports the counters of a lockout store that is not the lockout table', func
 
     expect($spy->summarised)->not->toBe([]);
 });
+
+it('discloses every passkey field erasure destroys, in ISO-8601, and never the public key', function () {
+    // Art. 15 should disclose what Art. 17 destroys. The export carried the id, the name and a last-used
+    // time — as a unix integer, the one timestamp in the file that was not ISO-8601 — while erasure also
+    // destroyed when the passkey was added, the authenticator model (AAGUID) and its transports.
+    // Pinned by hand: `travel()->days($callback)` unfreezes the clock when the callback returns.
+    $now = now()->startOfSecond();
+    $user = User::factory()->create();
+    Carbon::setTestNow($now->copy()->subDays(3));
+    app(PasskeyRepository::class)->store(
+        $user->id, new NewPasskey('cred-1', 'COSE-PUBLIC-KEY', 7, ['usb', 'nfc'], 'adce0002-35bc-c60a-648b-0b25f1f05503'), 'YubiKey',
+    );
+    Carbon::setTestNow($now);
+    app(PasskeyRepository::class)->updateSignCount('cred-1', 8);
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['passkeys'])->toBe([[
+        'credential_id' => 'cred-1',
+        'name' => 'YubiKey',
+        'created_at' => now()->subDays(3)->toIso8601String(),
+        'last_used_at' => now()->toIso8601String(),
+        'aaguid' => 'adce0002-35bc-c60a-648b-0b25f1f05503',
+        'transports' => ['usb', 'nfc'],
+    ]])->and(json_encode($export))->not->toContain('COSE-PUBLIC-KEY');
+});
+
+it('exports only the allowlisted passkey fields a rebound store hands back, typed', function () {
+    // A rebound PasskeyRepository is a swap seam: whatever it returns must not pass through verbatim —
+    // a store that returns its whole row would publish the public key in an export.
+    Schema::drop('passkeys');
+    app()->instance(PasskeyRepository::class, new class extends InMemoryPasskeyRepository
+    {
+        public function summariesForUser(int|string $userId): array
+        {
+            return [[
+                // A numeric id, as a store keyed on integers may hand it back; transports with junk between.
+                'credential_id' => 42, 'name' => 'phone', 'last_used_at' => 1_700_000_000,
+                'public_key' => 'COSE-PUBLIC-KEY', 'sign_count' => 9,
+                'created_at' => 'not a time', 'aaguid' => ['x'], 'transports' => ['usb', 3, ['n'], 'nfc'],
+            ]];
+        }
+    });
+
+    expect(app(ExportAccount::class)(User::factory()->create())['passkeys'])->toBe([[
+        'credential_id' => '42',
+        'name' => 'phone',
+        'created_at' => null,
+        'last_used_at' => Carbon::createFromTimestamp(1_700_000_000)->toIso8601String(),
+        'aaguid' => null,
+        'transports' => ['usb', 'nfc'],
+    ]]);
+});

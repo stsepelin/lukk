@@ -225,3 +225,46 @@ it('reads the attempt count as an integer whatever the driver hands back', funct
     // Some PDO drivers return integer columns as strings, and the cap is compared with `>=`.
     expect((new Lockout)->forceFill(['attempts' => '3'])->attempts)->toBe(3);
 });
+
+it('announces a release only where a lock was held', function () {
+    // `AccountReleased` is the lock→released transition, the mirror of `AccountLocked`. It fired whenever
+    // a counter row was deleted — so every successful sign-in after a single typo told an audit log that
+    // a locked account had been unlocked, when no lock had ever existed.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(max: 3);
+    $repo->recordFailure('login', 'ada', null);
+
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertNotDispatched(AccountReleased::class);
+
+    lockSubject($repo);
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertDispatchedTimes(AccountReleased::class, 1);
+});
+
+it('does not announce clearing a lock that had already auto-released', function () {
+    // The lock ended when `release_after` elapsed, and that expiry announces nothing (it is read-only);
+    // deleting the spent row later is not a second release.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(after: 30);
+    lockSubject($repo);
+    $this->travel(31)->seconds();
+
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertNotDispatched(AccountReleased::class);
+});
+
+it('does not announce a held lock that another request released after this one read it', function () {
+    // Read as held, then gone before the DELETE: only the request that deleted the row announces it.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts();
+    lockSubject($repo);
+    DB::listen(function ($query) {
+        if (str_starts_with($query->sql, 'select * from "lukk_lockouts"')) {
+            DB::table('lukk_lockouts')->delete();
+        }
+    });
+
+    expect($repo->release('login', 'ada', null))->toBe(0);
+    Event::assertNotDispatched(AccountReleased::class);
+});

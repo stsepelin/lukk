@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Support;
 
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Repository;
 
 /**
@@ -42,9 +43,21 @@ class LongestAccessTtl
         $add = fn () => $cache->forever(self::indexKey($guard), array_values(array_unique([...self::index($cache, $guard), $ttl])));
         $lockable = $cache->getStore();
 
-        $lockable instanceof LockProvider
-            ? $lockable->lock(self::indexKey($guard).':lock', 5)->block(5, $add)
-            : $add();
+        if (! $lockable instanceof LockProvider) {
+            $add();
+
+            return;
+        }
+
+        // A lock that cannot be had in time falls back to the unlocked add rather than throwing: this
+        // runs after a session or rotation has committed, and a busy index must not turn that into an
+        // error. The worst the unlocked write can do is drop a value a concurrent mint added, and the
+        // next mint of that lifetime puts it back.
+        try {
+            $lockable->lock(self::indexKey($guard).':lock', 5)->block(5, $add);
+        } catch (LockTimeoutException) {
+            $add();
+        }
     }
 
     /** The longest lifetime minted on this guard of which a token may still be alive, or 0. */
@@ -52,9 +65,10 @@ class LongestAccessTtl
     {
         $cache = cache()->store($store);
 
+        // `>` or `>=` alike: on a tie both branches answer the same number.
         return array_reduce(
             self::index($cache, $guard),
-            fn (int $longest, int $ttl) => $ttl > $longest && $cache->has(self::key($guard, $ttl)) ? $ttl : $longest,
+            fn (int $longest, int $ttl) => $ttl > $longest && $cache->has(self::key($guard, $ttl)) ? $ttl : $longest, // @pest-mutate-ignore: GreaterToGreaterOrEqual
             0,
         );
     }

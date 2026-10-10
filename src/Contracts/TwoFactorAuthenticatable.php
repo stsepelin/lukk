@@ -29,5 +29,5 @@ interface TwoFactorAuthenticatable
     public function recoveryCodesRemaining(): int;
 
     /** Spend a recovery code. Single-use: a code that verifies is consumed. */
-    public function useRecoveryCode(string $code): bool;
+    public function useRecoveryCode(#[\SensitiveParameter] string $code): bool;
 }

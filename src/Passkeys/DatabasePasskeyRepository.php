@@ -84,11 +84,17 @@ class DatabasePasskeyRepository implements PasskeyRepository
         }
 
         return $this->scoped()->where('user_id', $userId)
-            ->get(['credential_id', 'name', 'last_used_at'])
+            // Allowlisted columns: never `public_key`. `sign_count` stays out too — it describes the
+            // authenticator's state, not the person, and the current value is what a cloned key needs
+            // to slip past the regression check.
+            ->get(['credential_id', 'name', 'last_used_at', 'created_at', 'aaguid', 'transports'])
             ->map(fn (Passkey $row) => [
                 'credential_id' => $row->credential_id,
                 'name' => $row->name,
                 'last_used_at' => $row->last_used_at?->getTimestamp(),
+                'created_at' => $row->created_at?->getTimestamp(),
+                'aaguid' => $row->aaguid,
+                'transports' => $row->transports,
             ])->all();
     }
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Events;
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Queue\SerializesModels;
 
 /**
  * The account's TOTP authenticator and recovery codes were removed, confirmed or still pending.
@@ -16,6 +17,11 @@ use Illuminate\Contracts\Auth\Authenticatable;
  */
 class TwoFactorAuthenticationDisabled
 {
+    // The user goes into a queued listener's job as an IDENTIFIER, re-read when it runs — not the model
+    // with its password hash, encrypted TOTP secret and recovery-code hashes, which would otherwise sit
+    // in `jobs.payload`, and in `failed_jobs` indefinitely. Laravel's `PasswordReset` does the same.
+    use SerializesModels;
+
     public function __construct(
         public readonly Authenticatable $user,
     ) {}

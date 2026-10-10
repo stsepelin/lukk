@@ -437,3 +437,12 @@ it('refuses a time claim no integer can hold, and keeps a fractional one RFC 751
     'exp at the end of year 9999' => ['exp', 253402300799, true],
     'exp a second later' => ['exp', 253402300800, false],
 ]);
+
+it('refuses an audience that is a JSON object, whose values would otherwise pass as a list', function () {
+    // RFC 7519 §4.1.3: `aud` is a StringOrURI or an ARRAY of them. The `(array)` cast turned an object
+    // into its property values, so `{"x": "<our audience>"}` intersected and was accepted.
+    $audience = ((array) Lukk::guardConfig()['audience'])[0];
+
+    expect(verifier()->verify(signedClaims(['aud' => (object) ['x' => $audience]])))->toBeNull()
+        ->and(verifier()->verify(signedClaims(['aud' => [$audience]])))->not->toBeNull();
+});

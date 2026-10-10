@@ -13,7 +13,9 @@ class PruneTokensCommand extends Command
 {
     protected $signature = 'lukk:prune {--lockout-days=30 : Age at which a spent lockout counter is dropped}';
 
-    protected $description = 'Delete expired and revoked refresh tokens, and spent lockout counters.';
+    // EXPIRED refresh tokens only: a revoked one is kept until it expires, so a replay of it still
+    // resolves to reuse (and revokes its family) rather than to an unknown token.
+    protected $description = 'Delete expired refresh tokens (revoked ones are kept until they expire, so a replay is still caught as reuse), spent lockout counters, and orphaned passkeys.';
 
     public function handle(RefreshTokenRepository $repository, LockoutRepository $lockouts, PasskeyRepository $passkeys): int
     {

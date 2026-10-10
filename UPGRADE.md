@@ -20,7 +20,7 @@ but the default is safe.
 
 ---
 
-## Upgrading to the next release from 0.6.x (unreleased)
+## Upgrading to 0.7.0 from 0.6.x (unreleased)
 
 ### `amr` now uses only RFC 8176 registered values
 
@@ -218,7 +218,9 @@ Logout accepts a valid access token **or** the refresh token the client holds. W
 - The `Authenticate` middleware no longer runs on this route, so anything attached through it (a
   middleware-priority hook, a guest redirect) does not apply.
 - If you **extend** `AuthenticatedSessionController`: its constructor takes `EndSession` instead of
-  `RevokeSession`, and `destroy()` no longer takes a `TokenVerifier`.
+  `RevokeSession`, gained a trailing `ConfirmPasswordUnchanged $passwordUnchanged`, and `destroy()` no
+  longer takes a `TokenVerifier`. `TwoFactorChallengedSessionController` likewise gained
+  `ChallengeToken $challengeTokens` and `ConfirmPasswordUnchanged $passwordUnchanged`.
 
 A test that used `/auth/logout` as a "does this token authenticate on this guard" probe should use an
 `auth:{guard}` route instead.
@@ -379,12 +381,157 @@ channel, when an authenticator is bound. lukk sends no mail, so listen and notif
 `TwoFactorAuthenticationConfirmed`, `TwoFactorAuthenticationDisabled`, `RecoveryCodesGenerated`,
 `PasskeyRegistered`, `PasskeyDeleted`, all in `Lukk\Events`.
 
-### Sign-in and forgot-password are padded to a wall-clock budget
+### Sign-in, forgot-password and reset-password are padded to a wall-clock budget
 
 **Low impact — check the budget.** A failed sign-in now takes at least `login_timebox_micros`
-(500 ms) and every forgot-password request at least `password_reset.timebox_micros` (one second).
-A successful sign-in returns early. Raise either budget if your slowest real path takes longer:
+(500 ms), and every forgot-password request and every failed reset-password request at least
+`password_reset.timebox_micros` (one second). A successful sign-in or reset returns early. Raise either budget if your slowest real path takes longer:
 the box pads, it never shortens. Queue the reset notification if one second is too slow.
+
+### A malformed `lukk.guards` is refused at boot
+
+**Medium impact — only if your config has one.** A numeric guard name (under `lukk.guards`, or as
+`lukk.guard`), a list of names (`['admin']` instead of `['admin' => [...]]`) or a truthy scalar now
+throws at boot with a message naming the problem, where before it failed later with a `TypeError`
+while the routes registered. `false` or `''` still mean "no extra guards".
+
+### Two-factor challenges carry a password fingerprint, and are refused without one
+
+**Medium impact — in the minutes around the deploy, and for co-issuers.** A challenge now carries
+`pwf`, a fingerprint of the password it stands in for (an HMAC of the stored hash under `app.key`), and
+is refused at redemption — before the code is checked, so nothing is spent — when that password has
+changed or the challenge has no fingerprint. Consequences:
+
+- A challenge minted by 0.6 and redeemed after the upgrade is refused; the user signs in again.
+- A challenge minted by another service sharing the key (a co-issuer) carries no `pwf` and is refused.
+- Deployments that redeem each other's challenges must share `APP_KEY` (and `app.previous_keys` across
+  a key rotation), since the fingerprint is keyed with it.
+
+### A per-guard `features.two_factor` that is null or `''` now challenges enrolled accounts
+
+**Medium impact — if an extra guard sets the flag from an unset `env()`.** Only a value somebody set
+(`false`, `0`, `'0'`) switches enforcement off. `null`, a blank `.env` line or a missing key used to
+skip the second factor on that guard; enrolled accounts are now challenged, and the challenge route
+mounts on the same rule. Set the flag explicitly if you meant "off".
+
+### `AccountLocked` can fire twice for one run
+
+**Low impact — if you notify on it.** A login failure counts against the identifier's fold and, when
+the identifier resolves, against the account too; when both reach the cap, `AccountLocked` fires for
+each. Only the account's (`id:` subject) names a user — the `idn:` one names no one, so a listener that
+mails the owner should act on `id:` subjects and ignore the other.
+
+### `AccountReleased` fires only for a held lock
+
+**Low impact — if an audit log listens to it.** Clearing a counter that never reached the cap (every
+successful sign-in after a typo did this) or a lock already past `release_after` no longer fires it.
+A rebound `LockoutRepository` should follow the same rule: fire for a held lock only.
+
+### A null `lukk.path` mounts the routes at `auth`
+
+**Low impact.** An explicit `null` (an unset `env()`) used to mount the routes at the root. It now
+means the default, `auth`. Set the path you want explicitly.
+
+### `passkeys.challenge_ttl` defaults to 300 seconds (was 120)
+
+**Low impact — no action unless you relied on two minutes.** The WebAuthn L3 §15.1 recommendation for
+a user-verifying ceremony; options now also advertise it as `timeout`. An explicit
+`LUKK_PASSKEY_CHALLENGE_TTL` is kept.
+
+### Body mode: `/refresh` no longer reads the refresh cookie
+
+**Low impact — no working client is affected.** Without `cookie_mode`, `POST /auth/refresh` reads only
+the `refresh_token` field. A cookie left over from cookie mode (or planted by a sibling subdomain) is
+ignored, so a body-mode client that somehow relied on it must send the field.
+
+### Access-token time claims must be timestamps
+
+**Low impact — co-issuers only.** `exp`, and `iat`/`nbf` when present, must be a number (or numeric
+string) between the epoch and the end of year 9999; a fraction is fine. A co-issuer's token outside
+that range now gets a `401`, where before it verified and later 500'd. A token whose `aud` is a JSON
+object is refused too (RFC 7519 §4.1.3).
+
+### Transactions and erasure run on the models' own connections
+
+**Low impact — only with a model on another connection.** Rotation, bulk revocation and
+recovery-code redemption open their transaction on the connection the model lives on (a
+`useRefreshTokenModel` subclass, a user model on a directory connection), and erasure opens one on
+each connection it writes to (the default, the password broker's and the token store's). Nothing to
+do; noted because the transactions now appear on those connections.
+
+### Password errors that were 500s are 422s
+
+**Low impact — clients that special-cased a 500.**
+
+- Confirm-password and change-password answer `422` on a stored hash the hasher refuses (another
+  algorithm, a `$2b$` import with `hashing.bcrypt.verify` on), as sign-in already did.
+- A recovery code stored under a hasher the app has since left is simply no match.
+- Registration, reset and change-password refuse a new password that is not a string (`422`).
+- A sign-in identifier or password that is not valid UTF-8 is refused with `422` before any lookup.
+
+### `auth_time` may be fractional; `confirm.mfa_max_age` may be a float
+
+**Low impact.** A fractional `auth_time` (OIDC Core §2 allows it) counts as the second it falls in;
+one before the epoch, or more than `leeway` in the future, counts as no recent sign-in.
+`confirm.mfa_max_age` is compared as a float, so a "never" past the integer range works, and a
+non-numeric value reads as 0 — the multi-factor allowance off — rather than comparing as a string.
+
+### A `lukk.username` naming no column is refused in debug mode
+
+**Low impact — a typo surfaces.** With `app.debug` on and the stock `EloquentUserProvider`, sign-in
+checks that the `lukk.username` column exists and throws naming the setting if it does not. On
+SQLite a typo used to read as a string literal that matched every row. Production skips the check.
+
+### Changing the password needs a recent multi-factor session on a two-factor account
+
+**Medium impact — if users change passwords from password-only sessions.** `POST /auth/password` on an
+account with an enforced TOTP or a user-verifying passkey now requires the session to be a recent
+multi-factor one (`amr` carries `mfa`, signed in within `confirm.mfa_max_age`), exactly as a password
+step-up does. Otherwise it answers `422` on `current_password` before checking anything; the client
+should have the user sign in again with their second factor (or confirm with a passkey) first.
+Accounts with nothing stronger than the password are unaffected.
+
+### Two-factor confirm and recovery-code regeneration answer `409` where they did nothing useful
+
+**Low impact.** `POST /auth/two-factor/confirm` on an account whose two-factor is already confirmed,
+and `POST /auth/two-factor/recovery-codes` on an account with no two-factor (confirmed or pending),
+now answer `409` instead of succeeding. Neither changed anything a user needed.
+
+### The account export: new passkey fields, and ISO-8601 throughout
+
+**Medium impact — if you parse `GET /auth/account/export`.** Each `passkeys[]` entry is now
+`credential_id`, `name`, `created_at`, `last_used_at`, `aaguid`, `transports`. `last_used_at` is an
+ISO-8601 string (it was a unix integer), like every other timestamp in the export; `created_at` is
+ISO-8601 too, and any of the time fields may be null. A rebound `PasskeyRepository` may return
+`created_at` (unix int), `aaguid` and `transports` from `summariesForUser()`; a store that does not
+exports null for them.
+
+### Per-guard `two_factor.challenge_ttl`, `confirm.ttl` and `confirm.header`
+
+**Low impact — if an extra guard overrides them.** They were read from the global block; an extra
+guard's own values now apply. In particular a guard that sets its own `confirm.header` must have its
+clients send the confirmation in that header.
+
+### The refresh cookie's lifetime follows the session's
+
+**Low impact — cookie mode.** The cookie's `Max-Age` is now what is left of the session's absolute
+expiry, not a fresh `refresh_ttl` on every rotation. `TokenPair` gained an optional
+`refreshExpiresAt`; code constructing one itself can leave it out (the cookie then gets the full
+`refresh_ttl`, as before).
+
+### A negative `leeway` counts as zero everywhere
+
+**Low impact.** The verifier already clamped `leeway` to 0–300; the denylist TTLs and the
+unclaimed-session window now use the same clamped value, so a negative or oversized setting behaves
+the same on every side.
+
+### Events serialize the user as an identifier
+
+**Low impact — queued listeners.** `PasswordChanged`, `TwoFactorAuthenticationConfirmed`,
+`TwoFactorAuthenticationDisabled`, `RecoveryCodesGenerated`, `PasskeyRegistered` and `PasskeyDeleted`
+use `SerializesModels`: a queued listener receives the user re-read from the database when the job
+runs. A user deleted before then makes the job fail with `ModelNotFoundException`, as for Laravel's
+own `PasswordReset`; a listener that needs the user as it was must copy what it needs when queued.
 
 ### Logout clears the refresh cookie per guard
 

@@ -33,7 +33,7 @@ class VerifyTwoFactorChallenge
         private readonly ?string $guard = null,
     ) {}
 
-    public function __invoke(string $challengeToken, ?string $code, ?string $recoveryCode): Authenticatable
+    public function __invoke(#[\SensitiveParameter] string $challengeToken, #[\SensitiveParameter] ?string $code, #[\SensitiveParameter] ?string $recoveryCode): Authenticatable
     {
         $userId = $this->challengeTokens->verify('2fa', $challengeToken);
 

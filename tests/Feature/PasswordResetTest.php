@@ -414,3 +414,77 @@ it('removes the passkeys of a store that is not the passkeys table when asked', 
 
     expect($store->rows)->toBe([]);
 });
+
+/** Spy on the Timebox around a reset: the budget each request was boxed in, and whether it returned early. */
+function resetBoxes(): object
+{
+    $spy = new class extends Timebox
+    {
+        /** @var list<array{int, bool}> */
+        public array $seen = [];
+
+        public function call(callable $callback, int $microseconds)
+        {
+            try {
+                return $callback($this);
+            } finally {
+                $this->seen[] = [$microseconds, $this->earlyReturn];
+            }
+        }
+    };
+    app()->instance(Timebox::class, $spy);
+
+    return $spy;
+}
+
+it('boxes a failed reset for a known and an unknown address in the same budget', function () {
+    // The broker answers both with the same status, but a known address with a pending token row pays a
+    // bcrypt `Hash::check` of the presented token and an unknown one does not. The broker's own 200 ms
+    // box is shorter than one derivation at cost 12, and a Timebox never claws back an overrun — so the
+    // response time said which addresses had an account. The reset is boxed like forgot-password.
+    config(['lukk.password_reset.timebox_micros' => 700_000]);
+    $user = User::factory()->create(['email' => 'known@y.com']);
+    Password::createToken($user);
+    $spy = resetBoxes();
+    $attempt = fn (string $email) => $this->postJson('/auth/reset-password', [
+        'token' => 'not-the-token', 'email' => $email,
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422);
+
+    $attempt('known@y.com');
+    $attempt('nobody@y.com');
+
+    expect($spy->seen)->toBe([[700_000, false], [700_000, false]]);
+});
+
+it('does not hold a successful reset for the rest of the box', function () {
+    // A success announces itself in its status code; padding it only taxes the user.
+    config(['lukk.password_reset.timebox_micros' => 300_000]);
+    $user = User::factory()->create(['email' => 'a@b.c']);
+    $spy = resetBoxes();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => Password::createToken($user), 'email' => 'a@b.c',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertOk();
+
+    expect($spy->seen)->toBe([[300_000, true]]);
+});
+
+it('falls back to the one-second budget for a reset when the key is missing, and reads a string', function (mixed $budget, int $expected) {
+    $lukk = (array) config('lukk');
+    if ($budget === null) {
+        unset($lukk['password_reset']['timebox_micros']);
+    } else {
+        $lukk['password_reset']['timebox_micros'] = $budget;
+    }
+    config()->set('lukk', $lukk);
+    $spy = resetBoxes();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => 'x', 'email' => 'nobody@y.com',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422);
+
+    expect($spy->seen)->toBe([[$expected, false]]);
+})->with(['missing' => [null, 1_000_000], 'a string' => ['250000', 250_000]]);

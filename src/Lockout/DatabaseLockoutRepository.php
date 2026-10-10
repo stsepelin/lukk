@@ -101,9 +101,17 @@ class DatabaseLockoutRepository implements LockoutRepository
             return 0;
         }
 
+        // `AccountReleased` is the lock→released transition, the mirror of `AccountLocked` — so it is
+        // announced only where a lock was HELD. Fired for any deleted counter, every successful sign-in
+        // after a typo told an audit log that a locked account had been unlocked. A lock already past
+        // `release_after` ended then, and that expiry announces nothing; deleting its row is no release.
+        $row = $this->find($purpose, $subject, $guard);
+        $held = $row?->locked_at !== null && ! $this->expired($row);
+
         $released = $this->query($purpose, $subject, $guard)->delete();
 
-        if ($released > 0) {
+        // Only the request that deleted the row announces it, so a concurrent release is not counted twice.
+        if ($released > 0 && $held) {
             event(new AccountReleased($purpose, $subject, $guard));
         }
 

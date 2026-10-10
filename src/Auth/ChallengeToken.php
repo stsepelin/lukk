@@ -96,7 +96,7 @@ class ChallengeToken
      * Verify WITHOUT consuming — the subject (user id) or null. Lets a wrong
      * second-factor attempt leave the challenge usable for a retry.
      */
-    public function verify(string $kind, string $token): ?string
+    public function verify(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -112,7 +112,7 @@ class ChallengeToken
      * presenting token's own family, so `null === null` passes (the co-issuer topology keeps working)
      * while an unbound challenge is refused to a bearer that does have a family.
      */
-    public function familyOf(string $kind, string $token): ?string
+    public function familyOf(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -130,7 +130,7 @@ class ChallengeToken
      *
      * @return list<string>|null
      */
-    public function firstFactorOf(string $kind, string $token): ?array
+    public function firstFactorOf(string $kind, #[\SensitiveParameter] string $token): ?array
     {
         $claims = $this->decode($kind, $token);
 
@@ -146,7 +146,7 @@ class ChallengeToken
         return StartSession::decodeAmr(StartSession::encodeAmr($claims->amr));
     }
 
-    public function passwordFingerprintOf(string $kind, string $token): ?string
+    public function passwordFingerprintOf(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -158,7 +158,7 @@ class ChallengeToken
      * Verify and consume (single-use). Returns the subject or null on any failure
      * — bad signature, wrong kind, wrong iss/aud, expired, or already spent.
      */
-    public function consume(string $kind, string $token): ?string
+    public function consume(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -191,7 +191,7 @@ class ChallengeToken
     }
 
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, pwf?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
-    private function decode(string $kind, string $token): ?object
+    private function decode(string $kind, #[\SensitiveParameter] string $token): ?object
     {
         JWT::$leeway = Lukk::leeway($this->config);
 
@@ -201,7 +201,7 @@ class ChallengeToken
             // Type-check before anything casts them. A non-scalar `sub` or `fid` — reachable from a
             // co-issuer, a topology this class exists to support — turned `(string)` into an
             // uncaught `Error` and a 500, contradicting this method's own "null on any failure"
-            // contract. RFC 8725 §3.11: validate claim types before use.
+            // contract. RFC 8725 §3.10: validate claim types before use.
             // Non-EMPTY, for parity with `FirebaseTokenVerifier`, which requires the same of `sub`.
             // `RequireConfirmation` compares the subject against `(string) $request->user()?->…`,
             // and a null user stringifies to `''` — so an empty `sub` would satisfy that gate on any
@@ -270,19 +270,23 @@ class ChallengeToken
         return $claims;
     }
 
-    private function headerType(string $token): ?string
+    private function headerType(#[\SensitiveParameter] string $token): ?string
     {
-        return $this->header($token)->typ ?? null;
+        // A string or nothing: a co-issuer's `"typ": 7` made this `?string` return a TypeError, and so a 500
+        // where every other malformed challenge is simply not one.
+        $typ = $this->header($token)->typ ?? null;
+
+        return is_string($typ) ? $typ : null;
     }
 
     /** Does the token declare critical headers? We understand none, so any is a refusal. */
-    private function headerCrit(string $token): bool
+    private function headerCrit(#[\SensitiveParameter] string $token): bool
     {
         return isset($this->header($token)->crit);
     }
 
     /** The JOSE header, read from the signature-covered segment. */
-    private function header(string $token): object
+    private function header(#[\SensitiveParameter] string $token): object
     {
         $decoded = json_decode(base64_decode(strtr(explode('.', $token)[0], '-_', '+/')) ?: '{}');
 

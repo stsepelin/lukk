@@ -6,6 +6,7 @@ namespace Lukk\Http\Concerns;
 
 use Illuminate\Http\JsonResponse;
 use Lukk\Auth\ChallengeToken;
+use Lukk\Lukk;
 
 /**
  * Shared by the step-up confirmation controllers: both the password and passkey
@@ -23,8 +24,9 @@ trait IssuesConfirmationToken
                 'reauth',
                 $userId,
                 // Not `config($key, 300)`: that default only applies to an ABSENT key, and a TTL
-                // of 0 makes the step-up token expired the moment it is minted.
-                (int) (config('lukk.confirm.ttl') ?? 300),
+                // of 0 makes the step-up token expired the moment it is minted. Per guard: the token is
+                // signed with this guard's key, and a guard's own `confirm.ttl` was otherwise ignored.
+                (int) (Lukk::guardConfig()['confirm']['ttl'] ?? 300),
                 $familyId,
             ),
         ]));

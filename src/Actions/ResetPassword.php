@@ -8,6 +8,7 @@ use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Timebox;
 use Illuminate\Validation\ValidationException;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
@@ -38,9 +39,39 @@ class ResetPassword
     /**
      * @param  array{email:string,token:string,password:string}  $credentials
      */
-    public function __invoke(array $credentials): void
+    public function __invoke(#[\SensitiveParameter] array $credentials): void
     {
-        $status = Password::broker($this->config['password_reset']['broker'] ?? null)->reset($credentials, function ($user, string $password): void {
+        // Boxed for the reason forgot-password is. Every failure answers the same 422, but a known address
+        // with a pending token row pays a bcrypt `Hash::check` of the presented token that an unknown one
+        // does not — and the broker's own box (`auth.timebox_duration`, 200 ms) is shorter than one
+        // derivation at cost 12, and a Timebox never claws back an overrun. So the response TIME said
+        // which addresses had an account. A success returns early: its status code already says it.
+        // Cast: a published config can carry an uncast `env()`, and `Timebox::call()` takes an int.
+        $status = app(Timebox::class)->call(function (Timebox $timebox) use ($credentials) {
+            $status = $this->reset($credentials);
+
+            if ($status === Password::PASSWORD_RESET) {
+                $timebox->returnEarly();
+            }
+
+            return $status;
+        }, (int) ($this->config['password_reset']['timebox_micros'] ?? 1_000_000));
+
+        if ($status !== Password::PASSWORD_RESET) {
+            // One generic message for every failure (bad/expired token, unknown user,
+            // throttled). The broker distinguishes INVALID_USER from INVALID_TOKEN, and
+            // surfacing that difference would let this endpoint enumerate accounts — the
+            // very thing forgot-password's generic 200 is careful to avoid.
+            throw ValidationException::withMessages(['email' => [__('passwords.token')]]);
+        }
+    }
+
+    /**
+     * @param  array{email:string,token:string,password:string}  $credentials
+     */
+    private function reset(#[\SensitiveParameter] array $credentials): mixed
+    {
+        return Password::broker($this->config['password_reset']['broker'] ?? null)->reset($credentials, function ($user, string $password): void {
             // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
             $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
 
@@ -72,14 +103,6 @@ class ResetPassword
                 $this->revokePasskeys($user);
             }
         });
-
-        if ($status !== Password::PASSWORD_RESET) {
-            // One generic message for every failure (bad/expired token, unknown user,
-            // throttled). The broker distinguishes INVALID_USER from INVALID_TOKEN, and
-            // surfacing that difference would let this endpoint enumerate accounts — the
-            // very thing forgot-password's generic 200 is careful to avoid.
-            throw ValidationException::withMessages(['email' => [__('passwords.token')]]);
-        }
     }
 
     /**

@@ -390,3 +390,15 @@ it('refuses a challenge expiring past any timestamp, whose remaining life no cac
         ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300800])))->toBeNull()
         ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300799])))->toBe('42');
 });
+
+it('refuses a challenge whose typ header is not a string, rather than throwing', function (mixed $typ) {
+    // `headerType()` returns `?string`, so a co-issuer's `"typ": 7` raised a TypeError — a 500 on the
+    // challenge route instead of the "invalid challenge" every other malformed token gets.
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '42', 'jti' => (string) Str::uuid(),
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 300,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => $typ]);
+
+    expect(challenge()->verify('2fa', $token))->toBeNull();
+})->with(['a number' => [7], 'a list' => [['2fa+challenge']], 'an object' => [['typ' => '2fa+challenge']]]);

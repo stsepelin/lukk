@@ -23,12 +23,14 @@ class RotationOutcome
          * @var array{token: string, jti: string, expires_in: int}|null
          */
         public readonly ?array $access = null,
+        /** The family's absolute expiry, carried to the issued pair (see `TokenPair::$refreshExpiresAt`). */
+        public readonly ?int $expiresAt = null,
     ) {}
 
     /** @param  array{token: string, jti: string, expires_in: int}  $access */
-    public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings, array $access): self
+    public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings, array $access, int $expiresAt): self
     {
-        return new self('issued', $familyId, $userId, $refreshSecret, $siblings, $access);
+        return new self('issued', $familyId, $userId, $refreshSecret, $siblings, $access, $expiresAt);
     }
 
     public static function unknown(): self

@@ -32,6 +32,10 @@ class LoginRequest extends FormRequest
                 // field anyway, so a missing identifier is refused as a credential, not as a 422.
                 'sometimes', // @pest-mutate-ignore: RemoveArrayItem
                 'string', 'max:255',
+                // Valid UTF-8 (a `u` pattern fails to match anything else). A form body can carry any
+                // bytes, and PostgreSQL refuses an invalid sequence in a query parameter (SQLSTATE
+                // 22021) — so an `\xFF` in the identifier was a 500 on the lookup instead of a 422.
+                'regex:/^/u',
             ],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1);
             // the length check is identifier-independent, so it leaks no account existence.
@@ -44,6 +48,9 @@ class LoginRequest extends FormRequest
                 // request per address, no statistics needed: a stronger oracle than the timing one
                 // the equalizer exists to close. `ChangePasswordRequest` carries this rule already.
                 'not_regex:/\0/',
+                // Valid UTF-8 too, as the identifier is: no store reads it, but one rule for both fields
+                // keeps the answer to a malformed body the same whichever field carries it.
+                'regex:/^/u',
             ],
         ];
     }

@@ -397,3 +397,38 @@ it('claims an admin session through the admin guard\'s own claim route', functio
     forget();
     $this->withToken($admin['access_token'])->postJson('/admin/auth/session/claim')->assertNoContent();
 });
+
+it('earns a guard\'s step-up confirmation for that guard\'s confirm.ttl', function () {
+    config(['lukk.confirm.ttl' => 300, 'lukk.guards.admin.confirm.ttl' => 120]);
+    $admin = Admin::factory()->create(['email' => 'ttl@corp.com']);
+
+    forget();
+    $confirmation = $this->withToken($admin->startSession()->accessToken)
+        ->postJson('/admin/auth/confirm-password', ['password' => 'password'])
+        ->assertOk()->json('confirmation_token');
+    $claims = json_decode((string) base64_decode(strtr(explode('.', $confirmation)[1], '-_', '+/')), true);
+
+    expect($claims['exp'] - $claims['iat'])->toBe(120);
+});
+
+it('reads the confirmation header a guard configures on that guard\'s routes', function () {
+    // The confirmation is verified under the guard that authenticated the request (its key, its
+    // audience); the header it travels in is that guard's setting too.
+    config(['lukk.guards.admin.confirm.header' => 'X-Admin-Confirmation']);
+    Route::middleware(['auth:admin', 'lukk.confirm'])
+        ->delete('/_test/admin-sensitive', fn () => response()->json(['ok' => true]));
+    $admin = Admin::factory()->create(['email' => 'root@corp.com']);
+
+    forget();
+    $access = $admin->startSession()->accessToken;
+    $confirmation = $this->withToken($access)
+        ->postJson('/admin/auth/confirm-password', ['password' => 'password'])
+        ->assertOk()->json('confirmation_token');
+
+    forget();
+    $this->withToken($access)->withHeaders(['X-Lukk-Confirmation' => $confirmation])
+        ->deleteJson('/_test/admin-sensitive')->assertStatus(423);
+    forget();
+    $this->withToken($access)->withHeaders(['X-Admin-Confirmation' => $confirmation])
+        ->deleteJson('/_test/admin-sensitive')->assertOk();
+});

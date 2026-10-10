@@ -95,7 +95,7 @@ class AuthenticatedSessionController
      * subject. A refresh-token-only logout authenticates nobody: that token proves possession of a
      * session, not an identity check the rest of the app should build on.
      */
-    private function authenticateBearer(Request $request, string $bearer): void
+    private function authenticateBearer(Request $request, #[\SensitiveParameter] string $bearer): void
     {
         $guard = Lukk::currentGuard();
 

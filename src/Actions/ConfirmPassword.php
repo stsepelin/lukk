@@ -30,7 +30,7 @@ class ConfirmPassword
         private readonly ?string $guard = null,
     ) {}
 
-    public function __invoke(Authenticatable $user, string $password): void
+    public function __invoke(Authenticatable $user, #[\SensitiveParameter] string $password): void
     {
         $subject = (string) $user->getAuthIdentifier();
 

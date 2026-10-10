@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace Lukk\Events;
 
-/** A lock was lifted — by `lukk:release`, the repository API, or an auto-release. */
+/**
+ * A HELD lock was lifted — by a successful authentication, a password reset, `lukk:release`, or the
+ * repository API. Not for clearing a counter that never reached the cap, and not for a `release_after`
+ * expiry, which is read-only and announces nothing.
+ */
 class AccountReleased
 {
     public function __construct(

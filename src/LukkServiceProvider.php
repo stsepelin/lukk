@@ -295,7 +295,8 @@ class LukkServiceProvider extends ServiceProvider
         // The optional repositories are injected UNCONDITIONALLY here, unlike everywhere else in this
         // provider where a null means "feature off". Erasure is about rows that EXIST, and a feature
         // switched off after use leaves its rows behind — orphaned personal data, while the user row
-        // itself is deleted. `DeleteAccount` guards on the table existing instead.
+        // itself is deleted. Each repository answers an unpublished table itself (the database stores
+        // check for theirs), so a rebound store is erased too.
         $this->app->bind(DeleteAccount::class, fn ($app) => new DeleteAccount(
             $app->make(RefreshTokenRepository::class),
             $app->make(RevokeAllSessions::class),

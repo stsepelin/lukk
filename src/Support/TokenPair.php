@@ -14,6 +14,13 @@ class TokenPair
         public readonly string $accessToken,
         public readonly string $refreshToken,
         public readonly int $expiresIn,
+        /**
+         * When the refresh token's FAMILY expires (a unix timestamp) — absolute, fixed at sign-in and
+         * inherited by every successor. Not serialised; it bounds the refresh cookie's lifetime, which
+         * a rotation must not stretch past the point the server would accept it. Null for a pair built
+         * by code that does not know it, which then gets the full `refresh_ttl`.
+         */
+        public readonly ?int $refreshExpiresAt = null,
     ) {}
 
     /**

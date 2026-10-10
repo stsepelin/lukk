@@ -14,6 +14,7 @@ use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use Lukk\Support\UnclaimedSessions;
 use RuntimeException;
+use Throwable;
 
 /**
  * Begin a session at login: a new family + first refresh token + access token.
@@ -127,9 +128,15 @@ class StartSession
         // The Action resolves the grant; the issuer only stamps it. A pinned grant wins outright —
         // that is what "the TOKEN owns its abilities" means — otherwise it is derived per mint.
         $access = $this->issuer->accessToken($context, $claims, $abilities);
-        LongestAccessTtl::record((int) $access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null);
+        // Advisory, and after the row exists: a cache error here answered 500 for a session that was
+        // already live — a refresh row nobody received. Reported; the sign-in stands.
+        try {
+            LongestAccessTtl::record((int) $access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null);
+        } catch (Throwable $e) {
+            report($e);
+        }
 
-        return new TokenPair($access['token'], $secret, $access['expires_in']);
+        return new TokenPair($access['token'], $secret, $access['expires_in'], $expiresAt);
     }
 
     /**

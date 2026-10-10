@@ -35,8 +35,9 @@ interface LockoutRepository
     /**
      * Clear the counter — a successful authentication, a password reset, or an explicit release.
      * Returns how many locks were actually cleared, so an operator tool can tell a hit from a miss.
-     * Implementations MUST fire `AccountReleased` when they clear something, so an audit log sees
-     * every unlock and not just the ones that came through the console.
+     * Implementations MUST fire `AccountReleased` when they clear a HELD lock, so an audit log sees
+     * every unlock and not just the ones that came through the console — and only then: clearing a
+     * counter that never locked is not an unlock.
      */
     public function release(string $purpose, string $subject, ?string $guard): int;
 

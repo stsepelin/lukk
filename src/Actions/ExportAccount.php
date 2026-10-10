@@ -100,6 +100,7 @@ class ExportAccount
             ], $this->tokens->allForUser($userId)),
             // The FACT of each passkey, never the COSE public key: the key identifies the
             // authenticator, not the person, and publishing it helps nobody read their own data.
+            // See `passkeySummary()` for what is carried, and why through an allowlist.
             //
             // Guarded on the TABLE, not on the feature flag — the same rule as `DeleteAccount`, and
             // for the mirror-image reason. A feature switched off after use leaves its rows behind,
@@ -107,12 +108,37 @@ class ExportAccount
             // still exist: under-disclosure under Art. 15 of exactly the rows erasure would destroy.
             // An install that never published the migration has no table, which the database store
             // answers itself, so a rebound store that is not that table is exported too.
-            'passkeys' => $this->passkeys->summariesForUser($userId),
+            'passkeys' => array_map(fn (array $passkey) => $this->passkeySummary($passkey), $this->passkeys->summariesForUser($userId)),
             'two_factor' => [
                 'enabled' => method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor(),
                 'confirmed_at' => $this->iso($user->two_factor_confirmed_at ?? null),
             ],
             'lockouts' => $this->lockoutsFor($user),
+        ];
+    }
+
+    /**
+     * One passkey as the export states it: every field erasure destroys that describes the person —
+     * when it was added and last used, what it is called, the authenticator model (AAGUID) and how it
+     * connects — so Art. 15 discloses what Art. 17 deletes. Times in ISO-8601, like the rest of the file.
+     *
+     * Mapped through this allowlist, and typed, rather than passed through: the summary comes from a
+     * swap seam, and a rebound store returning its whole row would otherwise publish the public key.
+     *
+     * @param  array<string, mixed>  $passkey
+     * @return array<string, mixed>
+     */
+    private function passkeySummary(array $passkey): array
+    {
+        $transports = $passkey['transports'] ?? null;
+
+        return [
+            'credential_id' => (string) $passkey['credential_id'],
+            'name' => is_string($passkey['name'] ?? null) ? $passkey['name'] : null,
+            'created_at' => is_int($passkey['created_at'] ?? null) ? $this->fromTimestamp($passkey['created_at']) : null,
+            'last_used_at' => is_int($passkey['last_used_at'] ?? null) ? $this->fromTimestamp($passkey['last_used_at']) : null,
+            'aaguid' => is_string($passkey['aaguid'] ?? null) ? $passkey['aaguid'] : null,
+            'transports' => is_array($transports) ? array_values(array_filter($transports, 'is_string')) : null,
         ];
     }
 

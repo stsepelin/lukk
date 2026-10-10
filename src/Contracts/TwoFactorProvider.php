@@ -14,8 +14,8 @@ interface TwoFactorProvider
     public function generateSecret(): string;
 
     /** The `otpauth://` provisioning URI for an authenticator app / QR. */
-    public function otpauthUri(string $holder, string $secret): string;
+    public function otpauthUri(string $holder, #[\SensitiveParameter] string $secret): string;
 
     /** Verify a submitted code; rejects reuse within the code's window (replay). */
-    public function verify(string $secret, string $code): bool;
+    public function verify(#[\SensitiveParameter] string $secret, #[\SensitiveParameter] string $code): bool;
 }

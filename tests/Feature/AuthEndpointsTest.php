@@ -396,3 +396,84 @@ it('refuses a malformed or oversized stored amr instead of stamping it into a to
     'oversized' => [json_encode(array_fill(0, 400, 'webauthn'))],
     'not json at all' => ['pwd'],
 ]);
+
+/** A token another issuer sharing this guard's key minted: valid, but naming no lukk session. */
+function sessionlessToken(string $guard, int|string $userId): string
+{
+    $cfg = Lukk::guardConfig($guard);
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $userId,
+        'jti' => 'co-issued-'.$guard, 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('names the revoke-all route where this guard actually mounts it', function (string $guard, array $config, string $uri, string $named) {
+    // The message hardcoded `DELETE /auth/sessions`, which does not exist on a custom `lukk.path` or on an
+    // extra guard's mount — pointing the caller at a 404 as the way out.
+    config($config);
+    require dirname(__DIR__, 2).'/src/routes/api.php';
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken($guard, $user->id))->deleteJson($uri)
+        ->assertStatus(409)
+        ->assertJsonPath('message', "This token names no session, so there are no other sessions to revoke. Use DELETE /{$named} to revoke every session, including this one.");
+})->with([
+    'a custom path' => ['api', ['lukk.path' => 'account/auth'], '/account/auth/sessions/others', 'account/auth/sessions'],
+    // Laravel stores a group prefix trimmed, so slashes around the configured path never double up.
+    'a path written with slashes' => ['api', ['lukk.path' => '/account/auth/'], '/account/auth/sessions/others', 'account/auth/sessions'],
+    'a mount at the root' => ['api', ['lukk.path' => ''], '/sessions/others', 'sessions'],
+    'an extra guard' => ['admin', [
+        'auth.guards.admin' => ['driver' => 'lukk-jwt', 'provider' => 'users'],
+        'lukk.guards.admin' => ['audience' => ['https://admin.test'], 'path' => 'staff'],
+    ], '/staff/sessions/others', 'staff/sessions'],
+]);
+
+it('does not point at a revoke-all route this guard has switched off', function () {
+    config(['lukk.features.logout_all' => false, 'lukk.path' => 'account/auth']);
+    require dirname(__DIR__, 2).'/src/routes/api.php';
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken('api', $user->id))->deleteJson('/account/auth/sessions/others')
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'This token names no session, so there are no other sessions to revoke.');
+});
+
+it('lets the refresh cookie live only as long as the session it carries', function () {
+    // A family's expiry is ABSOLUTE — fixed at sign-in, inherited by every successor — but each rotation
+    // re-set the cookie for the full `refresh_ttl`. Late in the family's life the browser then held a
+    // cookie for weeks past the point the server would accept it.
+    $this->freezeSecond();
+    config(['lukk.cookie_mode' => true, 'lukk.refresh_ttl' => 30 * 86_400]);
+    $pair = User::factory()->create()->startSession();
+    $this->travel(30 * 86_400 - 3_600)->seconds();
+
+    $cookie = collect($this->withCredentials()->withUnencryptedCookie('__Host-refresh', $pair->refreshToken)
+        ->postJson('/auth/refresh')->assertOk()->headers->getCookies())
+        ->firstOrFail(fn ($c) => $c->getName() === '__Host-refresh');
+
+    expect($cookie->getExpiresTime())->toBe(now()->getTimestamp() + 3_600);
+});
+
+it('sets a new session\'s refresh cookie for the whole refresh_ttl', function () {
+    $this->freezeSecond();
+    config(['lukk.cookie_mode' => true, 'lukk.refresh_ttl' => 7_200]);
+    $user = User::factory()->create();
+
+    $cookie = collect($this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->headers->getCookies())
+        ->firstOrFail(fn ($c) => $c->getName() === '__Host-refresh');
+
+    expect($cookie->getExpiresTime())->toBe(now()->getTimestamp() + 7_200);
+});
+
+it('names the revoke-all route when a cached config predates logout_all, which then defaults on', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['features']['logout_all']);
+    config()->set('lukk', $lukk);
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken('api', $user->id))->deleteJson('/auth/sessions/others')
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'This token names no session, so there are no other sessions to revoke. Use DELETE /auth/sessions to revoke every session, including this one.');
+});

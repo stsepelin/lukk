@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Models\Passkey;
@@ -47,14 +48,16 @@ it('lists a user’s credential ids and records', function () {
         ->and(passkeys()->summariesForUser(7)[0])->toHaveKeys(['credential_id', 'name', 'last_used_at']);
 });
 
-it('summarises each credential by id, name and last use', function () {
+it('summarises each credential by id, name, use, creation, model and transports — never the key', function () {
+    // The account export reads these, and must disclose what erasure destroys (Art. 15 / Art. 17).
     $this->freezeSecond();
-    passkeys()->store(7, new NewPasskey('a', 'k', 0), 'My iPhone');
+    passkeys()->store(7, new NewPasskey('a', 'k', 0, ['internal'], 'aaguid-1'), 'My iPhone');
     passkeys()->updateSignCount('a', 1);
 
-    expect(passkeys()->summariesForUser(7))->toBe([
-        ['credential_id' => 'a', 'name' => 'My iPhone', 'last_used_at' => now()->getTimestamp()],
-    ]);
+    expect(passkeys()->summariesForUser(7))->toBe([[
+        'credential_id' => 'a', 'name' => 'My iPhone', 'last_used_at' => now()->getTimestamp(),
+        'created_at' => now()->getTimestamp(), 'aaguid' => 'aaguid-1', 'transports' => ['internal'],
+    ]]);
 });
 
 it('updates the sign count', function () {
@@ -180,4 +183,10 @@ it('reads and erases nothing, without throwing, where the passkeys table was nev
 
     expect($repo->summariesForUser(1))->toBe([])
         ->and($repo->deleteForUser(1))->toBe(0);
+});
+
+it('summarises a row written without timestamps, as an import or a raw insert leaves it', function () {
+    DB::table('passkeys')->insert(['credential_id' => 'raw', 'user_id' => 7, 'public_key' => 'x', 'sign_count' => 0]);
+
+    expect(passkeys()->summariesForUser(7)[0])->toMatchArray(['credential_id' => 'raw', 'created_at' => null, 'last_used_at' => null]);
 });
