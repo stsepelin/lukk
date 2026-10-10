@@ -31,6 +31,10 @@ use Lukk\TwoFactor\Google2FaTotpProvider;
  */
 
 it('keeps a presented refresh token out of the trace of a rotation that throws', function () {
+    // Traces carry arguments only where zend.exception_ignore_args is off — the PHP default, and what
+    // official images run without a php.ini. CI's php.ini turns it on, which would leave nothing to
+    // check, so the test asks for arguments itself.
+    $ignoreArgs = ini_set('zend.exception_ignore_args', '0');
     $pair = start()(1);
     Schema::drop('refresh_tokens');
 
@@ -44,6 +48,8 @@ it('keeps a presented refresh token out of the trace of a rotation that throws',
         expect($frame['args'][0])->toBeInstanceOf(SensitiveParameterValue::class)
             // Nor does it surface in any other frame: the hash is computed inside, so the raw value has no other path.
             ->and(collect($e->getTrace())->flatMap(fn (array $f) => $f['args'] ?? [])->contains($pair->refreshToken))->toBeFalse();
+    } finally {
+        ini_set('zend.exception_ignore_args', (string) $ignoreArgs);
     }
 });
 
