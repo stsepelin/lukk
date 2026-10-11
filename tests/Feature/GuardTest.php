@@ -17,6 +17,9 @@ use Lukk\Auth\JwtGuard;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\DecodingUserProvider;
+use Lukk\Tests\Fixtures\EncodedIdUser;
+use Lukk\Tests\Fixtures\PrefixedUlidUser;
 use Lukk\Tests\Fixtures\PublicIdUser;
 use Lukk\Tests\Fixtures\StringKeyUser;
 use Lukk\Tests\Fixtures\UlidUser;
@@ -235,6 +238,30 @@ it('refuses a subject a HasUuids or HasUlids key cannot hold, with no query', fu
     'HasUlids' => [UlidUser::class, 'ulid_users', 'admin'],
     'HasUlids, a UUID' => [UlidUser::class, 'ulid_users', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'],
 ]);
+
+it('asks the model what a valid unique id is, so its own id format resolves', function () {
+    // `HasUlids` with an overridden `newUniqueId()`/`isValidUniqueId()` (`usr_<ulid>`): `Str::isUlid`
+    // refused every real user. The model's own check is also what Laravel's route-model binding accepts.
+    Schema::create('prefixed_ulid_users', fn (Blueprint $t) => $t->string('id')->primary());
+    $user = PrefixedUlidUser::query()->create();
+    $users = new EloquentUserProvider(app('hash'), PrefixedUlidUser::class);
+
+    expect($user->getKey())->toStartWith('usr_')
+        ->and(guardFor($users, $user->getKey())?->getKey())->toBe($user->getKey())
+        ->and(lookupsDuring(fn () => guardFor($users, (string) Str::ulid())))->toBe([null, 0]);
+});
+
+it('leaves an EloquentUserProvider subclass unchecked: it may decode its own identifiers', function () {
+    // The model presents its integer key as `u_5` and the provider subclass reads it back. Judged by the
+    // model's key, every token lukk minted for it was refused.
+    $user = EncodedIdUser::query()->create(['email' => 'encoded@y.com']);
+    $users = new DecodingUserProvider(app('hash'), EncodedIdUser::class);
+
+    expect($user->getAuthIdentifier())->toBe('u_'.$user->id)
+        ->and(guardFor($users, $user->getAuthIdentifier())?->getKey())->toBe($user->id)
+        ->and(lookupsDuring(fn () => guardFor($users, 'admin'))[1])->toBe(0)
+        ->and(lookupsDuring(fn () => guardFor($users, 'u_admin'))[1])->toBe(1);
+});
 
 it('leaves to the provider every shape it cannot be certain of', function (Closure $model, mixed $sub) {
     // Nothing is refused here: one lookup runs, and whatever the column makes of the subject is the

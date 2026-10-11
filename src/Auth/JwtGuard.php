@@ -7,15 +7,14 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
-use Illuminate\Database\Eloquent\Concerns\HasUlids;
-use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Concerns\HasUniqueStringIds;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\VerifiedToken;
+use ReflectionMethod;
 
 /**
  * Request guard (Sanctum Guard analog): pulls the bearer token, verifies it
@@ -93,18 +92,21 @@ class JwtGuard
      *
      * - A NUL is refused for every provider: pdo_pgsql passes a bound string as a C string, so
      *   `alice\0x` looked up `alice`.
-     * - For an Eloquent provider whose auth identifier IS the model's key, the model itself says what the
-     *   key holds: Laravel's `HasUuids`/`HasUlids` generate a UUID/ULID for it, and an incrementing `int` key
-     *   (the stock `id()`) holds an integer — refused unless canonical and within signed 64 bits, the widest
-     *   integer key there is. On PostgreSQL anything else was SQLSTATE 22P02/22003 on the lookup: a 500
-     *   where a subject naming no user is a 401.
+     * - For a stock `EloquentUserProvider` (exactly that class) whose auth identifier IS the model's key,
+     *   the model itself says what the key holds. With Laravel's `HasUuids`/`HasUlids`/`HasVersion4Uuids`
+     *   generating it, a value the model's own `isValidUniqueId()` refuses (for `HasUuids`: anything but the
+     *   canonical hyphenated form) — the check Laravel's route-model binding applies, honouring an override.
+     *   An incrementing `int` key (the stock `id()`) holds an integer: refused unless canonical and within
+     *   signed 64 bits, the widest integer key there is. On PostgreSQL such a subject was SQLSTATE
+     *   22P02/22003 on the lookup: a 500 where a subject naming no user is a 401.
      * - Everything else goes to the provider unchecked: a Snowflake key that does not increment, an
      *   identifier that is another column, a 32-bit `increments('id')` handed a value past int4, a domain
-     *   type, a custom provider. A subject its column cannot hold is then the provider's error, reported as
-     *   a 500 — the token was signed by a trusted issuer, so it is that issuer's bug and should surface.
-     *   Reading the schema to decide it cost every request a catalog query on the write connection, and
-     *   interpreting the failed lookup afterwards hid real outages (a broken scope, a mistyped `$with`
-     *   relation) as 401s for everybody.
+     *   type, an `EloquentUserProvider` subclass (it may decode its own identifiers) or a custom provider. A
+     *   subject its column cannot hold is then the provider's error, reported as a 500 — the token was
+     *   signed by a trusted issuer, so it is that issuer's bug and should surface. Reading the schema to
+     *   decide it cost every request a catalog query on the write connection, and interpreting the failed
+     *   lookup afterwards hid real outages (a broken scope, a mistyped `$with` relation) as 401s for
+     *   everybody.
      */
     private function couldName(mixed $sub): bool
     {
@@ -112,7 +114,13 @@ class JwtGuard
             return false;
         }
 
-        if (! $this->users instanceof EloquentUserProvider) {
+        // Exactly the stock provider: a subclass may decode its own identifiers before the lookup. (The
+        // `instanceof` only tells PHPStan what the class comparison below already guarantees.)
+        if (! $this->users instanceof EloquentUserProvider) { // @pest-mutate-ignore: InstanceOfToTrue
+            return true; // @pest-mutate-ignore: RemoveEarlyReturn
+        }
+
+        if ($this->users::class !== EloquentUserProvider::class) {
             return true;
         }
 
@@ -122,16 +130,11 @@ class JwtGuard
             return true;
         }
 
-        $traits = class_uses_recursive($model);
-        // The traits generate only the columns `uniqueIds()` names — the key, unless the model says otherwise.
-        $generated = in_array($model->getKeyName(), $model->uniqueIds(), true);
-
-        if ($generated && in_array(HasUuids::class, $traits, true)) {
-            return Str::isUuid($sub);
-        }
-
-        if ($generated && in_array(HasUlids::class, $traits, true)) {
-            return Str::isUlid($sub);
+        // The traits generate only the columns `uniqueIds()` names — the key, unless the model says otherwise —
+        // and the model's own (protected) `isValidUniqueId()` is what a valid one is, override included.
+        if (in_array(HasUniqueStringIds::class, class_uses_recursive($model), true)
+            && in_array($model->getKeyName(), $model->uniqueIds(), true)) {
+            return (new ReflectionMethod($model, 'isValidUniqueId'))->invoke($model, $sub) === true;
         }
 
         if (! $model->getIncrementing() || ! in_array($model->getKeyType(), ['int', 'integer'], true)) {

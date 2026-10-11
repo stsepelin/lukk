@@ -13,14 +13,18 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Lukk\Auth\JwtGuard;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Tests\ConcurrencyTestCase;
+use Lukk\Tests\Fixtures\DecodingUserProvider;
 use Lukk\Tests\Fixtures\EagerThingsUser;
+use Lukk\Tests\Fixtures\EncodedIdUser;
 use Lukk\Tests\Fixtures\IntKeyUser;
 use Lukk\Tests\Fixtures\LegacyIdUser;
+use Lukk\Tests\Fixtures\PrefixedUlidUser;
 use Lukk\Tests\Fixtures\ReferringUser;
 use Lukk\Tests\Fixtures\SnowflakeUser;
 use Lukk\Tests\Fixtures\UlidUser;
@@ -218,6 +222,20 @@ it('leaves every other shape to the provider: a real user resolves, a subject th
     expect((string) $resolved?->getAuthIdentifier())->toBe($real)->and($queries)->toBe(1);
     expectSurfaces(fn () => coIssuerGuard($class, $bad));
 })->with('shapes left to the provider');
+
+it('resolves a model\'s own unique-id format, and an EloquentUserProvider subclass\'s own identifiers', function () {
+    // The model's `isValidUniqueId()` decides (`usr_<ulid>`), and a provider subclass decoding `u_<id>`
+    // is not judged by the model's key at all.
+    Schema::create('prefixed_ulid_users', fn (Blueprint $t) => $t->string('id')->primary());
+    $prefixed = PrefixedUlidUser::query()->create();
+    $encoded = EncodedIdUser::query()->create(['email' => 'encoded@example.com', 'password' => 'x']);
+
+    [$resolved, $one] = guardWithQueries(PrefixedUlidUser::class, $prefixed->getKey());
+
+    expect($resolved?->getKey())->toBe($prefixed->getKey())->and($one)->toBe(1)
+        ->and(guardWithQueries(PrefixedUlidUser::class, (string) Str::ulid()))->toBe([null, 0])
+        ->and(coIssuerGuard(new DecodingUserProvider(app('hash'), EncodedIdUser::class), $encoded->getAuthIdentifier())?->getKey())->toBe($encoded->getKey());
+});
 
 /*
  * However the model names its table, the guard reads nothing from the schema: the stock key is refused
