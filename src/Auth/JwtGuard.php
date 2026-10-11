@@ -7,7 +7,6 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -132,8 +131,8 @@ class JwtGuard
      */
     private function retrieve(mixed $sub): ?Authenticatable
     {
-        $model = $this->users instanceof EloquentUserProvider ? $this->users->createModel() : null;
-        $connection = $model?->getConnection();
+        $eloquent = $this->users instanceof EloquentUserProvider ? $this->users : null;
+        $connection = $eloquent?->createModel()->getConnection();
         $savepoint = $connection !== null && $connection->transactionLevel() > 0 ? $connection : null;
         $savepointed = $savepoint?->getName();
 
@@ -142,7 +141,7 @@ class JwtGuard
                 ? $savepoint->transaction(fn () => $this->users->retrieveById($sub))
                 : $this->users->retrieveById($sub);
         } catch (QueryException $e) {
-            if (! self::refusedTheSubject($e, $sub, $model, $savepointed)) {
+            if (! self::refusedTheSubject($e, $sub, $eloquent, $savepointed)) {
                 throw $e;
             }
 
@@ -153,18 +152,22 @@ class JwtGuard
     /**
      * Whether a failed lookup is the subject's own type refusal, and swallowing it leaves nothing aborted.
      *
-     * - SQLSTATE 22P02 or 22003.
-     * - The failing statement is the lookup OF THE SUBJECT: the subject is among its bindings and, for an
-     *   Eloquent provider, it reads the model's table. A refusal in another statement — an eager-loaded
-     *   `$with` relation with a mistyped key, a global scope, a `retrieved` listener — fails for every user,
-     *   and read as "no user" it was a 401 for everybody: an outage nobody was told about. Rethrown.
+     * - SQLSTATE 22P02 or 22003, with the subject among the statement's bindings.
+     * - For an Eloquent provider, the failing statement IS the stock lookup of the subject — the very SQL
+     *   `EloquentUserProvider::retrieveById()` issues (see `lookupSql()`), compared exactly. That holds for
+     *   a schema-qualified, aliased or prefixed table, global scopes, soft deletes and a `withQuery()`
+     *   callback, and structurally excludes every other statement: an eager-loaded `$with` relation (a
+     *   `where … in`), a scope's own query, a `retrieved` listener. Those fail for EVERY user, and read as
+     *   "no user" they were a 401 for everybody — an outage nobody was told about. A provider subclass
+     *   whose `retrieveById()` issues different SQL gets its refusal rethrown (the 500, reported) rather
+     *   than guessed at. A provider that is not Eloquent has no lookup to rebuild: the bindings decide.
      * - It ran in the lookup's own savepoint, or on a connection holding no transaction. A provider that
      *   looks up on a connection other than its model's is not covered by that savepoint; inside that
      *   connection's own transaction its refusal is rethrown, never left behind a 401.
      *
      * (A method of its own also because PHPStan sees only the savepointed branch as able to throw.)
      */
-    private static function refusedTheSubject(QueryException $e, mixed $sub, ?Model $model, ?string $savepointed): bool
+    private static function refusedTheSubject(QueryException $e, mixed $sub, ?EloquentUserProvider $users, ?string $savepointed): bool
     {
         if (! in_array($e->errorInfo[0] ?? null, ['22P02', '22003'], true) || ! is_scalar($sub)) {
             return false;
@@ -172,22 +175,26 @@ class JwtGuard
 
         $bound = array_map(fn (mixed $value): ?string => is_scalar($value) ? (string) $value : null, $e->getBindings());
 
-        if (! in_array((string) $sub, $bound, true)) {
+        if (! in_array((string) $sub, $bound, true) || ($users !== null && $e->getSql() !== self::lookupSql($users, $sub))) {
             return false;
-        }
-
-        // `from users`, `from "users"`, `from `users``, `from "public"."users"` — the table itself (with the
-        // connection's prefix), not one whose name merely contains it.
-        if ($model !== null) {
-            $table = preg_quote($model->getConnection()->getTablePrefix().$model->getTable(), '/');
-
-            if (preg_match('/\bfrom\s+(?:[`"\[]?\w+[`"\]]?\.)?[`"\[]?'.$table.'[`"\]]?(?=\s|$)/i', $e->getSql()) !== 1) {
-                return false;
-            }
         }
 
         return $e->getConnectionName() === $savepointed
             || DB::connection($e->getConnectionName())->transactionLevel() === 0;
+    }
+
+    /**
+     * The SQL the stock `EloquentUserProvider::retrieveById()` runs for this subject: `newModelQuery()`
+     * (the model's query with its global scopes, then the provider's `withQuery()` callback), the
+     * identifier constraint, and the `limit 1` that `first()` adds. Built, never run.
+     */
+    private static function lookupSql(EloquentUserProvider $users, mixed $sub): string
+    {
+        $model = $users->createModel();
+        $query = $model->newQuery();
+        with($query, $users->getQueryCallback());
+
+        return $query->where($model->getAuthIdentifierName(), $sub)->limit(1)->toSql();
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool

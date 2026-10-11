@@ -6,6 +6,7 @@ use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
@@ -243,25 +244,89 @@ it('answers a lookup the column type refuses as no user, not a 500', function (s
     expect(guardFor(failingEloquentProvider($sqlState)))->toBeNull();
 })->with(['22P02', '22003']);
 
-it('answers no user only for the lookup of the subject itself', function (string $sql, array $bindings, bool $swallowed) {
+it('answers no user only for the lookup of the subject itself', function (Closure $sql, array $bindings, bool $swallowed) {
     // A 22P02 from another statement inside `retrieveById()` — an eager-loaded `$with` relation with a
     // mistyped key, a global scope, a `retrieved` listener — is a broken application, not a subject naming
-    // no user. Read as one it was a 401 for every user and an outage nobody was told about.
-    $guard = fn () => guardFor(failingEloquentProvider('22P02', fn () => refusedLookup('22P02', sql: $sql, bindings: $bindings)));
+    // no user. Read as one it was a 401 for every user and an outage nobody was told about. Only the very
+    // SQL the stock provider issues for the subject counts.
+    $guard = fn () => guardFor(failingEloquentProvider('22P02', fn () => refusedLookup('22P02', sql: $sql(), bindings: $bindings)));
 
     $swallowed ? expect($guard())->toBeNull() : expect($guard)->toThrow(QueryException::class);
 })->with([
-    'the lookup (PostgreSQL quoting)' => ['select * from "users" where "id" = ? limit 1', ['42'], true],
-    'the lookup (MySQL quoting)' => ['select * from `users` where `id` = ? limit 1', ['42'], true],
-    'the lookup, schema-qualified' => ['select * from "public"."users" where "id" = ? limit 1', ['42'], true],
-    'the lookup, the subject bound as an int' => ['select * from "users" where "id" = ? limit 1', [42], true],
-    'the lookup, lower-case FROM, no quotes' => ['SELECT * FROM users WHERE id = ?', ['42'], true],
-    'an eager-loaded relation binding the subject' => ['select * from "things" where "things"."owner_uuid" in (?)', ['42'], false],
-    'a table whose name merely contains the users table' => ['select * from "users_meta" where "user_id" = ?', ['42'], false],
-    'a table whose name merely ends in it' => ['select * from "old_users" where "id" = ?', ['42'], false],
-    'the users table, another value bound' => ['select * from "users" where "tenant" = ?', ['acme'], false],
-    'the users table, a binding that is no scalar' => ['select * from "users" where "id" = ?', [['42']], false],
+    'the stock lookup' => [fn () => User::query()->where('id', '42')->limit(1)->toSql(), ['42'], true],
+    'the stock lookup, the subject bound as an int' => [fn () => User::query()->where('id', 42)->limit(1)->toSql(), [42], true],
+    'the same table, an eager load binding the subject' => [fn () => User::query()->whereIn('id', ['42'])->toSql(), ['42'], false],
+    'the lookup without the limit first() adds' => [fn () => User::query()->where('id', '42')->toSql(), ['42'], false],
+    'the stock lookup, another value bound' => [fn () => User::query()->where('id', 'acme')->limit(1)->toSql(), ['acme'], false],
+    'the stock lookup, a binding that is no scalar' => [fn () => User::query()->where('id', '42')->limit(1)->toSql(), [['42']], false],
 ]);
+
+/**
+ * PostgreSQL's refusal, on sqlite: every select on the connection fails as 22P02, with the SQL and bindings
+ * the stock provider REALLY built — so the guard is tested against what Laravel generates, not a guess.
+ */
+function refuseSelectsOn(string $connection): void
+{
+    DB::connection($connection)->beforeExecuting(function (string $sql, array $bindings) use ($connection) {
+        if (str_starts_with($sql, 'select')) {
+            throw refusedLookup('22P02', $connection, $sql, $bindings);
+        }
+    });
+}
+
+it('recognises the stock lookup whatever shape the model and provider give it', function (Closure $provider, string $connection) {
+    $users = $provider();
+    refuseSelectsOn($connection);
+
+    expect(guardFor($users))->toBeNull();
+})->with([
+    'a schema-qualified table' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends User
+    {
+        protected $table = 'main.users';
+    })), 'testing'],
+    'an aliased table' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends User
+    {
+        protected $table = 'users as u';
+    })), 'testing'],
+    'a schema-qualified table on a prefixed connection' => [function () {
+        config(['database.connections.prefixed' => ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => 'app_']]);
+
+        return new EloquentUserProvider(app('hash'), get_class(new class extends User
+        {
+            protected $connection = 'prefixed';
+
+            protected $table = 'main.users';
+        }));
+    }, 'prefixed'],
+    'soft deletes' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends User
+    {
+        use SoftDeletes;
+    })), 'testing'],
+    'a global scope' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends User
+    {
+        protected static function booted(): void
+        {
+            self::addGlobalScope('active', fn ($query) => $query->where('active', true));
+        }
+    })), 'testing'],
+    'a withQuery() callback' => [fn () => (new EloquentUserProvider(app('hash'), User::class))
+        ->withQuery(fn ($query) => $query->where('tenant', 'acme')), 'testing'],
+]);
+
+it('reports a refusal from a provider whose lookup is not the stock one', function () {
+    // There is no rebuilding a subclass's own query, so its refusal is rethrown — the 500, reported —
+    // rather than guessed at.
+    refuseSelectsOn('testing');
+    $provider = new class(app('hash'), User::class) extends EloquentUserProvider
+    {
+        public function retrieveById($identifier)
+        {
+            return $this->createModel()->newQuery()->where('email', $identifier)->first();
+        }
+    };
+
+    expect(fn () => guardFor($provider))->toThrow(QueryException::class);
+});
 
 it('recognises the lookup on a prefixed connection, and of a subject that is not a string', function () {
     // The table a lookup reads carries the connection's prefix; and `sub` from a rebound verifier may be

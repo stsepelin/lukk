@@ -127,9 +127,12 @@ the rotation's row lock: read a value already in memory, never query.
   (SQLSTATE 22P02 or 22003): `"admin"` against any integer column, or a number past a 32-bit
   `increments('id')`. A co-issuer minting non-numeric subjects hit this. For the stock auto-incrementing
   `id` a non-integer `sub` is refused without a query; for any other shape the refused lookup is read as
-  no user — only when the failing statement is that lookup (the subject is bound and, for Eloquent, it
-  reads the model's table); a refusal in an eager-loaded relation, a global scope or a listener is still
-  reported as the error it is. Inside a transaction of yours, an Eloquent provider's lookup runs in a
+  no user — only when the failing statement is that lookup: for an Eloquent provider, exactly the SQL the
+  stock `EloquentUserProvider::retrieveById()` builds (global scopes, soft deletes and a `withQuery()`
+  callback included), with the subject bound; for any other provider, a statement binding the subject. A
+  refusal in an eager-loaded relation, a scope's own query or a listener is still reported as the error it
+  is — and so is one from a provider subclass whose `retrieveById()` issues different SQL: it keeps the 500
+  until it refuses such a subject itself. Inside a transaction of yours, an Eloquent provider's lookup runs in a
   savepoint so the refusal does not abort your transaction; a refusal on any connection that savepoint did
   not cover, inside that connection's transaction, is rethrown, as before.
 - `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;

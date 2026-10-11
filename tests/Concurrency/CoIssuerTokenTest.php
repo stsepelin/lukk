@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
@@ -204,6 +205,76 @@ it('does not swallow a refusal on a connection its savepoint did not cover', fun
             DB::connection('other')->rollBack();
         }
     });
+});
+
+/*
+ * Whether a refusal is the lookup OF THE SUBJECT is decided by the statement itself: the SQL the stock
+ * provider issues for it, however the model names its table. A text match on `from "<table>"` missed a
+ * schema-qualified table (Laravel prefixes the LAST part: `"public"."app_snow_s"`) and an aliased one —
+ * back to a 500 — and took a same-table eager load binding the subject for the lookup — a 401 for everyone.
+ */
+dataset('table spellings', [
+    'schema-qualified' => ['public.snow_s', null, 'snow_s'],
+    'aliased' => ['snow_s as s', null, 'snow_s'],
+    'schema-qualified on a prefixed connection' => ['public.snow_s', 'app_', 'app_snow_s'],
+]);
+
+it('answers a refused subject as no user however the model spells its table', function (string $table, ?string $prefix, string $physical) {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('MySQL coerces the value instead of refusing it, and has no `public` schema');
+    }
+
+    config(['database.connections.spelled' => [...ConcurrencyTestCase::config('pgsql'), 'prefix' => (string) $prefix]]);
+    Schema::create($physical, fn (Blueprint $t) => $t->unsignedBigInteger('id')->primary());
+    $model = new class extends SnowflakeUser
+    {
+        protected $connection = 'spelled';
+
+        public static string $spelling = '';
+
+        public function getTable(): string
+        {
+            return self::$spelling;
+        }
+    };
+    $model::$spelling = $table;
+
+    expect(coIssuerGuard($model::class, 'admin'))->toBeNull();
+})->with('table spellings');
+
+it('reports a same-table eager load that binds the subject, rather than reading it as no user', function () {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('MySQL coerces the value instead of refusing it, so no statement fails');
+    }
+
+    // Identifier `handle`; `$with` loads the user's reports through `manager_id` (bigint) keyed on that
+    // handle. The eager load binds the subject and reads the users' own table — and fails for every user.
+    Schema::create('managed_users', function (Blueprint $t) {
+        $t->id();
+        $t->string('handle')->unique();
+        $t->unsignedBigInteger('manager_id')->nullable();
+    });
+    $model = new class extends SnowflakeUser
+    {
+        protected $table = 'managed_users';
+
+        public $incrementing = true;
+
+        protected $with = ['reports'];
+
+        public function getAuthIdentifierName(): string
+        {
+            return 'handle';
+        }
+
+        public function reports(): HasMany
+        {
+            return $this->hasMany(self::class, 'manager_id', 'handle');
+        }
+    };
+    DB::table('managed_users')->insert(['handle' => 'alice']);
+
+    expect(fn () => coIssuerGuard($model::class, 'alice'))->toThrow(QueryException::class, '22P02');
 });
 
 function coIssuerFamilyIsLive(string $refreshToken): bool
