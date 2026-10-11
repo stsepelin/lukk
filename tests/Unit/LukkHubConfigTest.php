@@ -160,3 +160,39 @@ it('accepts any plain column name', function (string $field) {
 
     expect(Lukk::usernameField())->toBe($field);
 })->with(['phone', 'user_name', '_login', 'Email2']);
+
+it('refuses a default guard whose token users come from another provider than its passwords', function () {
+    // Sign-in checks the password against `lukk.user_provider`; the lukk-jwt guard resolves the token's
+    // `sub` through `auth.guards.<default>.provider`. Pointed at different providers, a `users` password
+    // minted a token that resolved to the `admins` row with the same id — an account takeover by
+    // configuration, with no error anywhere.
+    config([
+        'auth.providers.admins' => ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\Admin::class],
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'admins'],
+        'lukk.user_provider' => 'users',
+    ]);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'lukk guard [api] resolves its users from the [admins] provider (auth.guards.api.provider), but signs '
+            .'them in against [users] (lukk.user_provider) — a password checked in one would mint a token '
+            .'for the account with the same id in the other. Point both at the same provider.');
+});
+
+it('boots a default guard whose provider matches, or names none, or is not lukk\'s', function (?array $guard) {
+    config(['auth.guards.api' => $guard, 'lukk.user_provider' => 'users']);
+
+    expectNoThrow(fn () => Lukk::assertGuardsIsolated());
+})->with([
+    'the same provider' => [['driver' => 'lukk-jwt', 'provider' => 'users']],
+    'no provider' => [['driver' => 'lukk-jwt']],
+    'an empty provider' => [['driver' => 'lukk-jwt', 'provider' => '']],
+    'another driver' => [['driver' => 'session', 'provider' => 'admins']],
+    'no such guard (a verify-elsewhere service)' => [null],
+]);
+
+it('refuses a default guard naming no provider when Laravel\'s default provider is another', function () {
+    config(['auth.guards.api' => ['driver' => 'lukk-jwt'], 'auth.defaults.provider' => 'admins', 'lukk.user_provider' => 'users']);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'resolves its users from the [admins] provider (auth.defaults.provider)');
+});

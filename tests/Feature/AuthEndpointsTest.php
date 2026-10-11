@@ -229,7 +229,7 @@ it('answers a 401 with the WWW-Authenticate challenge RFC 6750 §3 requires', fu
     }
 });
 
-it('refuses, rather than answering 204, for a bearer that names no session', function () {
+it('refuses, rather than answering 204, for a bearer that names no session', function (array $fid) {
     // A co-issuer sharing the secret mints tokens with no `fid`. "Others" is defined relative to THIS
     // session, and with no family to except, the call has no way to spare the caller's own: forcing the
     // guard true hands `RevokeOtherSessions` an empty family id, and every session goes — including the
@@ -243,7 +243,7 @@ it('refuses, rather than answering 204, for a bearer that names no session', fun
     $cfg = Lukk::guardConfig();
     $token = JWT::encode([
         'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
-        'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+        'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600, ...$fid,
     ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
 
     $this->withToken($token)->deleteJson('/auth/sessions/others')->assertStatus(409);
@@ -251,7 +251,13 @@ it('refuses, rather than answering 204, for a bearer that names no session', fun
     expect(RefreshToken::whereNull('revoked_at')->count())->toBe(1);
     app('auth')->forgetGuards();
     $this->postJson('/auth/refresh', ['refresh_token' => $kept->refreshToken])->assertOk();
-});
+})->with([
+    'no fid' => [[]],
+    // An EMPTY `fid` names no session either. `isset()` took it for one, and `family_id != ''` then
+    // spared nothing: "log out my other devices" logged out every device, the caller's included in
+    // spirit — the exact outcome the 409 exists to prevent. Read as absent, as `VerifiedToken` reads it.
+    'an empty fid' => [['fid' => '']],
+]);
 
 it('answers revoke-other-sessions with a bare 204 in body mode too', function () {
     $user = User::factory()->create();
@@ -476,4 +482,77 @@ it('names the revoke-all route when a cached config predates logout_all, which t
     $this->withToken(sessionlessToken('api', $user->id))->deleteJson('/auth/sessions/others')
         ->assertStatus(409)
         ->assertJsonPath('message', 'This token names no session, so there are no other sessions to revoke. Use DELETE /auth/sessions to revoke every session, including this one.');
+});
+
+it('ends the presenting co-issuer bearer on log-out-everywhere, as logout does', function (array $fid) {
+    // A co-issuer's token names no lukk family (no `fid`, or one this table never minted), so revoking
+    // the account's families left the very token that asked for "log out everywhere" live until it
+    // expired — while `POST /auth/logout` with the same token kills it by `jti` (RFC 7009 §2.1: the
+    // revoked token is unusable from then on). Now it is ended the same way.
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-all', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600, ...$fid,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $this->withToken($token)->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect(verifier()->verify($token))->toBeNull();
+})->with([
+    'no fid' => [[]],
+    'a family lukk never minted' => [['fid' => 'sess_42']],
+]);
+
+it('denylists a presented co-issuer token only for the rest of its life', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-ttl', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+    $denylist = new class(app(Denylist::class)) implements Denylist
+    {
+        public array $jtis = [];
+
+        public function __construct(private Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->jtis[$jti] = $ttlSeconds;
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return $this->inner->has($type, $id);
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return $this->inner->hasAny($types);
+        }
+    };
+    app()->instance(Denylist::class, $denylist);
+
+    $this->withToken($token)->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect($denylist->jtis)->toBe(['co-issued-ttl' => 600 + Lukk::leeway($cfg)]);
+});
+
+it('logs a Lukk::actingAs user out everywhere, with no token presented', function () {
+    // `actingAs()` authenticates the guard directly, so there is no verified token on the request.
+    $user = User::factory()->create();
+    $user->startSession();
+    Lukk::actingAs($user);
+
+    $this->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect(RefreshToken::whereNull('revoked_at')->count())->toBe(0);
 });

@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
@@ -62,6 +63,8 @@ function coreKeys(): array
         'username', 'user_provider', 'guard', 'guards', 'routes', 'denylist_store', 'fork_threshold',
         'rate_limits.login', 'rate_limits.login.max_attempts', 'rate_limits.login.decay_seconds',
         'rate_limits.login.account_max_attempts', 'rate_limits.refresh',
+        // Read through sliced variables in the provider's limiters (`$limit[...]`, `$limits[...]`).
+        'rate_limits.login.ip_max_attempts', 'rate_limits.refresh.max_attempts', 'rate_limits.refresh.decay_seconds',
         // Unset means the sign-in equalizer falls back to its documented budget, not to none: a
         // Timebox of 0 is off, which is precisely the timing oracle the key exists to close.
         'login_timebox_micros',
@@ -196,6 +199,54 @@ it('hands out the documented number of recovery codes without it', function (Clo
     expect($codes)->toHaveCount(8);
 })->with('missing')->with(['two_factor.recovery_codes']);
 
+it('names the authenticator\'s issuer after the application without it', function (Closure $break) {
+    // Read through the provider's `$twoFactor` slice. Unguarded, a missing issuer is an undefined index on
+    // enrolment — or, guarded with the wrong fallback, an authenticator entry labelled with nothing.
+    config(['app.name' => 'Lukk Test App']);
+    $break('two_factor.issuer');
+    app()->forgetInstance(TwoFactorProvider::class);
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+
+    $uri = test()->withToken($access)->withHeaders(confirmedHeaders($access))
+        ->postJson('/auth/two-factor')->assertOk()->json('otpauth_uri');
+
+    expect(urldecode((string) $uri))->toContain('issuer=Lukk Test App');
+})->with('missing');
+
+it('refuses passkeys with the ceremony\'s own message without it', function (Closure $break, string $key, string $message) {
+    // `rp_id` and `origins` have no safe default — an empty RP ID breaks the RP-ID hash check, and empty
+    // origins would downgrade to suffix matching — so the ceremony refuses loudly. The provider's `??` is
+    // what lets it say WHICH setting is missing rather than dying on an undefined index first.
+    config(['lukk.passkeys.rp_id' => 'example.com', 'lukk.passkeys.origins' => ['https://app.example.com']]);
+    $break($key);
+    app()->forgetInstance(WebAuthnCeremony::class);
+
+    expect(fn () => app(WebAuthnCeremony::class))->toThrow(InvalidArgumentException::class, $message);
+})->with('missing')->with([
+    ['passkeys.rp_id', 'Passkeys require lukk.passkeys.rp_id'],
+    ['passkeys.origins', 'Passkeys require lukk.passkeys.origins'],
+]);
+
+it('locks at the documented cap and holds until released, without it', function (Closure $break, string $key, Closure $check) {
+    // Read through the provider's `$lockout` slice. 100 is NIST SP 800-63B-4 §3.2.2's ceiling; 0 is
+    // "held until released".
+    config(['lukk.features.lockout' => true, 'lukk.lockout' => ['max_attempts' => 3, 'release_after' => 60]]);
+    $break($key);
+
+    $check(app(LockoutRepository::class));
+})->with('missing')->with([
+    ['lockout.max_attempts', fn ($repo) => expect($repo->maxAttempts())->toBe(100)],
+    ['lockout.release_after', function ($repo) {
+        foreach (range(1, 3) as $ignored) {
+            $repo->recordFailure('login', 'id:1', 'api');
+        }
+
+        expect($repo->locked('login', 'id:1', 'api'))->toBeTrue()
+            ->and($repo->availableIn('login', 'id:1', 'api'))->toBeNull();
+    }],
+]);
+
 it('refuses tokens rather than inventing an identity, when the binding claims are missing', function (Closure $break, string $key) {
     // The deliberate exception: `issuer` and `audience` are NOT defaulted. Config's placeholder
     // (`https://api.example.com`) would be the wrong fallback — an admin guard whose `LUKK_ADMIN_AUDIENCE`
@@ -253,9 +304,11 @@ function guardedConfigKeys(): array
             continue;
         }
 
+        $source = (string) file_get_contents($file->getPathname());
+
         preg_match_all(
             "/(?:guardConfig\([^)]*\)|config(?:\(\))?(?:\('lukk\.([a-z_.]+)'\))?)((?:\['[a-z_]+'\])*)\s*\?\?/",
-            (string) file_get_contents($file->getPathname()),
+            $source,
             $matches,
             PREG_SET_ORDER,
         );
@@ -268,9 +321,57 @@ function guardedConfigKeys(): array
                 $keys[$path] = true;
             }
         }
+
+        foreach (slicedConfigReads($source) as $path) {
+            $keys[$path] = true;
+        }
     }
 
     return array_keys($keys);
+}
+
+/**
+ * Guarded reads through a variable holding a SLICE of the config — `$twoFactor = (array) ($this->config()
+ * ['two_factor'] ?? [])`, then `$twoFactor['issuer'] ?? …` — mapped back to the full path they read.
+ *
+ * The scanner above sees only reads chained straight off `config()`/`guardConfig()`, so a default on a
+ * sliced read could be deleted, or a new one shipped, with this file green. Each read resolves through the
+ * NEAREST assignment of its variable above it in the same file; a slice taken with a dynamic key
+ * (`['rate_limits'][$key]`) names no fixed path, so reads through it are left alone. A whole-config
+ * variable (`$config = Lukk::guardConfig()`) is already covered by the pattern above.
+ *
+ * @return list<string>
+ */
+function slicedConfigReads(string $source): array
+{
+    preg_match_all(
+        "/\\$(\w+)\s*=\s*(?:\(\w+\)\s*)?\(?\s*(?:\\\$this->config\(\)|(?:Lukk|self)::guardConfig\([^)]*\)|config\(\))((?:\[[^\]]+\])+)/",
+        $source,
+        $assignments,
+        PREG_SET_ORDER | PREG_OFFSET_CAPTURE,
+    );
+
+    preg_match_all("/\\$(\w+)((?:\['[a-z_]+'\])+)\s*\?\?/", $source, $reads, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
+
+    $paths = [];
+
+    foreach ($reads as $read) {
+        [$variable, $offset] = $read[1];
+        $slice = null;
+
+        foreach ($assignments as $assignment) {
+            if ($assignment[1][0] === $variable && $assignment[0][1] < $offset) {
+                $slice = preg_match("/^(?:\['[a-z_]+'\])+$/", $assignment[2][0]) === 1 ? $assignment[2][0] : null;
+            }
+        }
+
+        if ($slice !== null) {
+            preg_match_all("/'([a-z_]+)'/", $slice.$read[2][0], $segments);
+            $paths[] = implode('.', $segments[1]);
+        }
+    }
+
+    return $paths;
 }
 
 it('leaves no guarded config read unexercised', function () {
@@ -279,6 +380,7 @@ it('leaves no guarded config read unexercised', function () {
     $covered = [
         ...coreKeys(), ...twoFactorKeys(), ...confirmKeys(), ...passkeyKeys(),
         'two_factor.recovery_codes', 'issuer', 'audience', 'cookie.secure',
+        'two_factor.issuer', 'passkeys.rp_id', 'passkeys.origins', 'lockout.max_attempts', 'lockout.release_after',
     ];
 
     $exempt = [

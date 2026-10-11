@@ -576,6 +576,8 @@ class Lukk
             throw new RuntimeException(self::numericGuardName($default));
         }
 
+        self::assertDefaultGuardProviderAgrees($default);
+
         // A falsy scalar (`false`, `''`) is "no extra guards", which `isMultiGuard()` reads the same way.
         $guards = config('lukk.guards');
 
@@ -665,6 +667,38 @@ class Lukk
 
             $pathMounts[$path][] = [$name, $domain];
         }
+    }
+
+    /**
+     * The default guard signs users in against `lukk.user_provider`, but its lukk-jwt driver resolves the
+     * token's `sub` through `auth.guards.<default>.provider` (or, naming none, Laravel's
+     * `auth.defaults.provider`). Pointed at different providers, a password checked in one table minted a
+     * token resolving to the row with the same id in the OTHER — a `users` password signing in as the
+     * `admins` row sharing its id — with no error anywhere. Refused rather than reconciled: either choice
+     * of table silently changes who a working install's tokens resolve to.
+     */
+    private static function assertDefaultGuardProviderAgrees(string $default): void
+    {
+        $guard = config("auth.guards.{$default}");
+
+        if (! is_array($guard) || ($guard['driver'] ?? null) !== 'lukk-jwt') {
+            return;
+        }
+
+        $resolves = $guard['provider'] ?? config('auth.defaults.provider');
+        $signsIn = self::userProviderName($default);
+
+        if ($resolves === null || $resolves === '' || $resolves === $signsIn) {
+            return;
+        }
+
+        $source = isset($guard['provider']) ? "auth.guards.{$default}.provider" : 'auth.defaults.provider';
+
+        throw new RuntimeException(
+            "lukk guard [{$default}] resolves its users from the [{$resolves}] provider ({$source}), but signs "
+            ."them in against [{$signsIn}] (lukk.user_provider) — a password checked in one would mint a token "
+            .'for the account with the same id in the other. Point both at the same provider.'
+        );
     }
 
     private static function numericGuardName(string $name): string

@@ -12,6 +12,7 @@ use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Support\Abilities;
 use Lukk\Support\TokenContext;
 use Lukk\Tests\ConcurrencyTestCase;
+use Lukk\Tests\Fixtures\ObservedRefreshToken;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 
@@ -408,4 +409,36 @@ it('mints a sibling for a re-consumption inside grace, and counts the family\'s 
         ->and(app(RefreshTokenRepository::class)->countLiveTokens(
             (string) DB::table('refresh_tokens')->value('family_id'),
         ))->toBe(2);
+})->with([[fn () => ConcurrencyTestCase::engine()]]);
+
+it('survives a refresh-token model observer that poisons its own transaction', function (string $engine) {
+    // The model-event twin of the abilities case above. `persist()` writes the successor inside the
+    // rotate transaction; with `save()` an observer on a `useRefreshTokenModel` subclass ran there, and an
+    // ordinary swallowed query error left PostgreSQL's transaction aborted — so COMMIT became ROLLBACK,
+    // rotation returned a pair whose row was never written, and the client was signed out on its NEXT
+    // refresh. `saveQuietly()` runs no listener at all.
+    if ($engine !== 'pgsql') {
+        test()->markTestSkipped('25P02 is PostgreSQL-specific');
+    }
+
+    ObservedRefreshToken::$onEvent = function () {
+        try {
+            DB::select('SELECT * FROM a_table_that_does_not_exist');
+        } catch (Throwable) {
+            // Swallowed, as an auditing observer guarding a flaky store would.
+        }
+    };
+    Lukk\Lukk::useRefreshTokenModel(ObservedRefreshToken::class);
+
+    try {
+        $pair = User::factory()->create()->startSession();
+        $before = DB::table('refresh_tokens')->count();
+        $rotated = app(RotateRefreshToken::class)($pair->refreshToken);
+
+        expect(DB::table('refresh_tokens')->count())->toBe($before + 1)
+            ->and(app(RotateRefreshToken::class)($rotated->refreshToken)->accessToken)->toBeString();
+    } finally {
+        ObservedRefreshToken::$onEvent = null;
+        Lukk\Lukk::$refreshTokenModel = null;
+    }
 })->with([[fn () => ConcurrencyTestCase::engine()]]);

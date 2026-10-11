@@ -9,7 +9,7 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Lukk\Contracts\LockoutRepository;
+use Lukk\Contracts\ReservesLockoutAttempts;
 use Lukk\Events\AccountLocked;
 use Lukk\Events\AccountReleased;
 use Lukk\Models\Lockout;
@@ -24,7 +24,7 @@ use Lukk\Models\Lockout;
  * success is no longer "consecutive" in the strict NIST SP 800-63B-4 §3.2.2 sense, so the two knobs
  * pull against each other and the docs say so.
  */
-class DatabaseLockoutRepository implements LockoutRepository
+class DatabaseLockoutRepository implements ReservesLockoutAttempts
 {
     public function __construct(
         private readonly int $maxAttempts,
@@ -52,11 +52,44 @@ class DatabaseLockoutRepository implements LockoutRepository
 
     public function recordFailure(string $purpose, string $subject, ?string $guard): int
     {
+        return $this->count($purpose, $subject, $guard, $this->maxAttempts);
+    }
+
+    public function reserve(string $purpose, string $subject, ?string $guard): int
+    {
+        // Locks only PAST the cap: the attempt that reaches it is still being verified, and locks
+        // through `lockIfSpent()` if it fails. Past the cap and not locked, that verdict never came
+        // back (see the contract) — lock rather than strand a lock `release_after` cannot time.
+        return $this->count($purpose, $subject, $guard, $this->maxAttempts + 1);
+    }
+
+    public function lockIfSpent(string $purpose, string $subject, ?string $guard): void
+    {
+        if (! $this->usable($subject)) {
+            return;
+        }
+
+        // One conditional statement, so the transition is decided by the write itself: of two failures
+        // landing together, only the one whose UPDATE took the row announces it.
+        $locked = $this->query($purpose, $subject, $guard)
+            ->where('attempts', '>=', $this->maxAttempts)->whereNull('locked_at')
+            ->update(['locked_at' => Carbon::now()]);
+
+        if ($locked > 0) {
+            event(new AccountLocked($purpose, $subject, $guard));
+        }
+    }
+
+    /** Count one attempt, locking (and announcing it) once the run reaches `$lockAt`. */
+    private function count(string $purpose, string $subject, ?string $guard, int $lockAt): int
+    {
         if (! $this->usable($subject)) {
             return 0;
         }
 
-        [$attempts, $justLocked] = DB::transaction(function () use ($purpose, $subject, $guard) {
+        $this->ensureRow($purpose, $subject, $guard);
+
+        [$attempts, $justLocked] = DB::transaction(function () use ($purpose, $subject, $guard, $lockAt) {
             $row = $this->locate($purpose, $subject, $guard);
 
             // An auto-release lapsed: start a fresh run rather than leaving the account one
@@ -67,7 +100,7 @@ class DatabaseLockoutRepository implements LockoutRepository
             }
 
             $row->attempts++;
-            $locking = $row->attempts >= $this->maxAttempts && $row->locked_at === null;
+            $locking = $row->attempts >= $lockAt && $row->locked_at === null;
 
             if ($locking) {
                 $row->locked_at = Carbon::now();
@@ -202,7 +235,44 @@ class DatabaseLockoutRepository implements LockoutRepository
     }
 
     /**
-     * Fetch the row for update, creating it if absent.
+     * Create the counter row, if absent, BEFORE the counting transaction opens.
+     *
+     * Inside it, a first failure ran `SELECT … FOR UPDATE` on an absent row and then INSERTed. Under
+     * MySQL REPEATABLE READ that locking read takes a GAP lock, and concurrent first failures for one
+     * subject each held the gap while waiting to insert into it — InnoDB killed all but one with 1213
+     * (deadlock): a 500 on `/auth/login`, and an uncounted guess, for exactly the burst the counter
+     * exists to meter. Measured with eight simultaneous wrong passwords against a fresh account: seven
+     * deadlocks. Inserted here, in autocommit, no lock outlives the statement, and the transaction's
+     * locking read then finds the row and serialises on it. `insertOrIgnore` (`ON CONFLICT DO NOTHING`
+     * on PostgreSQL), so a concurrent insert is no error — and on PostgreSQL, no aborted transaction.
+     */
+    private function ensureRow(string $purpose, string $subject, ?string $guard): void
+    {
+        if ($this->query($purpose, $subject, $guard)->exists()) {
+            return;
+        }
+
+        $now = Carbon::now();
+
+        $model = new Lockout;
+
+        // Past Eloquent, so the model's own ULID (lowercased by `HasUlids`) and timestamps are spelled out.
+        $model->newQuery()->insertOrIgnore([
+            'id' => $model->newUniqueId(),
+            'purpose' => $purpose,
+            'subject' => $subject,
+            'guard' => (string) $guard,
+            // The column defaults to 0 as well; stated so the row reads as written.
+            'attempts' => 0, // @pest-mutate-ignore: RemoveArrayItem
+            'created_at' => $now,
+            // The counting save() that follows stamps it again on every path; stated for a whole row.
+            'updated_at' => $now, // @pest-mutate-ignore: RemoveArrayItem
+        ]);
+    }
+
+    /**
+     * Fetch the row for update, creating it if absent — which, after `ensureRow()`, means only that a
+     * success released it in between.
      *
      * The insert is racy by nature — two first-failures for one subject arrive together — and the
      * unique index is what makes that safe: the loser catches the violation and re-reads the winner's

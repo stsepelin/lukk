@@ -81,6 +81,11 @@ class ConcurrencyTestCase extends Orchestra
         $app['config']->set('lukk.secret', str_repeat('a', 64));
         $app['config']->set('auth.guards.api', ['driver' => 'lukk-jwt', 'provider' => 'users']);
         $app['config']->set('auth.providers.users.model', User::class);
+        // The public routes that write or look up an identifier, so their input rules can be pinned on
+        // the engine that reads the value (tests/Concurrency/IdentifierRespellingTest.php).
+        $app['config']->set('lukk.features.registration', true);
+        $app['config']->set('lukk.features.password_reset', true);
+        $app['config']->set('auth.passwords.users', ['provider' => 'users', 'table' => 'password_reset_tokens', 'expire' => 60, 'throttle' => 60]);
     }
 
     protected function setUp(): void

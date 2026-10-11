@@ -314,6 +314,7 @@ class LukkServiceProvider extends ServiceProvider
             // Unconditional, like `DeleteAccount` above: export must reach every row erasure reaches.
             $app->make(LockoutRepository::class),
             Lukk::currentGuard(),
+            $this->config()['password_reset']['broker'] ?? null,
         ));
 
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(

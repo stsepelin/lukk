@@ -10,6 +10,7 @@ use Illuminate\Validation\Rules\Password;
 use Illuminate\Validation\Validator;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
+use Lukk\Support\Identifier;
 
 /**
  * Registration input. Defaults to the stock Laravel shape: `name`, the unique identifier column
@@ -42,15 +43,19 @@ class RegisterRequest extends FormRequest
         return [
             // Valid UTF-8 (a `u` pattern matches nothing else): PostgreSQL refuses an invalid sequence
             // in a query parameter (SQLSTATE 22021), so `\xFF` here was a 500 on the INSERT.
-            'name' => ['required', 'string', 'max:255', 'regex:/^/u'],
+            // And no NUL: pdo_pgsql ends a bound string there, so the row held a different name than the
+            // one validated.
+            'name' => ['required', 'string', 'max:255', 'regex:/^/u', 'not_regex:/\x00/'],
             // max:255 here too — `email`/`unique` on an unbounded string is real work on an
             // unauthenticated endpoint, and every realistic identifier fits (ASVS V2.1).
             // A non-email identifier must be valid UTF-8 as well, for the same reason: `unique` queries
             // with the value. Laravel skips `unique` once an earlier rule on the attribute has failed, so
             // refusing it first is enough — and `email` already refuses such an address.
+            // Nothing sign-in refuses (`Identifier`): an account registered with it could never sign in, and on
+            // PostgreSQL a NUL stored a truncated identifier that `unique` had never checked.
             $field => $field === 'email'
-                ? ['required', 'string', 'max:255', 'email', Rule::unique($this->userModel(), 'email')]
-                : ['required', 'string', 'max:255', 'regex:/^/u', Rule::unique($this->userModel(), $field)],
+                ? ['required', 'string', 'max:255', 'email', Identifier::rule(), Rule::unique($this->userModel(), 'email')]
+                : ['required', 'string', 'max:255', 'regex:/^/u', Identifier::rule(), Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
             // The type and NUL-byte checks are `after()`'s, which runs for every rule set, this one included.
             'password' => ['required', 'confirmed', 'max:255', HashablePassword::rule(), Password::defaults()],

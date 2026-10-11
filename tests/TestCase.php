@@ -35,6 +35,7 @@ class TestCase extends Orchestra
         Lukk::$rateLimitKeyUsing = null;
         Lukk::$refreshTokenModel = null;
         Lukk::$runsScheduledPruning = true;
+        Fixtures\ObservedRefreshToken::$onEvent = null;
 
         parent::tearDown();
     }

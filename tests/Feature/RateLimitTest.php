@@ -283,3 +283,30 @@ it('masks a prefix that is not a whole number of bytes', function () {
         ->postJson('/auth/refresh', ['refresh_token' => 'x'])
         ->assertStatus(429);
 });
+
+it('does not put every caller in one account bucket when the identifier is blank', function () {
+    // `Lukk::authenticateUsing` reading a field other than `lukk.username` leaves the identifier blank on
+    // EVERY attempt, so the IP-independent account bucket keyed on it — `acct|<guard>|sha256('')` — was
+    // one bucket for the whole application: `account_max_attempts` wrong guesses from anywhere answered
+    // every sign-in 429. With nothing to key an account on, that bucket is skipped; the per-IP one stays.
+    config([
+        'lukk.rate_limits.login.max_attempts' => 2,
+        'lukk.rate_limits.login.ip_max_attempts' => 500,
+        'lukk.rate_limits.login.account_max_attempts' => 2,
+    ]);
+    $user = User::factory()->create(['password' => bcrypt('correct')]);
+    Lukk::authenticateUsing(fn ($request) => $request->input('phone') === '555' && $request->input('password') === 'correct' ? $user : null);
+
+    foreach (range(1, 3) as $ignored) {
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])
+            ->postJson('/auth/login', ['phone' => '000', 'password' => 'wrong']);
+    }
+
+    // The attacker's own address is still throttled…
+    $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.1'])
+        ->postJson('/auth/login', ['phone' => '555', 'password' => 'correct'])->assertStatus(429);
+
+    // …and nobody else is.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.7'])
+        ->postJson('/auth/login', ['phone' => '555', 'password' => 'correct'])->assertOk();
+});

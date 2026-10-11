@@ -37,10 +37,11 @@ class RefreshTokenRecord
          */
         public readonly ?bool $original = null,
         /**
-         * How the SESSION was authenticated (RFC 8176 `amr`), JSON-encoded — stamped once at sign-in
-         * and carried forward by every rotation, because it describes the authentication EVENT and a
-         * refresh does not repeat it. Null on a repository or a schema that does not carry it, in
-         * which case the claim is simply absent, as it was before.
+         * How and WHEN the SESSION was authenticated (RFC 8176 `amr`, OIDC `auth_time`), as the opaque
+         * string `Support\SessionAuthentication` encodes — stamped once at sign-in and carried forward
+         * by every rotation, because it describes the authentication EVENT and a refresh does not
+         * repeat it. Named for the column it lives in. Null on a repository or a schema that does not
+         * carry it, in which case both claims are simply absent after a refresh.
          */
         public readonly ?string $amr = null,
     ) {}

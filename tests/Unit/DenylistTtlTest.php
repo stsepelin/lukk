@@ -80,6 +80,7 @@ it('adds leeway to the presented token\'s own remaining life', function () {
     // that token for `leeway` seconds past `exp` — a window in which a revoked family authenticates
     // again. The configured floor already carries leeway, so only the presented-token branch can
     // lose it; this pins that branch on its own by keeping the floor far below it.
+    $this->freezeSecond();
     $user = User::factory()->create();
     $access = $user->startSession()->accessToken;
 

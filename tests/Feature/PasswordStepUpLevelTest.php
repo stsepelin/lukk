@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
@@ -230,8 +231,9 @@ it('fails closed on an mfa_max_age that is not a number', function () {
 });
 
 it('does not take an auth_time from the future for a recent one', function () {
-    // Lowering refresh_ttl — a normal hardening step — shifts the derived auth_time FORWARD, so a
-    // sign-in from weeks ago read as one from the future, and a negative age always passed.
+    // Lowering refresh_ttl — a normal hardening step — once shifted the DERIVED auth_time forward, so a
+    // sign-in from weeks ago read as one from the future, and a negative age always passed. The time is
+    // stored now; this still pins that lowering refresh_ttl does not make an old sign-in recent.
     $user = withTotp(User::factory()->create());
     $old = $this->travel(-25)->days(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
     config(['lukk.refresh_ttl' => 86_400]);
@@ -400,4 +402,46 @@ it('tells each route the way out it actually has', function () {
     stepUpWithPassword($this, $access)->assertJsonValidationErrors(['password' => 'This account has a second factor. Confirm with a passkey that verifies you, or sign in again with your second factor first.']);
     app('auth')->forgetGuards();
     changePasswordFrom($this, $access)->assertJsonValidationErrors(['current_password' => 'This account has a second factor. Sign in again with your second factor, or with a passkey that verifies you, then change the password.']);
+});
+
+it('dates the multi-factor sign-in from when it happened, not from refresh_ttl as configured today', function () {
+    // `auth_time` used to be derived on rotation as `expires_at − refresh_ttl`. LOWER refresh_ttl and an
+    // old sign-in moved forward: one 29.5 days into a 30-day family, after a cut to one day, read as twelve
+    // hours old — inside the default allowance — and a password step-up passed on an mfa sign-in from four
+    // weeks ago. The future-time refusal only caught the sessions moved PAST now. The sign-in time is now
+    // stored with the family and carried, so no setting can move it.
+    $user = withTotp(User::factory()->create());
+    $old = $this->travel(-(29 * 86_400 + 43_200))->seconds(fn () => start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+    config(['lukk.refresh_ttl' => 86_400]);
+
+    stepUpWithPassword($this, rotate()($old->refreshToken)->accessToken)->assertStatus(422);
+});
+
+it('carries the sign-in time, unchanged, through every rotation', function () {
+    $this->freezeSecond();
+    $signedIn = now()->getTimestamp() - 300;
+    $pair = $this->travel(-300)->seconds(fn () => start()(User::factory()->create()->id, ['amr' => ['pwd', 'otp', 'mfa']]));
+    config(['lukk.refresh_ttl' => 7_200]);
+
+    $second = rotate()($pair->refreshToken);
+    $third = rotate()($second->refreshToken);
+
+    expect(claims($third->accessToken)->auth_time)->toBe($signedIn)
+        ->and(claims($third->accessToken)->amr)->toBe(['pwd', 'otp', 'mfa']);
+});
+
+it('takes a session stored before the sign-in time was, for no recent multi-factor sign-in', function () {
+    // A family written by an earlier release holds `amr` as a bare JSON list, with no time. Its `amr` is
+    // still honoured; its sign-in time is unknown, so the token carries no `auth_time` and the multi-factor
+    // allowance fails closed — a fresh multi-factor sign-in restores it.
+    $user = withTotp(User::factory()->create());
+    $pair = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']]);
+    DB::table('refresh_tokens')->update(['amr' => '["pwd","otp","mfa"]']);
+
+    $access = rotate()($pair->refreshToken)->accessToken;
+
+    expect(claims($access)->amr)->toBe(['pwd', 'otp', 'mfa'])
+        ->and(property_exists(claims($access), 'auth_time'))->toBeFalse();
+
+    stepUpWithPassword($this, $access)->assertStatus(422);
 });

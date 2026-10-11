@@ -7,6 +7,7 @@ namespace Lukk\Actions;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LockoutRepository;
@@ -19,6 +20,7 @@ use Lukk\Lukk;
  */
 class VerifyTwoFactorChallenge
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -65,7 +67,14 @@ class VerifyTwoFactorChallenge
             $this->throwLocked('two_factor', $subject, 'code');
         }
 
-        if ($this->limiter->tooManyAttempts($key, $this->maxAttempts)) {
+        // COUNTED before the code is checked, and refused on the post-increment count. Reading
+        // `tooManyAttempts()` and hitting only after a failure was check-then-act: requests arriving
+        // together all read "under budget" before any of them counted, so a burst got as many guesses as
+        // it had requests — RFC 6238 §5.2 and NIST SP 800-63B-4 §3.2.2 both ask the verifier to limit
+        // failed attempts, which that did not. `hit()` is the cache's atomic increment, so only
+        // `max_attempts` requests can ever see a count within budget. A success clears it below, so a
+        // correct code costs nothing.
+        if ($this->limiter->hit($key, $this->decaySeconds) > $this->maxAttempts) {
             $seconds = $this->limiter->availableIn($key);
 
             // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
@@ -82,14 +91,18 @@ class VerifyTwoFactorChallenge
         // a TOTP — and the cap exists for a 6-digit secret, not for a 119-bit one. The decaying
         // limiter above still bounds recovery guessing.
         if (! $recoveryOnly && $this->lockouts !== null
-            && $this->lockouts->recordFailure('two_factor', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
+            && $this->reserveAttempt($this->lockouts, 'two_factor', $subject) > $this->lockouts->maxAttempts()) {
             $this->throwLocked('two_factor', $subject, 'code');
         }
 
         try {
             $user = ($this->challenge)($userId, $code, $recoveryCode);
         } catch (ValidationException $e) {
-            $this->limiter->hit($key, $this->decaySeconds);
+            // The lock lands only now that the factor failed (`CountsLockoutAttempts`) — and only for an
+            // attempt that reserved, so a recovery-code-only failure still drives no lock.
+            if (! $recoveryOnly) {
+                $this->attemptFailed($this->lockouts, 'two_factor', $subject);
+            }
 
             throw $e;
         }

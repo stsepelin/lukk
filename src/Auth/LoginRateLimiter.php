@@ -45,16 +45,27 @@ class LoginRateLimiter
      * look-alike account too.
      */
 
+    /*
+     * A BLANK identifier keys no account bucket at all. It is blank on every attempt when
+     * `Lukk::authenticateUsing` reads a field other than `lukk.username`, and `acct|<guard>|sha256('')`
+     * was then ONE bucket for the whole application: `account_max_attempts` wrong guesses from anywhere
+     * answered every sign-in 429 — a denial of service for anyone who cared to send them. Such an app keeps
+     * the per-address bucket, and gets the account cap back by pointing `lukk.username` at its field.
+     */
+
     public function tooManyAttempts(Request $request): bool
     {
         return $this->limiter->tooManyAttempts($this->key($request), $this->maxAttempts)
-            || $this->limiter->tooManyAttempts($this->accountKey($request), $this->accountMaxAttempts);
+            || ($this->keysAnAccount($request) && $this->limiter->tooManyAttempts($this->accountKey($request), $this->accountMaxAttempts));
     }
 
     public function increment(Request $request): void
     {
         $this->limiter->hit($this->key($request), $this->decaySeconds);
-        $this->limiter->hit($this->accountKey($request), $this->decaySeconds);
+
+        if ($this->keysAnAccount($request)) {
+            $this->limiter->hit($this->accountKey($request), $this->decaySeconds);
+        }
     }
 
     public function clear(Request $request): void
@@ -64,16 +75,26 @@ class LoginRateLimiter
 
     public function availableIn(Request $request): int
     {
-        // Whichever bucket is blocking has the longer remaining window.
+        // Whichever bucket is blocking has the longer remaining window. With no account bucket, 0 adds
+        // nothing: the per-address wait is never negative, so any value up to 0 reads the same.
         return max(
             $this->limiter->availableIn($this->key($request)),
-            $this->limiter->availableIn($this->accountKey($request)),
+            $this->keysAnAccount($request) ? $this->limiter->availableIn($this->accountKey($request)) : 0, // @pest-mutate-ignore: DecrementInteger
         );
     }
 
     public function key(Request $request): string
     {
-        return $this->guard.'|'.$this->identifierKey($request).'|'.Lukk::rateLimitKey($request);
+        // Without an identifier the bucket is the caller's address alone, rather than an address paired
+        // with the digest of nothing.
+        return $this->keysAnAccount($request)
+            ? $this->guard.'|'.$this->identifierKey($request).'|'.Lukk::rateLimitKey($request)
+            : $this->guard.'|'.Lukk::rateLimitKey($request);
+    }
+
+    private function keysAnAccount(Request $request): bool
+    {
+        return $this->identifier($request) !== '';
     }
 
     /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood
@@ -204,6 +225,28 @@ class LoginRateLimiter
     }
 
     /**
+     * The identifier without what a database's equality may skip, so the fold is never FINER than it.
+     *
+     * A fold finer than the lookup is a fresh bucket per spelling. MySQL's `utf8mb4_unicode_ci` gives
+     * control, format and combining code points no primary weight (U+200B, U+034F, U+FE0F, an accent typed
+     * as a separate mark) and pads trailing whitespace, while `Str::transliterate` turned U+200B and U+3000
+     * into spaces and U+034F into `?`. Stripped and trimmed here — Unicode whitespace, not just ASCII — the
+     * spellings MySQL resolves to one account key together. Coarser than PostgreSQL's equality, which is the
+     * safe direction: look-alikes share a bucket, as the case fold already makes them. `LoginRequest`
+     * refuses most of this set outright (`Identifier`); NUL, which pdo_pgsql truncates at, needs that refusal.
+     *
+     * Invalid UTF-8 makes both passes answer null; it is then folded as before rather than to nothing.
+     */
+    private static function visible(string $identifier): string
+    {
+        $stripped = preg_replace('/[\p{Cc}\p{Cf}\p{Mn}\p{Me}]+/u', '', $identifier);
+
+        // The second pass runs on what the first returned, which is valid UTF-8, so it cannot fail; the cast
+        // states the type.
+        return $stripped === null ? trim($identifier) : (string) preg_replace('/^[\s\p{Z}]+|[\s\p{Z}]+$/u', '', $stripped); // @pest-mutate-ignore: RemoveStringCast
+    }
+
+    /**
      * The canonical bucket/lock subject for an identifier.
      *
      * Bounded in BYTES, not characters. `LoginRequest` caps the input at `max:255` characters, but
@@ -216,7 +259,7 @@ class LoginRateLimiter
      */
     public static function normalize(string $identifier): string
     {
-        $normalized = Str::transliterate(Str::lower(trim($identifier)));
+        $normalized = Str::transliterate(Str::lower(self::visible($identifier)));
 
         return strlen($normalized) > 190 ? 'sha256:'.hash('sha256', $normalized) : $normalized;
     }

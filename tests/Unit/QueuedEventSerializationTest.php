@@ -12,6 +12,7 @@ use Lukk\Events\PasskeyDeleted;
 use Lukk\Events\PasskeyRegistered;
 use Lukk\Events\PasswordChanged;
 use Lukk\Events\RecoveryCodesGenerated;
+use Lukk\Events\RecoveryCodeUsed;
 use Lukk\Events\TwoFactorAuthenticationConfirmed;
 use Lukk\Events\TwoFactorAuthenticationDisabled;
 use Lukk\Tests\Fixtures\User;
@@ -46,6 +47,7 @@ dataset('user events', [
     'TwoFactorAuthenticationConfirmed' => [fn (User $u) => new TwoFactorAuthenticationConfirmed($u)],
     'TwoFactorAuthenticationDisabled' => [fn (User $u) => new TwoFactorAuthenticationDisabled($u)],
     'RecoveryCodesGenerated' => [fn (User $u) => new RecoveryCodesGenerated($u)],
+    'RecoveryCodeUsed' => [fn (User $u) => new RecoveryCodeUsed($u, 7)],
     'PasskeyRegistered' => [fn (User $u) => new PasskeyRegistered($u, 'cred-1', 'phone')],
     'PasskeyDeleted' => [fn (User $u) => new PasskeyDeleted($u, 'cred-1')],
 ]);

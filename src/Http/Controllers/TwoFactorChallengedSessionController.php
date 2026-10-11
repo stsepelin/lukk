@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers;
 
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\StartSession;
 use Lukk\Actions\VerifyTwoFactorChallenge;
@@ -28,6 +29,7 @@ class TwoFactorChallengedSessionController
         private readonly StartSession $start,
         private readonly ChallengeToken $challengeTokens,
         private readonly ConfirmPasswordUnchanged $passwordUnchanged,
+        private readonly ChallengeTwoFactor $challengeTwoFactor,
     ) {}
 
     public function store(TwoFactorChallengeRequest $request): LoginResponse
@@ -55,17 +57,23 @@ class TwoFactorChallengedSessionController
             throw ValidationException::withMessages(['challenge_token' => [__('The two-factor challenge is invalid or has expired.')]]);
         }
 
+        // The email-verification gate, likewise BEFORE the factor is checked. It used to run only after:
+        // a challenge that outlived the account's verified state — minted before an email change nulled
+        // `email_verified_at`, or before the flag was switched on — burned a single-use recovery code on a
+        // sign-in that was always going to be refused. Answering 403 to a holder who has not presented a
+        // valid factor tells them nothing new: the challenge proves they passed the password, and login
+        // answers the same 403 at that same point.
+        $candidate = $subject === null ? null : $this->challengeTwoFactor->subject($subject);
+        abort_if($candidate !== null && $this->emailUnverified($candidate), 403, 'Your email address is not verified.');
+
         $user = ($this->verifyChallenge)(
             $challenge,
             $request->input('code'),
             $request->input('recovery_code'),
         );
 
-        // The same gate as every other session-minting path. Login already refuses an unverified
-        // account before issuing a challenge; this covers a challenge that outlived the account's
-        // verified state — minted before an email change nulled `email_verified_at`, or before the
-        // flag was switched on. It runs after the second factor verified because only then is the
-        // subject known, so in that narrow window a recovery code is spent; the alternative is a
+        // The same gate again, on the user the factor was verified for: the check above does not close the
+        // race with an email change landing while the factor was being checked, and losing it would be a
         // session for an account the policy says must not have one.
         abort_if($this->emailUnverified($user), 403, 'Your email address is not verified.');
 

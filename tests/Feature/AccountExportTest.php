@@ -3,8 +3,11 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\ExportAccount;
 use Lukk\Auth\LoginRateLimiter;
@@ -178,7 +181,7 @@ it('exports every session field and the account id', function () {
     $export = app(ExportAccount::class)($user);
 
     expect($export['account']['id'])->toBe($user->getKey())
-        ->and(array_keys($export['sessions'][0]))->toBe(['session', 'created_at', 'last_rotated_at', 'revoked_at', 'expires_at']);
+        ->and(array_keys($export['sessions'][0]))->toBe(['session', 'created_at', 'last_rotated_at', 'revoked_at', 'expires_at', 'amr', 'authenticated_at']);
 });
 
 it('formats a raw string timestamp from a model that does not cast it, and reads an empty one as none', function () {
@@ -278,4 +281,82 @@ it('exports only the allowlisted passkey fields a rebound store hands back, type
         'aaguid' => null,
         'transports' => ['usb', 'nfc'],
     ]]);
+});
+
+// ---------------------------------------------------------------------------
+// Art. 15 must disclose what Art. 17 destroys. Erasure deletes a pending password-reset row (it holds the
+// address in plain text), the two-factor columns — including an enrolment never confirmed — and every
+// session with how it was signed in; the export left all three out. The facts, never the secrets: no
+// reset token, no TOTP secret, no recovery-code hash.
+// ---------------------------------------------------------------------------
+
+it('exports when a pending password reset was requested, never its token', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create(['email' => 'reset@example.test']);
+    $token = Password::broker()->createToken($user);
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['password_reset'])->toBe(['requested_at' => now()->toIso8601String()])
+        ->and(json_encode($export))->not->toContain($token)
+        ->and(app(ExportAccount::class)(User::factory()->create())['password_reset'])->toBeNull();
+});
+
+it('exports the configured broker\'s pending reset, on that broker\'s connection', function () {
+    Schema::create('lukk_password_resets', function (Blueprint $table) {
+        $table->string('email')->primary();
+        $table->string('token');
+        $table->timestamp('created_at')->nullable();
+    });
+    config([
+        'auth.passwords.lukkbroker' => ['provider' => 'users', 'table' => 'lukk_password_resets', 'expire' => 60],
+        'lukk.password_reset.broker' => 'lukkbroker',
+    ]);
+    Schema::drop('password_reset_tokens');
+    $user = User::factory()->create();
+    Password::broker('lukkbroker')->createToken($user);
+
+    expect(app(ExportAccount::class)($user)['password_reset'])->not->toBeNull();
+});
+
+it('exports no pending reset when the broker has no table', function () {
+    Schema::drop('password_reset_tokens');
+
+    expect(app(ExportAccount::class)(User::factory()->create())['password_reset'])->toBeNull();
+});
+
+it('exports an unconfirmed two-factor enrolment and the recovery codes left, never the codes', function () {
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString('JBSWY3DPEHPK3PXP'),
+        'two_factor_recovery_codes' => json_encode([Hash::make('code-one'), Hash::make('code-two')]),
+        'two_factor_confirmed_at' => null,
+    ])->save();
+
+    $export = app(ExportAccount::class)($user->refresh());
+
+    expect($export['two_factor'])->toMatchArray(['enabled' => false, 'pending' => true, 'recovery_codes_remaining' => 2])
+        ->and(json_encode($export))->not->toContain('JBSWY3DPEHPK3PXP');
+
+    $user->forceFill(['two_factor_confirmed_at' => now()])->save();
+    expect(app(ExportAccount::class)($user->refresh())['two_factor'])->toMatchArray(['enabled' => true, 'pending' => false]);
+
+    expect(app(ExportAccount::class)(User::factory()->create())['two_factor'])->toMatchArray(['pending' => false, 'recovery_codes_remaining' => 0]);
+});
+
+it('exports two-factor as not pending, with no count, for a model without two-factor support', function () {
+    $user = new GenericUser(['id' => 1, 'email' => 'generic@example.test']);
+
+    expect(app(ExportAccount::class)($user)['two_factor'])->toMatchArray(['pending' => false, 'recovery_codes_remaining' => null]);
+});
+
+it('exports how, and when, each session was signed in', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    start()($user->getKey(), ['amr' => ['pwd', 'otp', 'mfa']]);
+
+    $session = app(ExportAccount::class)($user)['sessions'][0];
+
+    expect($session['amr'])->toBe(['pwd', 'otp', 'mfa'])
+        ->and($session['authenticated_at'])->toBe(now()->toIso8601String());
 });

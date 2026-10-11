@@ -263,6 +263,16 @@ return [
         | answers the same whether or not an account exists. A success clears
         | only the per-IP bucket; the account bucket decays, so a look-alike
         | account sharing the fold cannot sign in to reset this one's count.
+        | The fold also drops what a database's equality may ignore (control,
+        | format and combining characters, outer Unicode whitespace), and sign-in
+        | refuses an identifier carrying a control or format character or any
+        | whitespace but the ASCII space — so no respelling is a fresh bucket.
+        |
+        | The account bucket needs an identifier under `lukk.username`. With
+        | `Lukk::authenticateUsing()` reading another field there is none, and the
+        | account bucket is skipped (one bucket shared by every caller would let
+        | anyone throttle every sign-in) — only the per-IP limits apply. Point
+        | `lukk.username` at your field to get the account cap back.
         |
         */
 
@@ -330,7 +340,9 @@ return [
         | Passkeys
         |--------------------------------------------------------------------------
         |
-        | A per-IP guard on the passkey login/registration endpoints.
+        | A per-IP guard on the passkey sign-in endpoints — `passkeys/login-options`,
+        | `passkeys/login` — and on `confirm-passkey/options`. Not registration:
+        | that sits behind step-up confirmation and its own limiter.
         |
         */
 
@@ -662,8 +674,11 @@ return [
     | Routes
     |--------------------------------------------------------------------------
     |
-    | Whether to register the package's auth routes (login / refresh / logout /
-    | logout-all), the URI prefix they mount under, and an optional host. Leave
+    | Whether to register the package's auth routes — login, refresh, logout,
+    | logout-all and logout-others, session claim, step-up confirmation, JWKS,
+    | and each enabled feature's own (registration, password change and reset,
+    | email verification, two-factor, passkeys, account export and deletion) —
+    | the URI prefix they mount under, and an optional host. Leave
     | "domain" null to serve on any host, or set it (e.g. "api.example.com") to
     | bind the routes to a subdomain — the stronger isolation for multi-guard.
     |
@@ -955,12 +970,17 @@ return [
         | Gate lukk's own session-management routes
         |--------------------------------------------------------------------------
         |
-        | `DELETE /auth/sessions` and `/auth/sessions/others` revoke OTHER sessions,
-        | so a token pinned to a narrow grant should not reach them — otherwise the
-        | most restricted token you can issue can still log the account out
-        | everywhere. Derived grants are never gated at all, so a
-        | human's session is unaffected and only a pinned grant has to ask for it.
-        | Pinned-ness is carried by the `pin` claim, stamped only on those tokens.
+        | A token pinned to a narrow grant should not reach the routes that manage
+        | the account — otherwise the most restricted token you can issue can still
+        | log the account out everywhere, or step up and take it over. Gated:
+        |   - `lukk.sessions`: `DELETE /auth/sessions`, `DELETE /auth/sessions/others`;
+        |   - `lukk.account`: `POST /auth/confirm-password`, `POST /auth/confirm-passkey`
+        |     and `/confirm-passkey/options`, `POST /auth/password`,
+        |     `GET /auth/passkeys`, `GET /auth/two-factor/recovery-codes`.
+        | Account export and deletion are gated whatever this says. Derived grants
+        | are never gated at all, so a human's session is unaffected and only a
+        | pinned grant has to ask. Pinned-ness is carried by the `pin` claim,
+        | stamped only on those tokens.
         |
         */
 

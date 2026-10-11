@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
@@ -34,6 +35,7 @@ use Lukk\Support\HashablePassword;
  */
 class ChangePassword
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -56,26 +58,17 @@ class ChangePassword
         // Reserved before the credential check, like every other password path: reading "is it
         // locked" and counting afterwards lets concurrent requests each get a guess.
         if ($this->lockouts !== null
-            && $this->lockouts->recordFailure('confirm', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
+            && $this->reserveAttempt($this->lockouts, 'confirm', $subject) > $this->lockouts->maxAttempts()) {
             $this->throwLocked('confirm', $subject, 'current_password');
         }
 
-        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
-        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
-        // can present — fail closed with the ordinary answer, not a 500.
+        // The lock lands only once the check has failed — see `CountsLockoutAttempts`.
         try {
-            $valid = $this->users->validateCredentials($user, ['password' => $current]);
-        } catch (\Throwable) {
-            $valid = false;
-        }
+            $this->verifyCurrent($user, $current);
+        } catch (ValidationException $e) {
+            $this->attemptFailed($this->lockouts, 'confirm', $subject);
 
-        if (! $valid) {
-            throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
-        }
-
-        // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
-        if (HashablePassword::verifiesOnlyInPart($user, $current)) {
-            throw HashablePassword::mustReset('current_password');
+            throw $e;
         }
 
         // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
@@ -109,6 +102,27 @@ class ChangePassword
             : ($this->revokeOtherSessions)($user->getAuthIdentifier(), $currentFamilyId);
 
         event(new PasswordChanged($user));
+    }
+
+    private function verifyCurrent(Authenticatable $user, #[\SensitiveParameter] string $current): void
+    {
+        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
+        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
+        // can present — fail closed with the ordinary answer, not a 500.
+        try {
+            $valid = $this->users->validateCredentials($user, ['password' => $current]);
+        } catch (\Throwable) {
+            $valid = false;
+        }
+
+        if (! $valid) {
+            throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
+        }
+
+        // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
+        if (HashablePassword::verifiesOnlyInPart($user, $current)) {
+            throw HashablePassword::mustReset('current_password');
+        }
     }
 
     private function lockoutGuard(): ?string

@@ -7,6 +7,7 @@ namespace Lukk\Actions;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Support\HashablePassword;
@@ -21,6 +22,7 @@ use Lukk\Support\HashablePassword;
  */
 class ConfirmPassword
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -41,12 +43,28 @@ class ConfirmPassword
         }
 
         // Reserved before the credential check, for the same reason as the login path: reading
-        // `locked()` and counting afterwards lets N concurrent requests each get a verification.
+        // `locked()` and counting afterwards lets N concurrent requests each get a verification. The
+        // lock itself lands only once the check has failed (`CountsLockoutAttempts`).
         if ($this->lockouts !== null
-            && $this->lockouts->recordFailure('confirm', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
+            && $this->reserveAttempt($this->lockouts, 'confirm', $subject) > $this->lockouts->maxAttempts()) {
             $this->throwLocked('confirm', $subject, 'password');
         }
 
+        try {
+            $this->verify($user, $password);
+        } catch (ValidationException $e) {
+            $this->attemptFailed($this->lockouts, 'confirm', $subject);
+
+            throw $e;
+        }
+
+        // "Consecutive" is the whole point of the cap: any success ends the run — which also
+        // returns the slot reserved above, so a correct password never costs the user an attempt.
+        $this->lockouts?->release('confirm', $subject, $this->guard);
+    }
+
+    private function verify(Authenticatable $user, #[\SensitiveParameter] string $password): void
+    {
         // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
         // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
         // can present — fail closed with the ordinary answer, not a 500.
@@ -64,10 +82,6 @@ class ConfirmPassword
         if (HashablePassword::verifiesOnlyInPart($user, $password)) {
             throw HashablePassword::mustReset('password');
         }
-
-        // "Consecutive" is the whole point of the cap: any success ends the run — which also
-        // returns the slot reserved above, so a correct password never costs the user an attempt.
-        $this->lockouts?->release('confirm', $subject, $this->guard);
     }
 
     private function lockoutGuard(): ?string

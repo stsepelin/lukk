@@ -8,9 +8,11 @@ use Closure;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
 use Lukk\Support\RefreshTokenRecord;
+use RuntimeException;
 
 /**
  * Default storage: the refresh_tokens table via Eloquent. The model is resolved through
@@ -55,6 +57,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function familyIsPinned(string $familyId): bool
     {
+        // No family of lukk's: see `isFamilyId()`.
+        if (! self::isFamilyId($familyId)) {
+            return false;
+        }
+
         // Reads the ROW and checks the attribute, rather than naming `scope` in a WHERE clause.
         //
         // Two traps avoided. Naming it fails differently per driver: on sqlite a double-quoted
@@ -159,7 +166,16 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // it. Both halves of the defence collapsed together, because `familyIsPinned()` reads the
         // same column that was never written. These attributes are lukk's own; the consumer's
         // assignment policy has no business filtering them.
-        $this->query()->newModelInstance()->forceFill($attributes)->save();
+        //
+        // QUIETLY, for the same reason: this runs inside `RotateRefreshToken`'s transaction, under the
+        // parent row's lock, where no application code may run. `save()` fired the model's events, so an
+        // observer on a `useRefreshTokenModel` subclass ran there — serialising the family's refreshes
+        // behind it and, on PostgreSQL, turning a swallowed failing query into a COMMIT that silently
+        // rolled back. And a `creating` listener returning false cancelled the write outright, so rotation
+        // handed back a refresh token that was never stored. Audit sessions from lukk's events instead.
+        if (! $this->query()->newModelInstance()->forceFill($attributes)->saveQuietly()) {
+            throw new RuntimeException('lukk could not store a refresh token: the refresh-token model\'s save() reported that nothing was written.');
+        }
     }
 
     public function markRotated(string $id): void
@@ -183,6 +199,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function revokeFamily(string $familyId): void
     {
+        // Nothing to revoke in this table: see `isFamilyId()`. (The caller's denylist entry still lands.)
+        if (! self::isFamilyId($familyId)) {
+            return;
+        }
+
         $revoke = fn (): int => $this->scoped()
             ->where('family_id', $familyId)
             ->whereNull('revoked_at')
@@ -217,6 +238,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
      */
     private function revokeActiveFamilies(int|string $userId, ?string $exceptFamilyId, ?callable $before = null): array
     {
+        // An "except" naming no family of lukk's spares nothing — every lukk family is an "other" one.
+        if ($exceptFamilyId !== null && ! self::isFamilyId($exceptFamilyId)) {
+            $exceptFamilyId = null;
+        }
+
         $constrain = fn (Builder $query): Builder => $query
             ->where('user_id', $userId)
             ->when($exceptFamilyId !== null, fn (Builder $query) => $query->where('family_id', '!=', $exceptFamilyId))
@@ -295,6 +321,19 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         }
 
         return $query->where('expires_at', '<', now())->delete();
+    }
+
+    /**
+     * Whether a family id could name a row here: lukk mints every family as a UUID (`StartSession`).
+     *
+     * A co-issuer's `fid` need not be one — `42`, `"sess_42"` — and PostgreSQL types the parameter against
+     * the native `uuid` column, so comparing one was SQLSTATE 22P02: a 500 on change-password, logout,
+     * `DELETE /auth/sessions(/others)` and the pinned-ability gate on step-up confirmation, logout's
+     * after the denylist write. Such an id names no family in this table, which is how it is answered.
+     */
+    private static function isFamilyId(string $familyId): bool
+    {
+        return Str::isUuid($familyId);
     }
 
     /**

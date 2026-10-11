@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Auth;
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Http\Request;
@@ -52,6 +53,10 @@ class JwtGuard
             return null;
         }
 
+        if (! $this->couldBeAKey($claims->sub)) {
+            return null;
+        }
+
         $user = $this->users->retrieveById($claims->sub);
 
         if ($user === null) {
@@ -75,6 +80,26 @@ class JwtGuard
         $request->attributes->set('lukk.claims', $claims);
 
         return $user;
+    }
+
+    /**
+     * Whether `sub` could be the primary key of this guard's user model at all.
+     *
+     * lukk mints `sub` from a real key, but a co-issuer sharing the secret (the verify-only topology) can
+     * put anything there, and PostgreSQL types the lookup's parameter against the column: `"admin"` or a
+     * value past bigint against an integer key is SQLSTATE 22P02/22003 — a 500 on every authenticated
+     * route for that token, where a `sub` naming no user is a 401. Refused before the query instead.
+     * Only for an Eloquent provider whose model declares an integer key — the one shape whose column
+     * type lukk can know; anything else is the provider's to answer.
+     */
+    private function couldBeAKey(mixed $sub): bool
+    {
+        if (! $this->users instanceof EloquentUserProvider || ! in_array($this->users->createModel()->getKeyType(), ['int', 'integer'], true)) {
+            return true;
+        }
+
+        // An int already is one; a string must be a canonical integer within PHP's (= bigint's) range.
+        return is_int($sub) || (is_string($sub) && is_int(filter_var($sub, FILTER_VALIDATE_INT)));
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool

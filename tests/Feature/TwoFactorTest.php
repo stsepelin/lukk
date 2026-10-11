@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
@@ -625,6 +626,59 @@ it('refuses to redeem a challenge with a recovery code once the user is unverifi
     expect(DB::table('refresh_tokens')->count())->toBe(0);
 });
 
+it('refuses an unverified user BEFORE spending the second factor', function () {
+    // The 403 used to come after `ChallengeTwoFactor` had verified the factor — by then a single-use
+    // recovery code was burned on a sign-in the policy was always going to refuse. Checked first, the
+    // way a stale password is (`ConfirmPasswordUnchanged::holds()`), the code is still there to use
+    // once the address is verified again.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    $user->forceFill(['email_verified_at' => null])->save();
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertStatus(403);
+
+    expect($user->refresh()->recoveryCodesRemaining())->toBe(1);
+});
+
+it('still refuses an account that became unverified WHILE its factor was checked', function () {
+    // The early refusal above does not replace the gate after verification: an email change landing
+    // between the two must not get a session either.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    app()->bind(ChallengeTwoFactor::class, fn ($app) => new class($app) extends ChallengeTwoFactor
+    {
+        public function __construct($app)
+        {
+            parent::__construct($app['auth']->createUserProvider('users'), $app->make(TwoFactorProvider::class));
+        }
+
+        public function __invoke(int|string $userId, #[SensitiveParameter] ?string $code, #[SensitiveParameter] ?string $recoveryCode): Authenticatable
+        {
+            $user = parent::__invoke($userId, $code, $recoveryCode);
+            $user->forceFill(['email_verified_at' => null])->save();
+
+            return $user;
+        }
+    });
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('access_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
 it('lets a verified two-factor user through when block_unverified_login is on', function () {
     config(['lukk.email_verification.block_unverified_login' => true]);
     $user = User::factory()->create(['email_verified_at' => now()]);
@@ -919,4 +973,35 @@ it('regenerates recovery codes for a confirmed account whose TOTP secret cannot 
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
         ->assertOk()->assertJsonCount(8, 'recovery_codes');
+});
+
+// ---------------------------------------------------------------------------
+// NIST SP 800-63B-4 §4.2: account recovery is an event the subscriber is told about. A recovery code is
+// the way back in when the authenticator is lost — and the way in for whoever stole the printed list —
+// so its use must be observable for an app to notify the owner and prompt a fresh set.
+// ---------------------------------------------------------------------------
+
+it('announces a spent recovery code, with how many remain', function () {
+    Event::fake(['Lukk\Events\RecoveryCodeUsed']);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-CODE-1'), Hash::make('RECOVERY-CODE-2')])])->save();
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-2'])->assertOk();
+
+    Event::assertDispatchedTimes('Lukk\Events\RecoveryCodeUsed', 1);
+    Event::assertDispatched('Lukk\Events\RecoveryCodeUsed', fn ($e) => $e->user->is($user) && $e->remaining === 1);
+});
+
+it('announces nothing for a TOTP sign-in or a recovery code that does not match', function () {
+    Event::fake(['Lukk\Events\RecoveryCodeUsed']);
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'WRONG-CODE'])->assertStatus(422);
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])->assertOk();
+
+    Event::assertNotDispatched('Lukk\Events\RecoveryCodeUsed');
 });

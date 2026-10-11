@@ -58,8 +58,8 @@ class ResetPassword
         }, (int) ($this->config['password_reset']['timebox_micros'] ?? 1_000_000));
 
         if ($status !== Password::PASSWORD_RESET) {
-            // One generic message for every failure (bad/expired token, unknown user,
-            // throttled). The broker distinguishes INVALID_USER from INVALID_TOKEN, and
+            // One generic message for every failure (bad/expired token, unknown user).
+            // The broker distinguishes INVALID_USER from INVALID_TOKEN, and
             // surfacing that difference would let this endpoint enumerate accounts — the
             // very thing forgot-password's generic 200 is careful to avoid.
             throw ValidationException::withMessages(['email' => [__('passwords.token')]]);

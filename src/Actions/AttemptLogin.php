@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Timebox;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
@@ -29,6 +30,7 @@ use RuntimeException;
  */
 class AttemptLogin
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -87,7 +89,7 @@ class AttemptLogin
         $over = [];
 
         foreach ($subjects as $subject) {
-            if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
+            if ($this->reserveAttempt($this->lockouts, 'login', $subject) > $this->lockouts->maxAttempts()) {
                 $over[] = $subject;
             }
         }
@@ -144,6 +146,14 @@ class AttemptLogin
             } catch (ValidationException $e) {
                 // Only a failed credential feeds the decaying throttle; a 423 or 429 above never reaches here.
                 $this->limiter->increment($request);
+
+                // The reservation above only COUNTED the attempt; the lock lands now that it failed. The
+                // attempt that reaches the cap with the right password therefore neither locks nor
+                // announces anything (`CountsLockoutAttempts`). Inside the box like every other counter
+                // write, so a real account's second counter costs no visible time.
+                foreach ($subjects as $subject) {
+                    $this->attemptFailed($this->lockouts, 'login', $subject);
+                }
 
                 throw $e;
             }

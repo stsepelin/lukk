@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Models\RefreshToken;
+use Lukk\Support\SessionAuthentication;
+use Lukk\Tests\Fixtures\ObservedRefreshToken;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -86,5 +88,92 @@ it('writes the row without amr when the column probe fails, rather than failing 
     $amrOf = fn ($pair) => RefreshToken::query()->where('token_hash', issuer()->hash($pair->refreshToken))->value('amr');
     expect($armed)->toBeFalse()
         ->and($amrOf($first))->toBeNull()
-        ->and($amrOf($second))->toBe('["pwd"]');
+        ->and(SessionAuthentication::decode($amrOf($second))->methods)->toBe(['pwd']);
+});
+
+it('asks the database nothing about a family id that is no UUID', function () {
+    // A co-issuer's `fid` (`42`, `"sess_42"`) names no family lukk minted, and on PostgreSQL comparing it
+    // with the native `uuid` column is SQLSTATE 22P02 — a 500 (tests/Concurrency/CoIssuerTokenTest.php).
+    // sqlite compares anything, so the property pinned here is that no such comparison is ever issued.
+    $repo = app(RefreshTokenRepository::class);
+    $user = User::factory()->create();
+    $queries = [];
+    DB::listen(function ($query) use (&$queries) {
+        $queries[] = $query->sql;
+    });
+
+    $pinned = $repo->familyIsPinned('sess_42');
+    $repo->revokeFamily('42');
+
+    expect($pinned)->toBeFalse()->and($queries)->toBe([]);
+
+    $repo->revokeUserFamiliesExcept($user->getKey(), 'sess_42');
+
+    expect(implode(' ', $queries))->not->toContain('"family_id" !=');
+});
+
+it('still spares the caller\'s own family, and finds a pinned one, by its UUID', function () {
+    $repo = app(RefreshTokenRepository::class);
+    $user = User::factory()->create();
+    $mine = start()($user->getKey(), [], ['ci.deploy']);
+    $other = start()($user->getKey());
+    $family = fn ($pair) => notNull($repo->findByHash(issuer()->hash($pair->refreshToken)))->familyId;
+
+    expect($repo->familyIsPinned($family($mine)))->toBeTrue();
+
+    $repo->revokeUserFamiliesExcept($user->getKey(), $family($mine));
+
+    expect(notNull($repo->findByHash(issuer()->hash($mine->refreshToken)))->revokedAt)->toBeNull()
+        ->and(notNull($repo->findByHash(issuer()->hash($other->refreshToken)))->revokedAt)->not->toBeNull();
+
+    $repo->revokeFamily($family($mine));
+    expect(notNull($repo->findByHash(issuer()->hash($mine->refreshToken)))->revokedAt)->not->toBeNull();
+});
+
+it('runs no model event while it writes a refresh token, so no application code runs under the rotation lock', function () {
+    // `persist()` runs inside `RotateRefreshToken`'s transaction, under the parent row's `FOR UPDATE`. A
+    // `save()` there fired the model's events, so an observer on a `useRefreshTokenModel` subclass ran under
+    // the lock — the hazards CLAUDE.md lists for every consumer callback: a slow one serialises the family's
+    // refreshes, and on PostgreSQL a swallowed failing query turns COMMIT into ROLLBACK (pinned in
+    // tests/Concurrency/RefreshRevokeRaceTest.php).
+    $seen = [];
+    ObservedRefreshToken::$onEvent = function (string $event) use (&$seen) {
+        $seen[] = $event;
+    };
+    Lukk\Lukk::useRefreshTokenModel(ObservedRefreshToken::class);
+
+    rotate()(start()(User::factory()->create()->getKey())->refreshToken);
+
+    ObservedRefreshToken::$onEvent = null;
+    expect($seen)->toBe([]);
+});
+
+it('writes the row even where a listener would have cancelled it', function () {
+    // A `creating` listener returning false made `save()` return false and write NOTHING — silently, so
+    // rotation handed back a pair whose refresh token was never stored, and the client was logged out on
+    // its next refresh. lukk's own rows are not the application's to veto.
+    ObservedRefreshToken::$onEvent = fn (string $event) => $event === 'creating' ? false : null;
+    Lukk\Lukk::useRefreshTokenModel(ObservedRefreshToken::class);
+
+    $rotated = rotate()(start()(User::factory()->create()->getKey())->refreshToken);
+
+    ObservedRefreshToken::$onEvent = null;
+    expect(app(RefreshTokenRepository::class)->findByHash(issuer()->hash($rotated->refreshToken)))->not->toBeNull();
+});
+
+it('refuses to report a write that did not happen', function () {
+    // The model's `save()` is the consumer's to override; one answering false wrote nothing, and the
+    // rotation that called it must fail rather than hand out a token with no row behind it.
+    Lukk\Lukk::useRefreshTokenModel(get_class(new class extends RefreshToken
+    {
+        protected $table = 'refresh_tokens';
+
+        public function saveQuietly(array $options = [])
+        {
+            return false;
+        }
+    }));
+
+    expect(fn () => start()(User::factory()->create()->getKey()))
+        ->toThrow(RuntimeException::class, 'lukk could not store a refresh token');
 });

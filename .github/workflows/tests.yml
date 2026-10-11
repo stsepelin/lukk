@@ -105,8 +105,9 @@ jobs:
         with:
           php-version: '8.4'
           # pgsql/mysqli are needed for the ASYNC statement: firing the concurrent revoke without
-          # blocking is the only way to reproduce the interleaving from one process.
-          extensions: mbstring, sqlite3, pdo_sqlite, pdo_pgsql, pgsql, pdo_mysql, mysqli
+          # blocking is the only way to reproduce the interleaving from one process. pcntl/posix fork
+          # real side-by-side requests where the code under test is PHP, not one SQL statement.
+          extensions: mbstring, sqlite3, pdo_sqlite, pdo_pgsql, pgsql, pdo_mysql, mysqli, pcntl, posix
           coverage: none
 
       - name: Install dependencies

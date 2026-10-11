@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -223,3 +224,45 @@ it('states a lock\'s auto-release wait rounded UP to whole minutes', function (i
     'exactly a minute' => [60, 'Wait 60 s (1 min).'],
     'one second over' => [61, 'Wait 61 s (2 min).'],
 ]);
+
+it('counts a guess BEFORE checking it, so concurrent guesses cannot outrun the budget', function () {
+    // RFC 6238 §5.2 / NIST SP 800-63B-4 §3.2.2: the verifier limits failed attempts. Read-then-hit-on-
+    // failure is check-then-act — N requests arriving together all read "under budget" before any of
+    // them counts, and each gets a guess. Modelled deterministically: every verification starts the next
+    // "concurrent" request while it is still in flight, so all of them sit between the read and the count.
+    [$user] = v2faUser();
+    $challenge = v2faChallenge($user);
+    $verified = 0;
+
+    $reentrant = new class(app('auth')->createUserProvider('users'), app(TwoFactorProvider::class), $verified) extends ChallengeTwoFactor
+    {
+        public ?Closure $next = null;
+
+        public function __construct($users, $totp, private int &$verified)
+        {
+            parent::__construct($users, $totp);
+        }
+
+        public function __invoke(int|string $userId, #[SensitiveParameter] ?string $code, #[SensitiveParameter] ?string $recoveryCode): Authenticatable
+        {
+            $this->verified++;
+
+            if ($this->verified < 6) {
+                try {
+                    ($this->next)();
+                } catch (ValidationException) {
+                    // That request's own answer; this one carries on.
+                }
+            }
+
+            return parent::__invoke($userId, $code, $recoveryCode);
+        }
+    };
+
+    $action = new VerifyTwoFactorChallenge(app(ChallengeToken::class), $reentrant, app(RateLimiter::class), 2, 60, null, 'api');
+    $reentrant->next = fn () => $action($challenge, '000000', null);
+
+    v2faRefusal(fn () => $action($challenge, '000000', null));
+
+    expect($verified)->toBe(2);
+});

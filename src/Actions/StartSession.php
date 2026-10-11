@@ -10,6 +10,7 @@ use Lukk\Contracts\TokenIssuer;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\LongestAccessTtl;
+use Lukk\Support\SessionAuthentication;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use Lukk\Support\UnclaimedSessions;
@@ -85,10 +86,12 @@ class StartSession
         }
 
         // `auth_time` (OpenID Connect Core §2): when this session was authenticated. Reserved like `amr`
-        // — a hook neither supplies nor survives it — and recomputed on rotation from the family's fixed
-        // expiry rather than stored, so it needs no column.
+        // — a hook neither supplies nor survives it — and stored with the family beside `amr`
+        // (`SessionAuthentication`), so rotation carries the real time. It used to be recomputed there as
+        // `expires_at − refresh_ttl`, which a lowered `refresh_ttl` moved forward.
         unset($claims['auth_time']);
         $claims['auth_time'] = now()->getTimestamp();
+        $session = new SessionAuthentication($claims['amr'] ?? null, $claims['auth_time']);
         $abilities = $granted ?? Lukk::abilitiesFor($userId, $context);
 
         // Unclaimed until first used (`claim_seconds`). Marked BEFORE the row exists: a cache failure then
@@ -107,9 +110,9 @@ class StartSession
             $expiresAt,
             $granted === null ? null : ($granted->toScope() ?? ''),
             // Persisted so ROTATION can carry it forward: `amr` records how this session was
-            // authenticated, and a refresh does not re-authenticate anything. Written only when the
-            // sign-in actually supplied one, so nothing lands on a path that has no answer.
-            $authenticationMethods,
+            // authenticated, and `auth_time` when, and a refresh repeats neither. The methods are written
+            // only when the sign-in actually supplied them, so nothing lands on a path that has no answer.
+            $session->encode(),
         );
 
         // A pinned grant that did not reach storage is the dangerous case, not a harmless one: the

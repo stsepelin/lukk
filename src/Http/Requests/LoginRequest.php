@@ -6,6 +6,7 @@ namespace Lukk\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 use Lukk\Lukk;
+use Lukk\Support\Identifier;
 
 /**
  * Password login input. Type-only (`sometimes`, not `required`) so a custom
@@ -36,6 +37,10 @@ class LoginRequest extends FormRequest
                 // bytes, and PostgreSQL refuses an invalid sequence in a query parameter (SQLSTATE
                 // 22021) — so an `\xFF` in the identifier was a 500 on the lookup instead of a 422.
                 'regex:/^/u',
+                // No character the database's equality and the throttle's fold disagree on — a NUL that
+                // pdo_pgsql truncates at, an ignorable that MySQL's collation skips. Each such spelling
+                // resolved to the victim while keying a fresh throttle bucket. See `Identifier`.
+                Identifier::rule(),
             ],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1);
             // the length check is identifier-independent, so it leaks no account existence.

@@ -15,7 +15,7 @@ use Lukk\Contracts\TokenVerifier;
  * guard authenticated with, so `sub` and `fid` are structurally consistent. (Logout does not use
  * it: it may also be named by a refresh token, and that policy lives in `Actions\EndSession`.)
  *
- * Null when the token carries no `fid` — a co-issuer sharing the secret, in the verify-only
+ * Null when the token carries no `fid`, or an empty one — a co-issuer sharing the secret, in the verify-only
  * topology. Callers must decide what that means for them rather than assuming a family exists.
  */
 trait ResolvesCurrentFamily
@@ -24,7 +24,11 @@ trait ResolvesCurrentFamily
     {
         // No bearer at all under `Lukk::actingAs()`, which authenticates the guard directly.
         $claims = $verifier->verify((string) $request->bearerToken());
+        $familyId = $claims !== null && isset($claims->fid) ? (string) $claims->fid : '';
 
-        return $claims !== null && isset($claims->fid) ? (string) $claims->fid : null;
+        // An EMPTY `fid` names no session, as `VerifiedToken` and `ResolvesPresentingFamily` read it.
+        // `isset()` alone took `""` for one, and `DELETE /auth/sessions/others` then excepted the family
+        // `''` — which is none — so "log out my other devices" logged out every device.
+        return $familyId === '' ? null : $familyId;
     }
 }

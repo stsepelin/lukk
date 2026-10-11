@@ -11,7 +11,7 @@ use Illuminate\Contracts\Auth\CanResetPassword;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Support\Facades\Schema;
+use Lukk\Actions\Concerns\ReadsPasswordBroker;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
@@ -19,8 +19,6 @@ use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Events\AccountDeleted;
 use Lukk\Events\AccountDeleting;
 use Lukk\Lukk;
-
-use function Illuminate\Support\enum_value;
 
 /**
  * Erase an account: lukk's own artifacts, then the user itself (GDPR Art. 17).
@@ -54,6 +52,8 @@ use function Illuminate\Support\enum_value;
  */
 class DeleteAccount
 {
+    use ReadsPasswordBroker;
+
     public function __construct(
         private readonly RefreshTokenRepository $tokens,
         private readonly RevokeAllSessions $revokeAllSessions,
@@ -134,56 +134,6 @@ class DeleteAccount
         }));
 
         event(new AccountDeleted($userId, $identifier, $this->guard));
-    }
-
-    /**
-     * Deliberately NOT memoized.
-     *
-     * A static cache looked free — schema state, on a rare path — but it is answered once per
-     * PROCESS: a worker that started before a migration keeps saying "no such table" and silently
-     * skips erasing those rows, which is the one failure mode this method exists to prevent. It also
-     * leaks between tests in a shared process. Two cheap queries on an irreversible operation is not
-     * a cost worth that.
-     */
-    private function resetTableExists(): bool
-    {
-        // On the broker's OWN connection (`auth.passwords.*.connection`, which the framework's broker
-        // honours): checked on the default one, a table living elsewhere read as missing and the row —
-        // a plaintext email address — survived the erasure.
-        return Schema::connection($this->brokerConnection())
-            ->hasTable($this->passwordResetTable());
-    }
-
-    /**
-     * The table the configured broker actually writes to.
-     *
-     * Not hardcoded `password_reset_tokens`: a broker may name its own (`lukk.password_reset.broker`
-     * pointing at one with `'table' => 'lukk_password_resets'` is exactly the setup the sibling
-     * regression test uses), and guarding on the wrong name would skip a sweep that had work to do.
-     */
-    private function passwordResetTable(): string
-    {
-        // The cast only states the type: a table name from config is a string.
-        return (string) (config("auth.passwords.{$this->brokerName()}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
-    }
-
-    /**
-     * The broker's connection, as the framework reads it. An enum is a valid name in config; `(string)`
-     * on one threw before anything was erased, and only later 12.x releases unwrap one inside
-     * `DB::connection()` — so it is unwrapped here, with the framework's own helper, for both callers.
-     * Null (or '') is the default connection.
-     */
-    private function brokerConnection(): ?string
-    {
-        $connection = enum_value(config("auth.passwords.{$this->brokerName()}.connection"));
-
-        return is_string($connection) ? $connection : null;
-    }
-
-    private function brokerName(): string
-    {
-        // The cast only states the type: a broker name only reaches a config key, where null and '' read the same.
-        return $this->passwordBroker ?? (string) config('auth.defaults.passwords'); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**

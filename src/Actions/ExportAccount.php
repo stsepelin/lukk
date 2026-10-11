@@ -6,10 +6,12 @@ namespace Lukk\Actions;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Support\Carbon;
+use Lukk\Actions\Concerns\ReadsPasswordBroker;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Support\SessionAuthentication;
 
 /**
  * Gather the personal data lukk holds about a user (GDPR Art. 15 / Art. 20).
@@ -28,6 +30,8 @@ use Lukk\Contracts\RefreshTokenRepository;
  */
 class ExportAccount
 {
+    use ReadsPasswordBroker;
+
     public function __construct(
         private readonly RefreshTokenRepository $tokens,
         private readonly PasskeyRepository $passkeys,
@@ -36,6 +40,8 @@ class ExportAccount
         // always supplies both, and without them the export simply has no lockout section to fill.
         private readonly ?LockoutRepository $lockouts = null,
         private readonly ?string $guard = null,
+        // The broker erasure sweeps (`lukk.password_reset.broker`), so the export reads the same table.
+        private readonly ?string $passwordBroker = null,
     ) {}
 
     /** A unix timestamp as ISO-8601 — the shape `RefreshTokenRecord` stores its times in. */
@@ -91,13 +97,22 @@ class ExportAccount
             // tables where `users.id === admins.id` is the norm. One subject was handed another's
             // session history under Art. 15, which Art. 15(4) explicitly forbids. It also bypassed
             // the documented DB↔Redis swap seam, so a swapped install exported nothing at all.
-            'sessions' => array_map(fn ($record) => [
-                'session' => $record->familyId,
-                'created_at' => $this->fromTimestamp($record->createdAt),
-                'last_rotated_at' => $this->fromTimestamp($record->rotatedAt),
-                'revoked_at' => $this->fromTimestamp($record->revokedAt),
-                'expires_at' => $this->fromTimestamp($record->expiresAt),
-            ], $this->tokens->allForUser($userId)),
+            //
+            // How and when each session was signed in, too (RFC 8176 `amr`, OIDC `auth_time`): erasure
+            // deletes that record with the session, so access discloses it. Null where it is not known.
+            'sessions' => array_map(function ($record) {
+                $session = SessionAuthentication::decode($record->amr);
+
+                return [
+                    'session' => $record->familyId,
+                    'created_at' => $this->fromTimestamp($record->createdAt),
+                    'last_rotated_at' => $this->fromTimestamp($record->rotatedAt),
+                    'revoked_at' => $this->fromTimestamp($record->revokedAt),
+                    'expires_at' => $this->fromTimestamp($record->expiresAt),
+                    'amr' => $session->methods,
+                    'authenticated_at' => $this->fromTimestamp($session->authTime),
+                ];
+            }, $this->tokens->allForUser($userId)),
             // The FACT of each passkey, never the COSE public key: the key identifies the
             // authenticator, not the person, and publishing it helps nobody read their own data.
             // See `passkeySummary()` for what is carried, and why through an allowlist.
@@ -109,11 +124,18 @@ class ExportAccount
             // An install that never published the migration has no table, which the database store
             // answers itself, so a rebound store that is not that table is exported too.
             'passkeys' => array_map(fn (array $passkey) => $this->passkeySummary($passkey), $this->passkeys->summariesForUser($userId)),
+            // The FACTS erasure destroys with the user row — an enrolment begun and never confirmed, and how
+            // many recovery codes are left — never the secret or a code hash.
             'two_factor' => [
                 'enabled' => method_exists($user, 'hasEnabledTwoFactor') && $user->hasEnabledTwoFactor(),
                 'confirmed_at' => $this->iso($user->two_factor_confirmed_at ?? null),
+                'pending' => ($user->two_factor_secret ?? null) !== null && ($user->two_factor_confirmed_at ?? null) === null,
+                'recovery_codes_remaining' => method_exists($user, 'recoveryCodesRemaining') ? $user->recoveryCodesRemaining() : null,
             ],
             'lockouts' => $this->lockoutsFor($user),
+            // A pending reset row holds the address in plain text until the broker prunes it, and erasure
+            // deletes it — so its existence is disclosed: when it was requested, never the token.
+            'password_reset' => ($requested = $this->pendingResetRequestedAt($user)) === null ? null : ['requested_at' => $requested],
         ];
     }
 

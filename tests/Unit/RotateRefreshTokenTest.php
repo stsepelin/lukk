@@ -489,9 +489,9 @@ it('says what to do when the pre-read disagrees with the locked read', function 
     );
 });
 
-it('dates auth_time from the configured refresh_ttl, and from its default when a cached config lacks it', function (?int $refreshTtl) {
-    // The family's expiry is sign-in + refresh_ttl, so the rotation subtracts the SAME value StartSession
-    // added: the configured one, or the default both sides fall back to.
+it('dates auth_time from the stored sign-in, whatever refresh_ttl is configured or missing', function (?int $refreshTtl) {
+    // Once derived as `expires_at − refresh_ttl`; now stored with the family (`SessionAuthentication`), so
+    // neither the configured value nor a cached config lacking it moves the sign-in.
     $lukk = config('lukk');
     if ($refreshTtl === null) {
         unset($lukk['refresh_ttl']);

@@ -15,6 +15,7 @@ use Lukk\Support\Abilities;
 use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\RefreshTokenRecord;
 use Lukk\Support\RotationOutcome;
+use Lukk\Support\SessionAuthentication;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
@@ -149,8 +150,8 @@ class RotateRefreshToken
                 $secretHash,
                 $record->expiresAt,
                 $record->scope,
-                // Carried forward with the grant, and for the same reason: `amr` describes how the
-                // SESSION was authenticated, which a refresh does not repeat. Losing it made the
+                // Carried forward with the grant, and for the same reason: it records how and when the
+                // SESSION was authenticated (`SessionAuthentication`), which a refresh does not repeat. Losing it made the
                 // claim vanish from the first refreshed token, so a route gated on it stopped
                 // working within one access_ttl — fail-closed if the gate was written tightly,
                 // fail-OPEN if written as `!isset($amr) || in_array(...)`.
@@ -273,23 +274,25 @@ class RotateRefreshToken
         $claims = Lukk::customClaimsFor($record->userId);
         unset($claims['amr'], $claims['auth_time']);
 
-        // When the SESSION was authenticated, which a refresh does not repeat: the family's expiry is fixed
-        // at sign-in (`refresh_ttl` from then) and inherited by every successor, so it dates the sign-in
-        // without a column. A `refresh_ttl` changed since shifts it by the difference.
-        $refreshTtl = $this->config['refresh_ttl'] ?? 2592000;
-        // The cast changes nothing for a numeric value, and StartSession reads the same key with the same
-        // cast, so a non-numeric one gave the family a zero lifetime and never reaches a live rotation.
-        $claims['auth_time'] = $record->expiresAt - (int) $refreshTtl; // @pest-mutate-ignore: RemoveIntegerCast
+        // How and WHEN the SESSION was authenticated, which a refresh repeats neither: the family's own
+        // record (`SessionAuthentication`). Re-validated on the way OUT, not trusted because it was
+        // validated on the way in — the column is written through `RefreshTokenRepository`, a documented
+        // swap seam, and `RefreshTokenRecord::$amr` is a plain string, so a replacement repository, or a
+        // row edited by hand, can put anything there. RFC 8176 §1 / RFC 7519 §4.1 make `amr` an array of
+        // StringOrURI.
+        //
+        // The time is the STORED sign-in time, never derived. It used to be `expires_at − refresh_ttl`, and
+        // lowering `refresh_ttl` moved an old multi-factor sign-in forward into the step-up allowance. A
+        // family written before the time was stored has none: the claim is omitted, which the allowance
+        // reads as no recent sign-in.
+        $session = SessionAuthentication::decode($record->amr);
 
-        // Re-validated on the way OUT, not trusted because it was validated on the way in. The
-        // column is written through `RefreshTokenRepository`, a documented swap seam, and
-        // `RefreshTokenRecord::$amr` is a plain string — so a replacement repository, or a row
-        // edited by hand, can put anything here. `is_array()` alone let a decoded JSON OBJECT
-        // through, and RFC 8176 §1 / RFC 7519 §4.1 make `amr` an array of StringOrURI.
-        $amr = StartSession::decodeAmr($record->amr);
+        if ($session->authTime !== null) {
+            $claims['auth_time'] = $session->authTime;
+        }
 
-        if ($amr !== null) {
-            $claims['amr'] = $amr;
+        if ($session->methods !== null) {
+            $claims['amr'] = $session->methods;
         }
 
         return [$abilities, $claims];

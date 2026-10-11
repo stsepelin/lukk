@@ -106,9 +106,9 @@ class EnsurePasswordStepUpMeetsAccountLevel
         $config = Lukk::guardConfig();
         $age = now()->getTimestamp() - $signedIn;
 
-        // A sign-in in the future is not a recent one. `auth_time` is derived as `expires_at - refresh_ttl`,
-        // so LOWERING refresh_ttl shifts every older session forward, and with no lower bound a session
-        // signed in weeks ago passed as brand new. Clock skew between servers gets the leeway.
+        // A sign-in in the future is not a recent one. lukk stores the real sign-in time with the family
+        // (`SessionAuthentication`), but a co-issuer's token can carry any `auth_time`, and with no lower
+        // bound a far-future one passed as brand new. Clock skew between servers gets the leeway.
         // Cast to float, too: a garbled override must fail closed (it reads as 0), not compare as a string,
         // and a "never" past the int range must not warn the way an int cast did.
         return $age >= -Lukk::leeway($config)

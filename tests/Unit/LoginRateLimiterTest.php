@@ -120,3 +120,53 @@ it('counts an identifier that names no account once per attempt, not twice', fun
     // For a non-account the account subject IS the fold, so the two must not both be counted.
     expect(LoginRateLimiter::lockoutSubjects(null, 'Ghost@Y.com'))->toBe([LoginRateLimiter::lockoutSubject(null, 'ghost@y.com')]);
 });
+
+it('folds every spelling the database resolves to one account onto one key', function (string $respelled) {
+    // The fold must never be FINER than the database's equality, or each spelling is another bucket of
+    // guesses. MySQL's `utf8mb4_unicode_ci` gives default-ignorable and combining code points no primary
+    // weight and pads trailing whitespace; `Str::transliterate` turned U+200B and U+3000 into spaces and
+    // U+034F into `?`, so they keyed apart. Stripped and trimmed before the fold, they key together.
+    expect(LoginRateLimiter::normalize($respelled))->toBe('victim@example.com');
+})->with([
+    'zero-width space' => ["victim\u{200B}@example.com"],
+    'combining grapheme joiner' => ["victim\u{034F}@example.com"],
+    'variation selector' => ["victim\u{FE0F}@example.com"],
+    'enclosing mark' => ["victim\u{20DD}@example.com"],
+    'combining accent' => ["vi\u{0301}ctim@example.com"],
+    'trailing ideographic space' => ["victim@example.com\u{3000}"],
+    'leading no-break space' => ["\u{00A0}victim@example.com"],
+    'C1 control' => ["victim@example.com\u{0085}"],
+    'ASCII whitespace and case, as before' => ["  Victim@Example.com\t"],
+]);
+
+it('folds invalid UTF-8 as it always did rather than to nothing', function () {
+    // The Unicode-aware passes answer null on invalid UTF-8; an identifier that slipped past validation
+    // (a custom request) must still get a key of its own, not the shared empty one.
+    expect(LoginRateLimiter::normalize("ad\xFFa@example.com"))->not->toBe('')
+        // …and still trimmed, as every identifier was before the Unicode passes.
+        ->and(LoginRateLimiter::normalize("  ad\xFFa@example.com\t"))->toBe(LoginRateLimiter::normalize("ad\xFFa@example.com"));
+});
+
+it('keys a blank identifier on the caller alone, and never on the shared empty account', function () {
+    $this->freezeSecond();
+    $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 1, 'email', 'api');
+    $blank = loginRequest('   ');
+
+    $limiter->increment($blank);
+    $this->travel(30)->seconds();
+
+    // The bucket every blank-identifier caller used to share, filled — and with the LATER window.
+    app(RateLimiter::class)->hit('acct|api|'.hash('sha256', ''), 60);
+    app(RateLimiter::class)->hit('acct|api|'.hash('sha256', ''), 60);
+
+    expect($limiter->key($blank))->toBe('api|'.Lukk\Lukk::rateLimitKey($blank))
+        ->and($limiter->tooManyAttempts($blank))->toBeFalse()
+        ->and($limiter->availableIn($blank))->toBe(30)
+        ->and(app(RateLimiter::class)->attempts('acct|api|'.hash('sha256', '')))->toBe(2);
+});
+
+it('reports no wait for a blank identifier that has failed nothing', function () {
+    $limiter = new LoginRateLimiter(app(RateLimiter::class), 5, 60, 1, 'email', 'api');
+
+    expect($limiter->availableIn(loginRequest('')))->toBe(0);
+});

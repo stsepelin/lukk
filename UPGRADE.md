@@ -22,6 +22,70 @@ but the default is safe.
 
 ## Upgrading to 0.7.0 from 0.6.x (unreleased)
 
+### The default guard must use `lukk.user_provider`
+
+**High impact — only if `auth.guards.<default>.provider` (or, naming none, `auth.defaults.provider`)
+differs from `lukk.user_provider`.** Boot now throws, naming both. Sign-in checked passwords against
+`lukk.user_provider` while the guard resolved tokens through the other provider, so a password from one
+table signed in as the row with the same id in the other. Point both at the same provider. Nothing
+changes for the default configuration (`users` on both sides), a guard naming no provider with
+`auth.defaults.provider` unset, or a default guard that is not `lukk-jwt`.
+
+### Identifiers with invisible characters are refused
+
+**Low impact — check if your identifiers can contain them.** Sign-in, registration, forgot- and
+reset-password answer 422 for an identifier carrying a control character (NUL, C0, C1), a format
+character (zero-width space or joiner, soft hyphen, bidi controls), an enclosing mark, U+034F, or
+whitespace other than the ASCII space; registration's `name` refuses NUL. An account whose STORED
+identifier contains one can no longer type it to sign in — find them before upgrading (e.g.
+`WHERE email ~ '[[:cntrl:]]'` on PostgreSQL, or scan in PHP with `Lukk\Support\Identifier::INVISIBLE`).
+Combining marks and accented letters are accepted. The login-throttle fold also changed for identifiers
+containing such characters (or combining marks), so their buckets restart once; a held `idn:` lockout
+row for such an identifier is no longer reached by it.
+
+### `auth_time` is stored with the session
+
+**Low impact.** The sign-in time now travels in the `refresh_tokens.amr` column, beside `amr`
+(`{"amr":[…],"auth_time":…}`), instead of being re-derived on rotation as `expires_at − refresh_ttl` —
+lowering `refresh_ttl` made old multi-factor sign-ins look recent. A session stored before this carries
+`amr` but no `auth_time` after its next refresh, so a password step-up that leaned on a recent
+multi-factor sign-in asks for a fresh one. **If you implement `RefreshTokenRepository`**, treat the
+`$amr` argument of `persist()` as opaque: store it and hand it back on `RefreshTokenRecord::$amr`
+unchanged (the signature is unchanged). One that drops it keeps working, without `amr` or `auth_time`
+after the first refresh.
+
+### Locking happens after the failed check (`ReservesLockoutAttempts`)
+
+**Low impact — only if you implement `LockoutRepository` yourself, or listen for lockout events.** The
+actions still reserve an attempt before verifying it, but the lock and `AccountLocked` now land only when
+the credential was wrong, so the attempt that reaches the cap with the right credential no longer fires
+`AccountLocked` and `AccountReleased`. Implement the optional `Lukk\Contracts\ReservesLockoutAttempts`
+(`reserve()`, `lockIfSpent()`) to get this; a repository implementing only `LockoutRepository` keeps
+locking at the reservation through `recordFailure()`.
+
+### Refresh-token model events no longer fire for lukk's writes
+
+**Low impact — only if you observe a `useRefreshTokenModel` subclass.** `persist()` now saves quietly:
+it runs under the rotation's row lock, where an observer serialised refreshes and, on PostgreSQL, could
+silently roll back the rotation. `creating`/`created`/`saving`/`saved` no longer fire for refresh tokens
+lukk stores, and a listener can no longer cancel one. Audit sessions from lukk's events instead
+(`RefreshTokenReused`, `SessionUnclaimed`, and your own login/logout listeners).
+
+### Smaller changes you might notice
+
+**Low impact.**
+
+- `Lukk\Events\RecoveryCodeUsed` fires when a recovery code is spent; listen for it to notify the user
+  and prompt new codes (NIST SP 800-63B-4 §4.2).
+- The account export gains `password_reset`, `two_factor.pending`, `two_factor.recovery_codes_remaining`
+  and per-session `amr` / `authenticated_at`.
+- With `Lukk::authenticateUsing()` reading a field other than `lukk.username`, the IP-independent login
+  bucket is skipped (it was one bucket for everybody). Point `lukk.username` at your field to keep it.
+- A `lukk-jwt` guard over an integer-keyed Eloquent model answers 401, without a query, for a `sub` that is
+  not an integer — a co-issuer minting non-numeric subjects against such a guard was a 500 on PostgreSQL.
+- `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;
+  `DELETE /auth/sessions` now also denylists the presenting token when it names no family of lukk's.
+
 ### `amr` now uses only RFC 8176 registered values
 
 **High impact if anything reads `amr` — a gateway, a resource server, or your own `lukk.ability`-style
