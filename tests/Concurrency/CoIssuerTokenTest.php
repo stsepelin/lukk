@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,6 +15,7 @@ use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Tests\ConcurrencyTestCase;
+use Lukk\Tests\Fixtures\EagerThingsUser;
 use Lukk\Tests\Fixtures\IntKeyUser;
 use Lukk\Tests\Fixtures\LegacyIdUser;
 use Lukk\Tests\Fixtures\SnowflakeUser;
@@ -111,9 +113,9 @@ dataset('integer columns lukk cannot see', [
     ],
 ]);
 
-function coIssuerGuard(string $model, string $sub): ?Authenticatable
+function coIssuerGuard(string|EloquentUserProvider $model, string $sub): ?Authenticatable
 {
-    $guard = new JwtGuard(app(TokenVerifier::class), new EloquentUserProvider(app('hash'), $model));
+    $guard = new JwtGuard(app(TokenVerifier::class), is_string($model) ? new EloquentUserProvider(app('hash'), $model) : $model);
 
     return $guard(Request::create('/', server: ['HTTP_AUTHORIZATION' => 'Bearer '.coIssuedAccess(['sub' => $sub])]));
 }
@@ -156,6 +158,53 @@ it('still resolves a real user of each such model', function (Closure $table, st
 
     expect(coIssuerGuard($model, (string) $user->getAuthIdentifier())?->getAuthIdentifier())->toEqual($user->getAuthIdentifier());
 })->with('integer columns lukk cannot see');
+
+it('reports a refusal in another statement of the lookup — an eager-loaded relation — instead of hiding it', function () {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('MySQL coerces the value instead of refusing it, so no statement fails');
+    }
+
+    // Only the lookup OF THE SUBJECT names no user when its type is refused. A mistyped `$with` relation
+    // fails every lookup of a real user with the same 22P02: read as "no user", that was a 401 for
+    // everybody and an outage nobody was told about.
+    Schema::create('things', function (Blueprint $t) {
+        $t->id();
+        $t->uuid('owner_uuid');
+    });
+    $user = EagerThingsUser::query()->create(['email' => 'eager@example.com', 'password' => 'x']);
+
+    expect(fn () => coIssuerGuard(EagerThingsUser::class, (string) $user->getKey()))
+        ->toThrow(QueryException::class, '22P02');
+});
+
+it('does not swallow a refusal on a connection its savepoint did not cover', function () {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('MySQL coerces the value instead of refusing it, so no statement fails');
+    }
+
+    // A provider may look up on a connection other than its model's. The savepoint is taken on the
+    // MODEL's connection; a refusal on the other one, inside that one's own transaction, leaves it aborted
+    // — so it is reported, never answered as no user.
+    config(['database.connections.other' => ConcurrencyTestCase::config(ConcurrencyTestCase::engine())]);
+    Schema::create('snowflake_users', fn (Blueprint $t) => $t->unsignedBigInteger('id')->primary());
+    $provider = new class(app('hash'), SnowflakeUser::class) extends EloquentUserProvider
+    {
+        public function retrieveById($identifier)
+        {
+            return SnowflakeUser::on('other')->where('id', $identifier)->first();
+        }
+    };
+
+    DB::transaction(function () use ($provider) {
+        DB::connection('other')->beginTransaction();
+
+        try {
+            expect(fn () => coIssuerGuard($provider, 'admin'))->toThrow(QueryException::class);
+        } finally {
+            DB::connection('other')->rollBack();
+        }
+    });
+});
 
 function coIssuerFamilyIsLive(string $refreshToken): bool
 {

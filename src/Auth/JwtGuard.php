@@ -7,6 +7,7 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -127,20 +128,21 @@ class JwtGuard
      *
      * On PostgreSQL a failed statement aborts the transaction around it, and its COMMIT then silently
      * rolls back. Inside an application's transaction the Eloquent lookup therefore runs in a nested
-     * one — a savepoint — so the refusal undoes only itself. A provider that is not Eloquent names no
-     * connection to take one on: its refusal inside a transaction is rethrown, never swallowed.
+     * one — a savepoint on the model's connection — so the refusal undoes only itself.
      */
     private function retrieve(mixed $sub): ?Authenticatable
     {
-        $connection = $this->users instanceof EloquentUserProvider ? $this->users->createModel()->getConnection() : null;
-        $isolated = $connection !== null && $connection->transactionLevel() > 0;
+        $model = $this->users instanceof EloquentUserProvider ? $this->users->createModel() : null;
+        $connection = $model?->getConnection();
+        $savepoint = $connection !== null && $connection->transactionLevel() > 0 ? $connection : null;
+        $savepointed = $savepoint?->getName();
 
         try {
-            return $isolated
-                ? $connection->transaction(fn () => $this->users->retrieveById($sub))
+            return $savepoint !== null
+                ? $savepoint->transaction(fn () => $this->users->retrieveById($sub))
                 : $this->users->retrieveById($sub);
         } catch (QueryException $e) {
-            if (! self::leavesNothingAborted($e, $isolated)) {
+            if (! self::refusedTheSubject($e, $sub, $model, $savepointed)) {
                 throw $e;
             }
 
@@ -149,14 +151,43 @@ class JwtGuard
     }
 
     /**
-     * Whether a failed lookup is a refused subject that can be answered as no user: 22P02/22003, raised in
-     * the lookup's own savepoint or outside any transaction. (A method of its own because PHPStan sees only
-     * the savepointed branch as able to throw; a provider's `retrieveById()` can throw just the same.)
+     * Whether a failed lookup is the subject's own type refusal, and swallowing it leaves nothing aborted.
+     *
+     * - SQLSTATE 22P02 or 22003.
+     * - The failing statement is the lookup OF THE SUBJECT: the subject is among its bindings and, for an
+     *   Eloquent provider, it reads the model's table. A refusal in another statement — an eager-loaded
+     *   `$with` relation with a mistyped key, a global scope, a `retrieved` listener — fails for every user,
+     *   and read as "no user" it was a 401 for everybody: an outage nobody was told about. Rethrown.
+     * - It ran in the lookup's own savepoint, or on a connection holding no transaction. A provider that
+     *   looks up on a connection other than its model's is not covered by that savepoint; inside that
+     *   connection's own transaction its refusal is rethrown, never left behind a 401.
+     *
+     * (A method of its own also because PHPStan sees only the savepointed branch as able to throw.)
      */
-    private static function leavesNothingAborted(QueryException $e, bool $isolated): bool
+    private static function refusedTheSubject(QueryException $e, mixed $sub, ?Model $model, ?string $savepointed): bool
     {
-        return in_array($e->errorInfo[0] ?? null, ['22P02', '22003'], true)
-            && ($isolated || DB::connection($e->getConnectionName())->transactionLevel() === 0);
+        if (! in_array($e->errorInfo[0] ?? null, ['22P02', '22003'], true) || ! is_scalar($sub)) {
+            return false;
+        }
+
+        $bound = array_map(fn (mixed $value): ?string => is_scalar($value) ? (string) $value : null, $e->getBindings());
+
+        if (! in_array((string) $sub, $bound, true)) {
+            return false;
+        }
+
+        // `from users`, `from "users"`, `from `users``, `from "public"."users"` — the table itself (with the
+        // connection's prefix), not one whose name merely contains it.
+        if ($model !== null) {
+            $table = preg_quote($model->getConnection()->getTablePrefix().$model->getTable(), '/');
+
+            if (preg_match('/\bfrom\s+(?:[`"\[]?\w+[`"\]]?\.)?[`"\[]?'.$table.'[`"\]]?(?=\s|$)/i', $e->getSql()) !== 1) {
+                return false;
+            }
+        }
+
+        return $e->getConnectionName() === $savepointed
+            || DB::connection($e->getConnectionName())->transactionLevel() === 0;
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool
