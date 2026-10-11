@@ -3,12 +3,16 @@
 declare(strict_types=1);
 
 use Firebase\JWT\JWT;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Lukk\Events\PasswordChanged;
 use Lukk\Models\Lockout;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\PasswdColumnUser;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('change-password');
@@ -352,4 +356,19 @@ it('changes the password and signs out other sessions for a user authenticated w
     $this->postJson('/auth/password', [
         'current_password' => 'password', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1',
     ])->assertOk();
+});
+
+it('writes the new password to the column the model names', function () {
+    Schema::table('users', fn (Blueprint $t) => $t->string('passwd')->nullable());
+    $user = PasswdColumnUser::query()->create(['name' => 'p', 'email' => 'cp@y.com', 'password' => 'unused']);
+    DB::table('users')->where('id', $user->id)->update(['passwd' => Hash::make('old-password')]);
+    config(['auth.providers.users.model' => PasswdColumnUser::class]);
+    app('auth')->forgetGuards();
+    $access = start()($user->id)->accessToken;
+
+    $this->withToken($access)->postJson('/auth/password', [
+        'current_password' => 'old-password', 'password' => 'brand-new-pass-1', 'password_confirmation' => 'brand-new-pass-1',
+    ])->assertSuccessful();
+
+    expect(Hash::check('brand-new-pass-1', (string) DB::table('users')->where('id', $user->id)->value('passwd')))->toBeTrue();
 });

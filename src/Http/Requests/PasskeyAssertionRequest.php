@@ -24,13 +24,17 @@ class PasskeyAssertionRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'ceremony_id' => ['required', 'string'],
+            // lukk issues UUIDs (`PasskeyChallengeStore::putForCeremony`). Anything else is not found,
+            // and must not reach the cache: an unbounded key overflowed the database store's column.
+            'ceremony_id' => ['required', 'string', 'uuid'],
             'credential' => ['required', 'array'],
             // One rung deeper than `array`: `FinishPasskeyLogin` casts this to string, and an array or
             // object there raised an ErrorException — a 500 on an UNAUTHENTICATED route, against this
             // package's own rule that malformed input renders 422. WebAuthn L3 §5.1 types `id` as a
             // DOMString, so nothing legitimate is lost.
-            'credential.id' => ['required', 'string'],
+            // Valid UTF-8, too: the id is looked up in SQL, and PostgreSQL refuses an invalid sequence
+            // in a query parameter (SQLSTATE 22021) — `credential[id]=%FF` in a form body was a 500.
+            'credential.id' => ['required', 'string', 'regex:/^/u'],
         ];
     }
 }

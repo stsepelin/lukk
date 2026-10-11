@@ -2,7 +2,10 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\OtherConnectionRefreshToken;
 
 it('prunes expired tokens but keeps active and revoked-but-unexpired ones', function () {
     // One soon-to-expire token (pruned)...
@@ -33,5 +36,34 @@ it('reports each sweep it ran', function () {
     command('lukk:prune')
         ->expectsOutputToContain('Pruned 0 lockout counter(s).')
         ->expectsOutputToContain('Pruned 0 orphaned passkey(s).')
+        ->assertSuccessful();
+});
+
+it('skips the refresh-token sweep where the table was never published, as on a verify-only service', function () {
+    // The prune is scheduled by default and runs on every install, including a resource server that only
+    // verifies tokens and never published `refresh_tokens`. Unguarded, it threw there every day — the
+    // passkey and lockout sweeps beside it already check for their tables.
+    Schema::drop('refresh_tokens');
+
+    command('lukk:prune')
+        ->expectsOutputToContain('Pruned 0 refresh token(s).')
+        ->assertSuccessful();
+});
+
+it('looks for the refresh-token table on the model\'s own connection', function () {
+    // A `useRefreshTokenModel` subclass on another connection: the default connection having no such
+    // table says nothing about it, and the sweep must still run there.
+    config(['database.connections.lukk_other' => ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '', 'foreign_key_constraints' => false]]);
+    DB::purge('lukk_other');
+    DB::connection('lukk_other')->getSchemaBuilder()->create('refresh_tokens', function ($table) {
+        $table->string('id')->primary();
+        $table->timestamp('expires_at');
+    });
+    DB::connection('lukk_other')->table('refresh_tokens')->insert(['id' => 'r1', 'expires_at' => now()->subDay()]);
+    Schema::drop('refresh_tokens');
+    Lukk\Lukk::useRefreshTokenModel(OtherConnectionRefreshToken::class);
+
+    command('lukk:prune')
+        ->expectsOutputToContain('Pruned 1 refresh token(s).')
         ->assertSuccessful();
 });

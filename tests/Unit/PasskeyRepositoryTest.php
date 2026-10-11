@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Models\Passkey;
+use Lukk\Passkeys\DatabasePasskeyRepository;
 use Lukk\Support\NewPasskey;
 use Lukk\Tests\Fixtures\Admin;
 
@@ -46,14 +48,16 @@ it('lists a user’s credential ids and records', function () {
         ->and(passkeys()->summariesForUser(7)[0])->toHaveKeys(['credential_id', 'name', 'last_used_at']);
 });
 
-it('summarises each credential by id, name and last use', function () {
+it('summarises each credential by id, name, use, creation, model and transports — never the key', function () {
+    // The account export reads these, and must disclose what erasure destroys (Art. 15 / Art. 17).
     $this->freezeSecond();
-    passkeys()->store(7, new NewPasskey('a', 'k', 0), 'My iPhone');
+    passkeys()->store(7, new NewPasskey('a', 'k', 0, ['internal'], 'aaguid-1'), 'My iPhone');
     passkeys()->updateSignCount('a', 1);
 
-    expect(passkeys()->summariesForUser(7))->toBe([
-        ['credential_id' => 'a', 'name' => 'My iPhone', 'last_used_at' => now()->getTimestamp()],
-    ]);
+    expect(passkeys()->summariesForUser(7))->toBe([[
+        'credential_id' => 'a', 'name' => 'My iPhone', 'last_used_at' => now()->getTimestamp(),
+        'created_at' => now()->getTimestamp(), 'aaguid' => 'aaguid-1', 'transports' => ['internal'],
+    ]]);
 });
 
 it('updates the sign count', function () {
@@ -118,4 +122,71 @@ it('deletes only the owner’s credential', function () {
 it('reads the sign count as an integer whatever the driver hands back', function () {
     // Some PDO drivers return integer columns as strings.
     expect((new Passkey)->forceFill(['sign_count' => '7'])->sign_count)->toBe(7);
+});
+
+it('reads an undecryptable credential as no credential, rather than throwing', function () {
+    // A rotated APP_KEY without `app.previous_keys`, or a corrupt row. The decrypt was unguarded, so
+    // it escaped as a 500 on the UNAUTHENTICATED passkey-login route — and by then
+    // `FinishPasskeyLogin` has already burned that ceremony's single-use challenge, so every attempt
+    // cost a challenge and returned a server error, hard-locking a passkey-only account out with no
+    // usable signal. `ChallengeTwoFactor::secretOf()` already guarded exactly this for the TOTP
+    // secret. An unreadable credential now reads as one that does not match — the 422 the caller
+    // already handles.
+    passkeys()->store(7, new NewPasskey('cred-rotated-key', 'COSE-PUBLIC-KEY', 0));
+    Passkey::query()->whereKey('cred-rotated-key')->update(['public_key' => 'not-a-valid-ciphertext']);
+
+    expect(passkeys()->findByCredentialId('cred-rotated-key'))->toBeNull();
+});
+
+it('keeps the COSE key and authenticator fingerprint out of a serialized passkey', function () {
+    // `RefreshToken` hides `token_hash`/`scope` with a docblock reasoning about an integrator's
+    // "active sessions" screen; the sibling model carried no `$hidden` at all, so the same screen
+    // for passkeys published the encrypted COSE key and the `aaguid` that identifies the
+    // authenticator's make and model. lukk's own list endpoint allowlists columns and was never
+    // affected — this is about `$user->passkeys` reaching a JSON response directly.
+    passkeys()->store(7, new NewPasskey('cred-hidden', 'COSE-PUBLIC-KEY', 0, ['internal'], 'aaguid-x'));
+
+    $serialized = Passkey::query()->whereKey('cred-hidden')->firstOrFail()->toArray();
+
+    expect($serialized)->not->toHaveKey('public_key')
+        ->and($serialized)->not->toHaveKey('aaguid')
+        ->and($serialized)->toHaveKey('credential_id');
+});
+
+it('never moves a sign count backwards, whatever order concurrent logins write in', function () {
+    // Two assertions (counters 6 and 5) both read the stored 4 and each wrote max(4, theirs): if 6
+    // landed first, 5 then overwrote it, and a clone presenting 6 later passed the regression check
+    // (WebAuthn L3 §7.2). The write is now conditional on the stored count being lower.
+    $repo = app(PasskeyRepository::class);
+    $repo->store(1, new NewPasskey('cred-race', 'PUB', 4));
+
+    $repo->updateSignCount('cred-race', 6);
+    $repo->updateSignCount('cred-race', 5);
+
+    expect($repo->findByCredentialId('cred-race')?->signCount)->toBe(6);
+});
+
+it('still stamps last use when the count does not move', function () {
+    $repo = app(PasskeyRepository::class);
+    $repo->store(1, new NewPasskey('cred-synced', 'PUB', 0));
+    $this->freezeSecond();
+
+    $repo->updateSignCount('cred-synced', 0);
+
+    expect($repo->summariesForUser(1)[0]['last_used_at'])->toBe(now()->getTimestamp());
+});
+
+it('reads and erases nothing, without throwing, where the passkeys table was never published', function () {
+    // The table gate lives here, in the database store, so the actions can call any store unconditionally.
+    Schema::drop('passkeys');
+    $repo = app(DatabasePasskeyRepository::class);
+
+    expect($repo->summariesForUser(1))->toBe([])
+        ->and($repo->deleteForUser(1))->toBe(0);
+});
+
+it('summarises a row written without timestamps, as an import or a raw insert leaves it', function () {
+    DB::table('passkeys')->insert(['credential_id' => 'raw', 'user_id' => 7, 'public_key' => 'x', 'sign_count' => 0]);
+
+    expect(passkeys()->summariesForUser(7)[0])->toMatchArray(['credential_id' => 'raw', 'created_at' => null, 'last_used_at' => null]);
 });

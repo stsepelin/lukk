@@ -103,3 +103,32 @@ it('reads a numeric subject, and treats one that is not a value as empty', funct
         ->expectsOutputToContain('No confirm lock found for [] on guard [api].')
         ->assertFailed();
 });
+
+it('still releases a non-account lock stored in plain text before the subject was hashed', function () {
+    // Locks written by an older release keep their old key until they are released; with
+    // `release_after` at 0 that is only ever this command, so it has to find them.
+    lockLogin('idn:legacy@example.test');
+
+    command('lukk:release', ['subject' => 'Legacy@Example.test'])->assertSuccessful();
+
+    expect(Lockout::query()->exists())->toBeFalse();
+});
+
+it('says when it cleared failures but no lock was held', function (int $releaseAfter) {
+    // A counter below the cap, or a lock `release_after` already lifted: clearing it is not a release, and
+    // no `AccountReleased` fires — the operator must not be told a lock was released either.
+    config(['lukk.lockout.max_attempts' => 3, 'lukk.lockout.release_after' => $releaseAfter]);
+    $user = User::factory()->create(['email' => 'ada@example.test']);
+    $lockouts = app(LockoutRepository::class);
+    foreach (range(1, $releaseAfter > 0 ? 3 : 1) as $_) {
+        $lockouts->recordFailure('login', 'id:'.$user->getKey(), 'api');
+    }
+    $this->travel($releaseAfter + 1)->seconds();
+
+    command('lukk:release', ['subject' => 'ada@example.test'])
+        ->expectsOutputToContain('No login lock was held for [ada@example.test]; cleared its failure count.')
+        ->doesntExpectOutputToContain('Released the login lock')
+        ->assertSuccessful();
+
+    expect(Lockout::count())->toBe(0);
+})->with(['a counter below the cap' => [0], 'a lock past release_after' => [60]]);

@@ -10,6 +10,7 @@ use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\TwoFactorChallengeResponse;
 use Lukk\Lukk;
+use Lukk\Support\AuthenticationMethods;
 
 /**
  * Post-authentication branching shared by the login + registration controllers: whether the
@@ -34,15 +35,22 @@ trait DeterminesSessionOutcome
             && $user->hasEnabledTwoFactor();
     }
 
-    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens): TwoFactorChallengeResponse
+    /**
+     * @param  list<string>  $firstFactor  How the first factor was proved, carried into the challenge
+     *                                     so redemption can record it truthfully.
+     */
+    private function twoFactorChallenge(Authenticatable $user, ChallengeToken $challengeTokens, array $firstFactor = [AuthenticationMethods::PASSWORD]): TwoFactorChallengeResponse
     {
         return app(TwoFactorChallengeResponse::class, ['challenge' => $challengeTokens->issue(
             // `config($key, $default)` does NOT cover an explicit null — `Arr::get` returns the
             // value whenever the key exists — and a TTL of 0 mints a challenge whose `exp` equals
             // its `iat`, so no one with 2FA on could ever finish signing in.
-            '2fa', $user->getAuthIdentifier(), (int) (config('lukk.two_factor.challenge_ttl') ?? 300),
+            // Per guard, like every other two-factor setting the challenge path reads: from the global
+            // block, a guard's own `two_factor.challenge_ttl` was silently ignored.
+            '2fa', $user->getAuthIdentifier(), (int) (Lukk::guardConfig()['two_factor']['challenge_ttl'] ?? 300),
             // The password this challenge stands in for.
             passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($user),
+            firstFactor: $firstFactor,
         )]);
     }
 

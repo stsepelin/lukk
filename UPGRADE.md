@@ -20,7 +20,289 @@ but the default is safe.
 
 ---
 
-## Upgrading to the next release from 0.6.x (unreleased)
+## Upgrading to 0.7.0 from 0.6.x (unreleased)
+
+### The default guard must use `lukk.user_provider`
+
+**High impact — only if `auth.guards.<default>.provider` (or, naming none, `auth.defaults.provider`)
+differs from `lukk.user_provider`.** Boot now throws, naming both. Sign-in checked passwords against
+`lukk.user_provider` while the guard resolved tokens through the other provider, so a password from one
+table signed in as the row with the same id in the other. Point both at the same provider. Nothing
+changes for the default configuration (`users` on both sides), a guard naming no provider with
+`auth.defaults.provider` unset, or a default guard that is not `lukk-jwt` — nor for two provider names
+over the same users: the same `model` under the `eloquent` driver, or the same `table` and `connection`
+under `database`. A provider with any other driver boots only if its whole `auth.providers` entry is
+identical to the other's.
+
+### Identifiers with invisible characters are refused
+
+**Low impact — check if your identifiers can contain them.** Sign-in, registration, forgot- and
+reset-password answer 422 for an identifier carrying a control character (NUL, C0, C1), a format
+character (zero-width space, word joiner, soft hyphen, bidi controls), an enclosing mark, U+034F, or
+whitespace other than the ASCII space; registration's `name` refuses NUL. Combining marks, accented
+letters, U+200C ZERO WIDTH NON-JOINER and U+200D ZERO WIDTH JOINER (Persian spelling, emoji ZWJ
+sequences) and U+20E3 COMBINING ENCLOSING KEYCAP are accepted. An account whose STORED identifier
+contains a refused character can no longer type it to sign in — find them before upgrading. The
+authoritative check is the pattern lukk validates with, run in PHP (swap in your model and
+`lukk.username` column):
+
+```php
+use Illuminate\Support\Facades\DB;
+use Lukk\Support\Identifier;
+
+DB::table('users')->select(['id', 'email'])->lazyById()->each(function ($row) {
+    if (preg_match(Identifier::INVISIBLE, (string) $row->email) === 1) {
+        echo $row->id, PHP_EOL;
+    }
+});
+```
+
+In SQL, these match the same set as PCRE2 10.49's Unicode tables (Unicode 17; checked on PostgreSQL 17 and MySQL 8.4) — a later Unicode version can add
+format characters that only the PHP scan sees. PostgreSQL (`standard_conforming_strings` on, the default):
+
+```sql
+SELECT id, email FROM users WHERE email ~ '[\u0001-\u001F\u007F-\u00A0\u00AD\u034F\u0488-\u0489\u0600-\u0605\u061C\u06DD\u070F\u0890-\u0891\u08E2\u1680\u180E\u1ABE\u2000-\u200B\u200E-\u200F\u2028-\u202F\u205F-\u2064\u2066-\u206F\u20DD-\u20E0\u20E2\u20E4\u3000\uA670-\uA672\uFEFF\uFFF9-\uFFFB\U000110BD\U000110CD\U00013430-\U0001343F\U0001BCA0-\U0001BCA3\U0001D173-\U0001D17A\U000E0001\U000E0020-\U000E007F]';
+```
+
+MySQL 8.0.4+ (ICU regular expressions; with `NO_BACKSLASH_ESCAPES` in `sql_mode` the doubled backslashes
+reach the regex as written and it fails with error 3697 — run it in a session without that mode, or halve them):
+
+```sql
+SELECT id, email FROM users WHERE email REGEXP '[\\x{0000}-\\x{001F}\\x{007F}-\\x{00A0}\\x{00AD}\\x{034F}\\x{0488}-\\x{0489}\\x{0600}-\\x{0605}\\x{061C}\\x{06DD}\\x{070F}\\x{0890}-\\x{0891}\\x{08E2}\\x{1680}\\x{180E}\\x{1ABE}\\x{2000}-\\x{200B}\\x{200E}-\\x{200F}\\x{2028}-\\x{202F}\\x{205F}-\\x{2064}\\x{2066}-\\x{206F}\\x{20DD}-\\x{20E0}\\x{20E2}\\x{20E4}\\x{3000}\\x{A670}-\\x{A672}\\x{FEFF}\\x{FFF9}-\\x{FFFB}\\x{110BD}\\x{110CD}\\x{13430}-\\x{1343F}\\x{1BCA0}-\\x{1BCA3}\\x{1D173}-\\x{1D17A}\\x{E0001}\\x{E0020}-\\x{E007F}]';
+```
+
+The login-throttle fold also changed for identifiers containing such characters (or combining marks,
+ZWNJ, ZWJ or the keycap), so their buckets restart once; a held `idn:` lockout row for such an identifier
+is no longer reached by it. On PostgreSQL two accounts may differ only by a ZWNJ, ZWJ or keycap (`ab` and
+`a\u{200D}b`); the throttle folds them onto one bucket, as it does accounts differing only in case or
+accents. MySQL's collation already treats them as one value, so `unique` refuses the second.
+
+### `auth_time` is stored with the session
+
+**Low impact.** The sign-in time now travels in the `refresh_tokens.amr` column, beside `amr`
+(`{"amr":[…],"auth_time":…}`), instead of being re-derived on rotation as `expires_at − refresh_ttl` —
+lowering `refresh_ttl` made old multi-factor sign-ins look recent. A session stored before this has no
+stored sign-in time, so its tokens carry no `auth_time` after its next refresh, and a password step-up
+that leaned on a recent multi-factor sign-in asks for a fresh one (or a passkey). **If you implement `RefreshTokenRepository`**, treat the
+`$amr` argument of `persist()` as opaque: store it and hand it back on `RefreshTokenRecord::$amr`
+unchanged (the signature is unchanged). One that drops it keeps working, without `amr` or `auth_time`
+after the first refresh.
+
+### Locking happens after the failed check (`ReservesLockoutAttempts`)
+
+**Low impact — only if you implement `LockoutRepository` yourself, or listen for lockout events.** The
+actions still reserve an attempt before verifying it, but the lock and `AccountLocked` now land only when
+the credential was wrong, so the attempt that reaches the cap with the right credential no longer fires
+`AccountLocked` and `AccountReleased`. Implement the optional `Lukk\Contracts\ReservesLockoutAttempts`
+(`reserve()`, `lockIfSpent()`) to get this; a repository implementing only `LockoutRepository` keeps
+locking at the reservation through `recordFailure()`.
+
+### Refresh-token model events no longer fire for lukk's writes
+
+**Low impact — only if you observe a `useRefreshTokenModel` subclass.** `persist()` now saves quietly:
+it runs under the rotation's row lock, where an observer serialised refreshes and, on PostgreSQL, could
+silently roll back the rotation. `creating`/`created`/`saving`/`saved` no longer fire for refresh tokens
+lukk stores, and a listener can no longer cancel one. Audit sessions from lukk's events instead
+(`RefreshTokenReused`, `SessionUnclaimed`, and your own login/logout listeners).
+
+**A column you fill from `creating` is no longer filled** — a multi-tenancy `BelongsToTenant` trait
+stamping `tenant_id`, for one; on a `NOT NULL` column every sign-in and refresh then fails. Fill it as the
+model is built instead: an `$attributes` default on your `useRefreshTokenModel` subclass, or the trait's
+`initialize{TraitName}()` method, which Eloquent calls from the constructor without dispatching an event
+(`public function initializeBelongsToTenant(): void { $this->tenant_id ??= tenant()->id; }`). Overriding
+`persist()` in a subclass of `DatabaseRefreshTokenRepository` works too. Either way the code runs under
+the rotation's row lock: read a value already in memory, never query.
+
+### Smaller changes you might notice
+
+**Low impact.**
+
+- `Lukk\Events\RecoveryCodeUsed` fires when a recovery code is spent; listen for it to notify the user
+  and prompt new codes (NIST SP 800-63B-4 §4.2).
+- The account export gains `password_reset`, `two_factor.pending`, `two_factor.recovery_codes_remaining`
+  and per-session `amr` / `authenticated_at`.
+- With `Lukk::authenticateUsing()` reading a field other than `lukk.username`, the IP-independent login
+  bucket is skipped (it was one bucket for everybody). Point `lukk.username` at your field to keep it.
+- **Co-issuers must mint a `sub` the user identifier column can hold.** A `lukk-jwt` guard answers 401,
+  with no query, only where the model itself makes that certain: the provider is exactly
+  `EloquentUserProvider`, the auth identifier is the model's key, and the key is either the stock
+  auto-incrementing integer (`id()`/`bigIncrements`: a canonical integer within signed 64 bits, no sign,
+  padding or spaces) or generated by `HasUuids`/`HasUlids`/`HasVersion4Uuids` — then a value the model's own
+  `isValidUniqueId()` refuses (for `HasUuids`: anything but the canonical hyphenated form) is refused. A
+  `sub` containing a NUL byte is refused for every provider (pdo_pgsql truncated `alice\0x` to `alice`).
+  Every other shape goes to the provider unchecked — a non-incrementing (Snowflake) key, an identifier that
+  is another column, a uuid column the model declares nothing about, a domain type, an
+  `EloquentUserProvider` subclass or custom provider — and so does a value past int4 for a legacy 32-bit
+  `increments('id')`: on PostgreSQL a `sub` such a column cannot hold is SQLSTATE 22P02/22003, reported as
+  a 500 (MySQL and SQLite coerce and find no user). That is deliberate: the token is signed by an issuer
+  you trust, so a subject its column cannot hold is that issuer's bug.
+- `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;
+  `DELETE /auth/sessions` now also denylists the presenting token when it names no family of lukk's.
+
+### `amr` now uses only RFC 8176 registered values
+
+**High impact if anything reads `amr` — a gateway, a resource server, or your own `lukk.ability`-style
+gates.**
+
+| sign-in | before | now |
+|---|---|---|
+| password | `["pwd"]` | `["pwd"]` |
+| password + TOTP or recovery code | `["pwd","otp"]` | `["pwd","otp","mfa"]` |
+| passkey, user verified | `["webauthn"]` | `["pop","user","mfa"]` |
+| passkey, presence only | `["webauthn"]` | `["pop","user"]` |
+| passkey (presence only) + TOTP | `["webauthn","otp"]` | `["pop","user","otp"]` |
+
+`webauthn` was never registered, so nothing outside lukk could interpret it. Replace a check for
+`"webauthn"` with `"pop"`, and a check for "was this multi-factor" with `"mfa"`. Note the last row: a
+presence-only passkey plus a TOTP is two POSSESSION factors, which NIST SP 800-63B-4 §2.2.1 does not
+count as multi-factor, so it carries no `mfa`.
+
+### `WebAuthnCeremony`: `verifyAssertion()` returns a `PasskeyAssertion`, and two new arguments
+
+**Only if you implement `Lukk\Contracts\WebAuthnCeremony` yourself.** The shipped
+`SpomkyWebAuthnCeremony` is already updated.
+
+```php
+public function authenticationOptions(string $challenge, array $allowCredentialIds, ?string $userVerification = null): array;
+
+public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion;
+
+public function isMultiFactor(PasskeyRecord $stored): bool;
+```
+
+- `$userVerification` is the requirement for THIS ceremony (`required`/`preferred`/`discouraged`), or
+  null for your configured one. A step-up passes `required` when the account can reach AAL2, and you
+  must enforce it on the assertion — not only put it in the options.
+- `PasskeyAssertion::$multiFactor` must be true only when the assertion carries the UV flag AND the
+  credential was already `uvInitialized` BEFORE this ceremony. Read it before verifying: a WebAuthn
+  library typically updates it from the assertion as part of verification, and WebAuthn L3 §4 forbids
+  relying on the flag in the ceremony that would set it. lukk skips an enrolled TOTP on this answer.
+- `isMultiFactor()` reports whether a stored credential has shown user verification; false when unknown.
+- `$owner` is the account a step-up expects the credential to belong to, or null at sign-in. Pass it
+  to your library as the expected user handle (WebAuthn L3 §7.2 step 6): when the authenticator returns
+  a `userHandle`, it must name that account.
+
+### `FinishPasskeyLogin` no longer clears the password-confirm lockout itself
+
+**Only if you call `Lukk\Actions\FinishPasskeyLogin` from your own code.** Call
+`releaseConfirmLock($passkey)` once you have granted what the assertion was for — lukk does so after a
+step-up passes the account-level check, and after a sign-in grants a session on a multi-factor
+assertion. Releasing it for a presence-only key lets a stolen access token guess the password without
+limit.
+
+### A rebound `LockoutRepository` is called on every erasure and export
+
+**Only if you implement `Lukk\Contracts\LockoutRepository` yourself.** `forget()` and
+`summariesForSubjects()` now run whether or not a `lukk_lockouts` table exists; answer `0` and `[]`
+for nothing stored.
+
+### `PasskeyRepository::updateSignCount()` returns `bool`
+
+**Only if you implement `Lukk\Contracts\PasskeyRepository` yourself.** Return whether the row was
+written. The update must be forward-only — write only while the stored counter is below the new one —
+so that of two concurrent assertions presenting the same counter, exactly one wins. lukk treats a
+non-zero counter that did not advance as a cloned authenticator (WebAuthn L3 §6.1.1), refuses the
+assertion and fires `PasskeyCloneDetected`; a repository that always answers `true` silently loses
+that check, and one that always answers `false` refuses every non-zero counter.
+
+A missing or mismatched method is a **fatal at class-load time**, not a catchable exception, so it
+appears on the first request that resolves your binding rather than at boot.
+
+### A rebound `PasskeyRepository` is called on every erasure, export and reset
+
+**Only if you implement `Lukk\Contracts\PasskeyRepository` yourself.** `deleteForUser()` (account
+deletion), `summariesForUser()` (account export) and, with `password_reset.revoke_passkeys` on,
+`summariesForUser()` + `delete()` now run on every install, where they used to be skipped unless a
+`passkeys` table existed. They must answer an empty store without throwing — `[]` and `0`.
+
+### Under bcrypt, passwords over 72 bytes are refused — including at sign-in
+
+bcrypt reads only the first 72 bytes, so lukk could verify a longer password only in part (NIST
+SP 800-63B-4 §3.1.1.2 requires the whole of it). Registration, reset and change-password answer 422
+for one; with `Lukk::registerValidation()` set or a rebound `RegisterRequest` overriding `rules()`, lukk adds that check (and "must be a string", and no NUL byte) after
+your rules, since they replace its own (the 72-byte rule not when `Lukk::registerUsing()` does the create).
+**Sign-in, step-up and change-password refuse one against a bcrypt hash** — and every earlier lukk
+release stored such passwords, truncated, as does any import. Those users are typing the right
+password; they get "This password is longer than 72 bytes, which can no longer be checked in full.
+Reset your password to continue." and must reset. Consider telling them before you upgrade: you
+cannot find them in the database (the hash does not record the length), but each refusal is a
+`422` with that message. 36 two-byte characters already reach the
+limit. Argon2 is unaffected.
+
+### Passkey login can answer with a two-factor challenge
+
+**Medium impact — if you use passkeys and two-factor together with your own client.** A passkey
+assertion that is not multi-factor (no user verification, or a credential that never showed it) on an
+account with confirmed two-factor now gets `{"two_factor": true, "challenge_token": "…"}` from
+`POST /auth/passkeys/login`, exactly like a password sign-in, instead of a session. Complete it at
+`POST /auth/two-factor-challenge`. lukk-js 0.12 handles this; an older client or your own must too.
+
+### Passkey step-up: a new options route, and stricter rules
+
+`POST /auth/confirm-passkey/options` (authenticated) negotiates a step-up ceremony: it asks the
+authenticator for user verification when the account can reach AAL2 and lists the user's own
+credentials. Use it instead of `passkeys/login-options` for a step-up (lukk-js does).
+
+A presence-only passkey no longer earns a step-up on an account that has a password or a
+user-verifying passkey: such an account can authenticate more strongly, and a step-up mints the token
+that binds and removes authenticators (NIST SP 800-63B-4 §4.1.2.1). A password-less account whose
+credentials are all presence-only can still step up with one — it has nothing stronger. A stored
+placeholder no password can match (`!`, `*`, a non-hash) counts as no password only when lukk can
+prove nothing verifies it: the stock `EloquentUserProvider` over the application's own bcrypt/argon
+hasher, and a value `password_verify()` could never accept. A custom provider or hashing driver, a
+provider built with its own hasher, or a legacy `crypt()` hash accepted with `hashing.bcrypt.verify`
+off all keep counting as a password. That
+refusal answers **422 on `credential`**, like a failed verification, not 403: on a step-up route 403
+means the token itself may never confirm, and lukk-js abandons the prompt on it.
+
+### A new `refresh_tokens.amr` column, and a new argument on `RefreshTokenRepository::persist()`
+
+**Medium impact — every existing install adds a column; anyone implementing or subclassing
+`RefreshTokenRepository` must update a signature.**
+
+`amr` (RFC 8176 — how the session was authenticated: `["pwd"]`, `["pwd","otp","mfa"]`, `["pop","user"]`) was
+stamped only at sign-in, so it disappeared from the first refreshed access token. A route gated on
+it therefore stopped working roughly one `access_ttl` into every session: fail-closed if the gate was
+written tightly, **fail-open** if it was written as `!isset($amr) || in_array(...)`. It is now stored
+with the family and carried forward by every rotation.
+
+1. Add the column. It went into the **existing** `create_refresh_tokens_table` migration, so how
+   you get it depends on whether you have already run that migration:
+
+   - **Fresh install / not yet migrated** — nothing to do. Publishing `lukk-migrations` and running
+     `php artisan migrate` creates the column.
+   - **You already ran it** (every existing install) — republishing does **not** help:
+     `publishesMigrations` stamps the copy with a new timestamp, so `--force` produces a second
+     `create_refresh_tokens_table` that fails with "table already exists". Add a migration of your own:
+
+     ```php
+     Schema::table('refresh_tokens', function (Blueprint $table) {
+         $table->text('amr')->nullable();
+     });
+     ```
+
+   Until you do, nothing breaks — the repository writes `amr` only when it has one and reads it as
+   `null` when the attribute is absent, which is exactly the pre-upgrade behaviour.
+
+2. If you implement `Lukk\Contracts\RefreshTokenRepository` yourself, or subclass
+   `DatabaseRefreshTokenRepository` and override `persist()`, add the trailing argument:
+
+   ```php
+   public function persist(
+       int|string $userId, string $familyId, ?string $previousId, string $tokenHash,
+       int $expiresAt, ?string $scope = null, ?string $amr = null,
+   ): void
+   ```
+
+   PHP raises a fatal on a mismatched signature, so this surfaces immediately rather than silently.
+   Round-trip it like `scope`: store the string given and return it on `RefreshTokenRecord::$amr`. A
+   repository that ignores it keeps the old behaviour — the claim is simply absent after the first
+   refresh.
+
+`amr` is now **reserved**, like `scope` and `pin`: it is applied after the `tokenClaimsUsing` merge,
+so a claims hook can neither forge an authentication method the session never used nor erase the
+real one.
+
 
 ### `POST /auth/logout` no longer requires a valid access token
 
@@ -58,7 +340,9 @@ Logout accepts a valid access token **or** the refresh token the client holds. W
 - The `Authenticate` middleware no longer runs on this route, so anything attached through it (a
   middleware-priority hook, a guest redirect) does not apply.
 - If you **extend** `AuthenticatedSessionController`: its constructor takes `EndSession` instead of
-  `RevokeSession`, and `destroy()` no longer takes a `TokenVerifier`.
+  `RevokeSession`, gained a trailing `ConfirmPasswordUnchanged $passwordUnchanged`, and `destroy()` no
+  longer takes a `TokenVerifier`. `TwoFactorChallengedSessionController` likewise gained
+  `ChallengeToken $challengeTokens` and `ConfirmPasswordUnchanged $passwordUnchanged`.
 
 A test that used `/auth/logout` as a "does this token authenticate on this guard" probe should use an
 `auth:{guard}` route instead.
@@ -69,8 +353,12 @@ A test that used `/auth/logout` as a "does this token authenticate on this guard
 
 The route keeps the caller's session alive, but `LogoutResponse` ends the caller's session
 client-side: in cookie mode it cleared the refresh cookie and the client could no longer refresh. It
-now answers a bare `204` directly — the same status and empty body as before, so clients need no
-change. A rebound `LogoutResponse` still applies to `POST /auth/logout` and `DELETE /auth/sessions`.
+now answers a bare `204` directly. A rebound `LogoutResponse` still applies to `POST /auth/logout` and
+`DELETE /auth/sessions`.
+
+One case changes for clients: a bearer token with no `fid` (a co-issuer's, in the verify-only
+topology) now gets `409` instead of a `204` that revoked nothing, because there is no session to keep
+and "log out my other devices" cannot be honoured. `Lukk::actingAs()` keeps the no-op.
 
 ### New: unclaimed sessions (`claim_seconds`) and `POST /auth/session/claim`
 
@@ -136,6 +424,241 @@ simply ignored, as they always were. Delete them to avoid implying they are swit
 
 The read-side mirror of `forget()`, used by the account export: it must reach exactly the rows
 `forget()` deletes, scoped to the guard. The export response gains a `lockouts` key.
+
+### A sign-in no longer resets the account-wide login bucket, and non-account locks store a digest
+
+**Low impact — no action for most apps.** A successful sign-in now clears only the caller's
+per-address login bucket; the IP-independent `account_max_attempts` bucket decays instead of resetting.
+A user who mistypes often may meet that cap after a success where before they would not. A persistent lock on an identifier that
+names no account is now stored as `idn:sha256:<digest>` rather than the identifier in plain text.
+Locks written before the upgrade keep their old key: `lukk:release`, account erasure and the export
+still find them.
+
+### Cookie mode: token routes require JSON
+
+**Medium impact — only with `cookie_mode` on, and only for clients not sending JSON.** `login`,
+`register`, `refresh`, `two-factor-challenge` and `passkeys/login` answer `415` unless the request has a
+`Content-Type: application/json` body or comes from the same origin or the user's own navigation
+(`Sec-Fetch-Site: same-origin` or `none`).
+This closes login CSRF: a cross-site form could otherwise plant an attacker's session cookie. Send
+JSON (`{}` for a cookie refresh), as lukk-js does.
+
+### Request rules a client can hit
+
+**Low impact — check custom clients.**
+
+- `ceremony_id` on passkey login and step-up must be a UUID, which is what lukk issues; anything else
+  is a `422` on `ceremony_id`.
+- A refused passkey step-up is `422` on `credential`, not `403`.
+- A password step-up is `422` on `password` on an account with an enforced second factor or a
+  user-verifying passkey, unless the session's token carries `mfa` in `amr`. A token with no `amr` —
+  after a refresh on a schema without the `amr` column, or from `startSession()` — counts as
+  single-factor, so **migrate the `amr` column**, or users with a second factor must confirm with a
+  passkey or sign in again after every refresh.
+- Even in an `mfa` session, that allowance lasts only `confirm.mfa_max_age` (one day) after the sign-in,
+  read from the new `auth_time` claim. Older sessions confirm with a passkey or sign in again.
+  An `auth_time` more than `leeway` in the future, or not a timestamp at all, counts as no recent sign-in.
+  `auth_time` is the sign-in time stored with the session (see above), so a session stored before
+  this release needs a fresh multi-factor sign-in (or a passkey) to step up.
+- `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
+  `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
+  request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never
+  touched a column must be renamed.
+
+### `leeway` is capped at five minutes
+
+`LUKK_LEEWAY` (and a per-guard `leeway`) is clamped to 0–300 seconds for every token lukk decodes —
+access tokens, two-factor challenges, step-up confirmations, passkey challenges. RFC 7519 §4.1.4
+allows "some small leeway"; a larger value kept an expired challenge usable for as long as it said.
+A configured value above 300 now acts as 300; fix the clock skew instead.
+
+### Per-guard overrides are honoured
+
+`features.lockout`, the `lockout` block, `rate_limits.login.*` and `rate_limits.two_factor.*` are
+read per guard. An extra guard that set
+them in its `lukk.guards` block silently got the global values before; check that what it declares
+is what you want enforced, since it now is.
+
+### `password_reset.revoke_passkeys` (new, default off)
+
+With it on, a reset removes every passkey and dispatches `PasskeyDeleted` for each. Keep
+`revoke_sessions` on with it: a session that survives the reset can step up and enroll a new
+passkey at once, so removing them achieves nothing.
+
+### A custom password column is written
+
+Reset and change-password now write the column `getAuthPasswordName()` names, as sign-in already
+read it. Nothing to do unless you worked around the 500 by adding a `password` mutator; remove it.
+
+### `lukk:secret --guard` validates the guard name
+
+The name may contain only letters, digits, `_` and `-` (a dash becomes `_` in the variable). A
+dotted name is refused rather than matched onto another guard's `LUKK_*_SECRET` line.
+
+### New events when an authenticator is bound or removed
+
+**Low impact — act on it.** NIST SP 800-63B-4 §4.1.2.1 requires telling the user, through another
+channel, when an authenticator is bound. lukk sends no mail, so listen and notify:
+`TwoFactorAuthenticationConfirmed`, `TwoFactorAuthenticationDisabled`, `RecoveryCodesGenerated`,
+`PasskeyRegistered`, `PasskeyDeleted`, all in `Lukk\Events`.
+
+### Sign-in, forgot-password and reset-password are padded to a wall-clock budget
+
+**Low impact — check the budget.** A failed sign-in now takes at least `login_timebox_micros`
+(500 ms), and every forgot-password request and every failed reset-password request at least
+`password_reset.timebox_micros` (one second). A successful sign-in or reset returns early. Raise either budget if your slowest real path takes longer:
+the box pads, it never shortens. Queue the reset notification if one second is too slow.
+
+### A malformed `lukk.guards` is refused at boot
+
+**Medium impact — only if your config has one.** A numeric guard name (under `lukk.guards`, or as
+`lukk.guard`), a list of names (`['admin']` instead of `['admin' => [...]]`) or a truthy scalar now
+throws at boot with a message naming the problem, where before it failed later with a `TypeError`
+while the routes registered. `false` or `''` still mean "no extra guards".
+
+### Two-factor challenges carry a password fingerprint, and are refused without one
+
+**Medium impact — in the minutes around the deploy, and for co-issuers.** A challenge now carries
+`pwf`, a fingerprint of the password it stands in for (an HMAC of the stored hash under `app.key`), and
+is refused at redemption — before the code is checked, so nothing is spent — when that password has
+changed or the challenge has no fingerprint. Consequences:
+
+- A challenge minted by 0.6 and redeemed after the upgrade is refused; the user signs in again.
+- A challenge minted by another service sharing the key (a co-issuer) carries no `pwf` and is refused.
+- Deployments that redeem each other's challenges must share `APP_KEY` (and `app.previous_keys` across
+  a key rotation), since the fingerprint is keyed with it.
+
+### A per-guard `features.two_factor` that is null or `''` now challenges enrolled accounts
+
+**Medium impact — if an extra guard sets the flag from an unset `env()`.** Only a value somebody set
+(`false`, `0`, `'0'`) switches enforcement off. `null`, a blank `.env` line or a missing key used to
+skip the second factor on that guard; enrolled accounts are now challenged, and the challenge route
+mounts on the same rule. Set the flag explicitly if you meant "off".
+
+### `AccountLocked` can fire twice for one run
+
+**Low impact — if you notify on it.** A login failure counts against the identifier's fold and, when
+the identifier resolves, against the account too; when both reach the cap, `AccountLocked` fires for
+each. Only the account's (`id:` subject) names a user — the `idn:` one names no one, so a listener that
+mails the owner should act on `id:` subjects and ignore the other.
+
+### `AccountReleased` fires only for a held lock
+
+**Low impact — if an audit log listens to it.** Clearing a counter that never reached the cap (every
+successful sign-in after a typo did this) or a lock already past `release_after` no longer fires it.
+A rebound `LockoutRepository` should follow the same rule: fire for a held lock only. `lukk:release` now
+prints "No login lock was held for […]; cleared its failure count." (exit 0) when it cleared only a
+counter or an already-expired lock; scripts matching "Released the … lock" see that line only for a
+real release.
+
+### A null `lukk.path` mounts the routes at `auth`
+
+**Low impact.** An explicit `null` (an unset `env()`) used to mount the routes at the root. It now
+means the default, `auth`. Set the path you want explicitly.
+
+### `passkeys.challenge_ttl` defaults to 300 seconds (was 120)
+
+**Low impact — no action unless you relied on two minutes.** The WebAuthn L3 §15.1 recommendation for
+a user-verifying ceremony; options now also advertise it as `timeout`. An explicit
+`LUKK_PASSKEY_CHALLENGE_TTL` is kept.
+
+### Body mode: `/refresh` no longer reads the refresh cookie
+
+**Low impact — no working client is affected.** Without `cookie_mode`, `POST /auth/refresh` reads only
+the `refresh_token` field. A cookie left over from cookie mode (or planted by a sibling subdomain) is
+ignored, so a body-mode client that somehow relied on it must send the field.
+
+### Access-token time claims must be timestamps
+
+**Low impact — co-issuers only.** `exp`, and `iat`/`nbf` when present, must be a number (or numeric
+string) between the epoch and the end of year 9999; a fraction is fine. A co-issuer's token outside
+that range now gets a `401`, where before it verified and later 500'd. A token whose `aud` is a JSON
+object is refused too (RFC 7519 §4.1.3).
+
+### Transactions and erasure run on the models' own connections
+
+**Low impact — only with a model on another connection.** Rotation, bulk revocation and
+recovery-code redemption open their transaction on the connection the model lives on (a
+`useRefreshTokenModel` subclass, a user model on a directory connection), and erasure opens one on
+each connection it writes to (the default, the password broker's and the token store's). Nothing to
+do; noted because the transactions now appear on those connections.
+
+### Password errors that were 500s are 422s
+
+**Low impact — clients that special-cased a 500.**
+
+- Confirm-password and change-password answer `422` on a stored hash the hasher refuses (another
+  algorithm, a `$2b$` import with `hashing.bcrypt.verify` on), as sign-in already did.
+- A recovery code stored under a hasher the app has since left is simply no match.
+- Registration, reset and change-password refuse a new password that is not a string (`422`).
+- Input that is not valid UTF-8 is refused with `422` before it reaches SQL: the sign-in identifier, a
+  passkey `credential.id` (sign-in and step-up), a passkey name, and registration's `name` and non-email
+  username. The sign-in password is not checked for it: one set as non-UTF-8 bytes keeps working.
+
+### `auth_time` may be fractional; `confirm.mfa_max_age` may be a float
+
+**Low impact.** A fractional `auth_time` (OIDC Core §2 allows it) counts as the second it falls in;
+one before the epoch, or more than `leeway` in the future, counts as no recent sign-in.
+`confirm.mfa_max_age` is compared as a float, so a "never" past the integer range works, and a
+non-numeric value reads as 0 — the multi-factor allowance off — rather than comparing as a string.
+
+### A `lukk.username` naming no column is refused in debug mode
+
+**Low impact — a typo surfaces.** With `app.debug` on and the stock `EloquentUserProvider`, sign-in
+checks that the `lukk.username` column exists and throws naming the setting if it does not. On
+SQLite a typo used to read as a string literal that matched every row. Production skips the check.
+
+### Changing the password needs a recent multi-factor session on a two-factor account
+
+**Medium impact — if users change passwords from password-only sessions.** `POST /auth/password` on an
+account with an enforced TOTP or a user-verifying passkey now requires the session to be a recent
+multi-factor one (`amr` carries `mfa`, signed in within `confirm.mfa_max_age`), exactly as a password
+step-up does. Otherwise it answers `422` on `current_password` before checking anything; the client
+should have the user sign in again with their second factor or a user-verifying passkey (a step-up
+confirmation does not satisfy this route).
+Accounts with nothing stronger than the password are unaffected.
+
+### Two-factor confirm and recovery-code regeneration answer `409` where they did nothing useful
+
+**Low impact.** `POST /auth/two-factor/confirm` on an account whose two-factor is already confirmed,
+and `POST /auth/two-factor/recovery-codes` on an account with no two-factor (confirmed or pending),
+now answer `409` instead of succeeding. Neither changed anything a user needed.
+
+### The account export: new passkey fields, and ISO-8601 throughout
+
+**Medium impact — if you parse `GET /auth/account/export`.** Each `passkeys[]` entry is now
+`credential_id`, `name`, `created_at`, `last_used_at`, `aaguid`, `transports`. `last_used_at` is an
+ISO-8601 string (it was a unix integer), like every other timestamp in the export; `created_at` is
+ISO-8601 too, and any of the time fields may be null. A rebound `PasskeyRepository` may return
+`created_at` (unix int), `aaguid` and `transports` from `summariesForUser()`; a store that does not
+exports null for them.
+
+### Per-guard `two_factor.challenge_ttl`, `confirm.ttl` and `confirm.header`
+
+**Low impact — if an extra guard overrides them.** They were read from the global block; an extra
+guard's own values now apply. In particular a guard that sets its own `confirm.header` must have its
+clients send the confirmation in that header.
+
+### The refresh cookie's lifetime follows the session's
+
+**Low impact — cookie mode.** The cookie's `Max-Age` is now what is left of the session's absolute
+expiry, not a fresh `refresh_ttl` on every rotation. `TokenPair` gained an optional
+`refreshExpiresAt`; code constructing one itself can leave it out (the cookie then gets the full
+`refresh_ttl`, as before).
+
+### A negative `leeway` counts as zero everywhere
+
+**Low impact.** The verifier already clamped `leeway` to 0–300; the denylist TTLs and the
+unclaimed-session window now use the same clamped value, so a negative or oversized setting behaves
+the same on every side.
+
+### Events serialize the user as an identifier
+
+**Low impact — queued listeners.** `PasswordChanged`, `TwoFactorAuthenticationConfirmed`,
+`TwoFactorAuthenticationDisabled`, `RecoveryCodesGenerated`, `PasskeyRegistered` and `PasskeyDeleted`
+use `SerializesModels`: a queued listener receives the user re-read from the database when the job
+runs. A user deleted before then makes the job fail with `ModelNotFoundException`, as for Laravel's
+own `PasswordReset`; a listener that needs the user as it was must copy what it needs when queued.
 
 ### Logout clears the refresh cookie per guard
 

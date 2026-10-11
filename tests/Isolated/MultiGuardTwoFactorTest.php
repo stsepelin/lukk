@@ -166,3 +166,17 @@ it('never gates an account model that has no email verification at all', functio
     $this->postJson('/admin/auth/login', ['email' => $admin->email, 'password' => 'password'])
         ->assertOk()->assertJsonStructure(['access_token']);
 });
+
+it('mints a guard\'s two-factor challenge with that guard\'s challenge_ttl', function () {
+    // Read from the global block, a per-guard `two_factor.challenge_ttl` was silently ignored while the
+    // rest of the guard's two-factor settings (`features.two_factor`, the rate limit) were honoured.
+    config(['lukk.features.two_factor' => true, 'lukk.two_factor.challenge_ttl' => 300, 'lukk.guards.admin.two_factor.challenge_ttl' => 60]);
+    $admin = Admin::factory()->create(['email' => 'ttl@example.test']);
+    enrolTwoFactor($admin);
+
+    $challenge = $this->postJson('/admin/auth/login', ['email' => $admin->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+    $claims = json_decode((string) base64_decode(strtr(explode('.', $challenge)[1], '-_', '+/')), true);
+
+    expect($claims['exp'] - $claims['iat'])->toBe(60);
+});

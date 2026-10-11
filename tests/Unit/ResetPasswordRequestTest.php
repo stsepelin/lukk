@@ -22,6 +22,7 @@ it('applies each reset rule on its own', function (string $field, array $overrid
     'email a string' => ['email', ['email' => ['x']], 'String'],
     'email well-formed' => ['email', ['email' => 'not-an-email'], 'Email'],
     'email bounded' => ['email', ['email' => str_repeat('a', 250).'@x.com'], 'Max'],
+    'email without an invisible character' => ['email', ['email' => "ada@example.test\0x"], 'NotRegex'],
     'password required' => ['password', ['password' => null], 'Required'],
     'password confirmed' => ['password', ['password_confirmation' => 'other-password-123'], 'Confirmed'],
     'password bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],

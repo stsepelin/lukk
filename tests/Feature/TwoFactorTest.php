@@ -3,16 +3,23 @@
 declare(strict_types=1);
 
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
+use Lukk\Actions\ConfirmPasswordUnchanged;
 use Lukk\Actions\ConfirmTwoFactor;
 use Lukk\Actions\EnableTwoFactor;
+use Lukk\Auth\ChallengeToken;
+use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TwoFactorProvider;
+use Lukk\Events\RecoveryCodesGenerated;
+use Lukk\Events\TwoFactorAuthenticationConfirmed;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
 use Lukk\Tests\Fixtures\UndecryptableTwoFactorUser;
@@ -123,7 +130,7 @@ it('rejects confirmation with a wrong code (stays unconfirmed)', function () {
 it('regenerates recovery codes, invalidating the old set', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $new = $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
         ->assertOk()
@@ -138,7 +145,7 @@ it('regenerates recovery codes, invalidating the old set', function () {
 it('disables 2FA', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
 
     $this->withToken($token)->withHeaders(confirmedHeaders($token))->deleteJson('/auth/two-factor')->assertNoContent();
 
@@ -249,7 +256,7 @@ it('rejects the challenge if 2FA was disabled after it was issued', function () 
         ->assertStatus(422);
 });
 
-it('stamps amr=[pwd,otp] on the token issued after a 2FA login', function () {
+it('stamps amr=[pwd,otp,mfa] on the token issued after a 2FA login', function () {
     $user = User::factory()->create();
     $secret = confirmedTwoFactor($user);
     $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
@@ -257,7 +264,9 @@ it('stamps amr=[pwd,otp] on the token issued after a 2FA login', function () {
     $access = $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])
         ->json('access_token');
 
-    expect(claims($access)->amr)->toBe(['pwd', 'otp']);
+    // `mfa` because a password and a TOTP are two different factor categories (RFC 8176's "mfa",
+    // NIST SP 800-63B-4 §2.2.1) — unlike a single-factor passkey plus a TOTP, which is not.
+    expect(claims($access)->amr)->toBe(['pwd', 'otp', 'mfa']);
 });
 
 it('throttles challenge verification per account, independent of the IP route limit', function () {
@@ -444,7 +453,7 @@ it('refuses to re-enrol over confirmed two-factor instead of silently disabling 
     // nothing an app could hang a "your second factor was removed" notification on.
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $access = $user->startSession()->accessToken;
+    $access = mfaSession($user);
 
     $this->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')->assertStatus(409);
 
@@ -617,6 +626,59 @@ it('refuses to redeem a challenge with a recovery code once the user is unverifi
     expect(DB::table('refresh_tokens')->count())->toBe(0);
 });
 
+it('refuses an unverified user BEFORE spending the second factor', function () {
+    // The 403 used to come after `ChallengeTwoFactor` had verified the factor — by then a single-use
+    // recovery code was burned on a sign-in the policy was always going to refuse. Checked first, the
+    // way a stale password is (`ConfirmPasswordUnchanged::holds()`), the code is still there to use
+    // once the address is verified again.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    $user->forceFill(['email_verified_at' => null])->save();
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertStatus(403);
+
+    expect($user->refresh()->recoveryCodesRemaining())->toBe(1);
+});
+
+it('still refuses an account that became unverified WHILE its factor was checked', function () {
+    // The early refusal above does not replace the gate after verification: an email change landing
+    // between the two must not get a session either.
+    config(['lukk.email_verification.block_unverified_login' => true]);
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    confirmedTwoFactor($user);
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->json('challenge_token');
+
+    app()->bind(ChallengeTwoFactor::class, fn ($app) => new class($app) extends ChallengeTwoFactor
+    {
+        public function __construct($app)
+        {
+            parent::__construct($app['auth']->createUserProvider('users'), $app->make(TwoFactorProvider::class));
+        }
+
+        public function __invoke(int|string $userId, #[SensitiveParameter] ?string $code, #[SensitiveParameter] ?string $recoveryCode): Authenticatable
+        {
+            $user = parent::__invoke($userId, $code, $recoveryCode);
+            $user->forceFill(['email_verified_at' => null])->save();
+
+            return $user;
+        }
+    });
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])
+        ->assertStatus(403)
+        ->assertJsonMissingPath('access_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0);
+});
+
 it('lets a verified two-factor user through when block_unverified_login is on', function () {
     config(['lukk.email_verification.block_unverified_login' => true]);
     $user = User::factory()->create(['email_verified_at' => now()]);
@@ -668,7 +730,7 @@ it('generates the documented number of recovery codes when the count is unusable
 it('regenerates the documented number of recovery codes when the count is null', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $token = $user->startSession()->accessToken;
+    $token = mfaSession($user);
     $headers = confirmedHeaders($token);
 
     config()->set('lukk.two_factor.recovery_codes', null);
@@ -682,7 +744,7 @@ it('regenerates the documented number of recovery codes when the count is null',
 it('names the conflict when enrolling over confirmed two-factor', function () {
     $user = User::factory()->create();
     confirmedTwoFactor($user);
-    $access = $user->startSession()->accessToken;
+    $access = mfaSession($user);
 
     $this->withToken($access)->withHeaders(confirmedHeaders($access))->postJson('/auth/two-factor')
         ->assertStatus(409)
@@ -742,4 +804,204 @@ it('reports the configured recovery-code total as a number, and eight when unset
 })->with([
     'a string from env' => ['10', 10],
     'unset' => [null, 8],
+    // Clamped as generation clamps it: a set of 500 configured is a set of 100 issued, and a "codes
+    // left" indicator reading 100 of 500 told the user four fifths of their codes were gone.
+    'above the cap' => [500, 100],
+    'zero' => [0, 1],
+    'negative' => [-3, 1],
 ]);
+
+it('assumes the password path for a challenge that does not say how the first factor was proved', function () {
+    // A rolling deploy redeems 0.7-minted challenges on 0.8 code, and a co-issuer's challenge may
+    // carry no `amr` at all. Both must keep recording `['pwd','otp']`, the behaviour they had. The
+    // fallback and the parameter default masked each other — removing either alone left the suite
+    // green — so this pins the redemption side on its own by minting a challenge without the claim.
+    $user = User::factory()->create();
+    $secret = app(TwoFactorProvider::class)->generateSecret();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString($secret),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+
+    // Minted directly, with no first factor named — exactly the shape an older release produced.
+    $challenge = app(ChallengeToken::class)->issue(
+        '2fa', $user->getAuthIdentifier(), 300,
+        passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($user),
+    );
+
+    $pair = $this->postJson('/auth/two-factor-challenge', [
+        'challenge_token' => $challenge,
+        'code' => currentOtp($secret),
+    ])->assertOk()->json();
+
+    expect(claims($pair['access_token'])->amr)->toBe(['pwd', 'otp', 'mfa']);
+});
+
+it('gives one session per challenge even when two redemptions read it as unspent together', function () {
+    // Two concurrent redemptions, each with a different valid factor, both passed the up-front check
+    // and both minted a session. A denylist that never reports a jti stands in for both reads landing
+    // before either write; the second must lose the atomic spend.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('R-ONE'), Hash::make('R-TWO')])])->save();
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $inner = app(Denylist::class);
+    app()->instance(Denylist::class, new class($inner) implements Denylist
+    {
+        public function __construct(private readonly Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return false;
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return false;
+        }
+    });
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'R-ONE'])->assertOk();
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'R-TWO'])
+        ->assertStatus(422)->assertJsonValidationErrors('challenge_token');
+});
+
+it('answers 422, not 500, for a recovery code stored under a hasher the app has since left', function () {
+    // After a move to argon2id with `hashing.argon.verify` on, checking a bcrypt-hashed code THROWS
+    // ("does not use the Argon2id algorithm"), and the lost-authenticator path died with a 500. A
+    // code the active hasher refuses to read is no match, exactly as sign-in treats a password.
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString(app(TwoFactorProvider::class)->generateSecret()),
+        'two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-CODE-1')]),
+        'two_factor_confirmed_at' => now(),
+    ])->save();
+    config(['hashing.driver' => 'argon2id', 'hashing.argon.verify' => true]);
+    app()->forgetInstance('hash');
+    Hash::clearResolvedInstances();
+    DB::table('users')->where('id', $user->id)->update(['password' => Hash::make('password')]);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-1'])->assertStatus(422);
+});
+
+it('refuses to re-confirm two-factor that is already on', function () {
+    // It answered 204, overwrote `two_factor_confirmed_at` and fired `TwoFactorAuthenticationConfirmed`
+    // again — telling the user an authenticator had been added when nothing changed. Mirrors enrolment,
+    // which refuses an account that already has it.
+    Event::fake([TwoFactorAuthenticationConfirmed::class]);
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+    $confirmedAt = $user->refresh()->two_factor_confirmed_at->getTimestamp();
+    $token = start()($user->id, ['amr' => ['pwd', 'otp', 'mfa']])->accessToken;
+    $headers = confirmedHeaders($token);
+    $this->travel(60)->seconds();
+
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/confirm', ['code' => currentOtp($secret)])
+        ->assertStatus(409)->assertJsonValidationErrors(['code' => 'Two-factor authentication is already enabled.']);
+
+    expect($user->refresh()->two_factor_confirmed_at->getTimestamp())->toBe($confirmedAt);
+    Event::assertNotDispatched(TwoFactorAuthenticationConfirmed::class);
+});
+
+it('answers a pending secret it cannot decrypt with 422, not a 500', function () {
+    // APP_KEY rotated without `previous_keys`, or a corrupt row: `twoFactorSecret()` throws. The challenge
+    // path already reads that as "no secret"; confirmation did not, and 500'd.
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext', 'two_factor_confirmed_at' => null])->save();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/confirm', ['code' => '123456'])
+        ->assertStatus(422)->assertJsonValidationErrors('code');
+
+    expect($user->refresh()->two_factor_confirmed_at)->toBeNull();
+});
+
+it('refuses to regenerate recovery codes for an account with no two-factor at all', function () {
+    // Eight codes that nothing ever asks for, and a `RecoveryCodesGenerated` notice about an authenticator
+    // the account does not have. 409, as for enabling two-factor twice.
+    Event::fake([RecoveryCodesGenerated::class]);
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertStatus(409)->assertJsonMissingPath('recovery_codes')
+        ->assertJsonValidationErrors(['two_factor' => 'Two-factor authentication is not enabled.']);
+
+    expect($user->refresh()->two_factor_recovery_codes)->toBeNull();
+    Event::assertNotDispatched(RecoveryCodesGenerated::class);
+});
+
+it('regenerates recovery codes during enrolment, before the code is confirmed', function () {
+    $user = User::factory()->create();
+    $token = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($token);
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor')->assertOk();
+
+    $this->withToken($token)->withHeaders($headers)->postJson('/auth/two-factor/recovery-codes')
+        ->assertOk()->assertJsonCount(8, 'recovery_codes');
+});
+
+it('refuses to regenerate recovery codes for a pending secret it cannot decrypt, rather than 500ing', function () {
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext', 'two_factor_confirmed_at' => null])->save();
+    $token = $user->startSession()->accessToken;
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertStatus(409);
+});
+
+it('regenerates recovery codes for a confirmed account whose TOTP secret cannot be decrypted', function () {
+    // Confirmed is enough: the codes are that account's way back in when its authenticator is unusable.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_secret' => 'not-a-ciphertext'])->save();
+    $token = mfaSession($user);
+
+    $this->withToken($token)->withHeaders(confirmedHeaders($token))->postJson('/auth/two-factor/recovery-codes')
+        ->assertOk()->assertJsonCount(8, 'recovery_codes');
+});
+
+// ---------------------------------------------------------------------------
+// NIST SP 800-63B-4 §4.2: account recovery is an event the subscriber is told about. A recovery code is
+// the way back in when the authenticator is lost — and the way in for whoever stole the printed list —
+// so its use must be observable for an app to notify the owner and prompt a fresh set.
+// ---------------------------------------------------------------------------
+
+it('announces a spent recovery code, with how many remain', function () {
+    Event::fake(['Lukk\Events\RecoveryCodeUsed']);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-CODE-1'), Hash::make('RECOVERY-CODE-2')])])->save();
+
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-CODE-2'])->assertOk();
+
+    Event::assertDispatchedTimes('Lukk\Events\RecoveryCodeUsed', 1);
+    Event::assertDispatched('Lukk\Events\RecoveryCodeUsed', fn ($e) => $e->user->is($user) && $e->remaining === 1);
+});
+
+it('announces nothing for a TOTP sign-in or a recovery code that does not match', function () {
+    Event::fake(['Lukk\Events\RecoveryCodeUsed']);
+    $user = User::factory()->create();
+    $secret = confirmedTwoFactor($user);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'WRONG-CODE'])->assertStatus(422);
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])->assertOk();
+
+    Event::assertNotDispatched('Lukk\Events\RecoveryCodeUsed');
+});

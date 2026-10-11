@@ -64,22 +64,37 @@ class DatabasePasskeyRepository implements PasskeyRepository
         return $this->scoped()->where('user_id', $userId)->pluck('credential_id')->all();
     }
 
-    public function updateSignCount(string $credentialId, int $signCount): void
+    public function updateSignCount(string $credentialId, int $signCount): bool
     {
-        $this->scoped()->whereKey($credentialId)->update([
-            'sign_count' => $signCount,
-            'last_used_at' => now(),
-        ]);
+        $this->scoped()->whereKey($credentialId)->update(['last_used_at' => now()]);
+
+        // Only ever forward. Two concurrent assertions each computed max(stored, theirs) from the same
+        // stale read; written unconditionally, the lower one could land last and roll the count back,
+        // so a clone presenting the higher value later passed the regression check (WebAuthn L3 §7.2).
+        return $this->scoped()->whereKey($credentialId)->where('sign_count', '<', $signCount)->update(['sign_count' => $signCount]) > 0;
     }
 
     public function summariesForUser(int|string $userId): array
     {
+        // Export and reset call this whether or not passkeys were ever set up, so the absent table
+        // is answered here — the only store that has one — rather than by the callers, which then
+        // skipped any store that was not this table.
+        if (! $this->published()) {
+            return [];
+        }
+
         return $this->scoped()->where('user_id', $userId)
-            ->get(['credential_id', 'name', 'last_used_at'])
+            // Allowlisted columns: never `public_key`. `sign_count` stays out too — it describes the
+            // authenticator's state, not the person, and the current value is what a cloned key needs
+            // to slip past the regression check.
+            ->get(['credential_id', 'name', 'last_used_at', 'created_at', 'aaguid', 'transports'])
             ->map(fn (Passkey $row) => [
                 'credential_id' => $row->credential_id,
                 'name' => $row->name,
                 'last_used_at' => $row->last_used_at?->getTimestamp(),
+                'created_at' => $row->created_at?->getTimestamp(),
+                'aaguid' => $row->aaguid,
+                'transports' => $row->transports,
             ])->all();
     }
 
@@ -88,12 +103,29 @@ class DatabasePasskeyRepository implements PasskeyRepository
         return (bool) $this->scoped()->where('user_id', $userId)->whereKey($credentialId)->delete();
     }
 
-    private function toRecord(Passkey $row): PasskeyRecord
+    /**
+     * Null when the stored COSE key cannot be decrypted — a rotated `APP_KEY` without
+     * `app.previous_keys`, or a corrupt row.
+     *
+     * Letting `DecryptException` escape turned that into a 500 on the UNAUTHENTICATED passkey-login
+     * route, and by then `FinishPasskeyLogin` has already burned the ceremony's single-use challenge:
+     * every attempt cost one challenge and returned a server error, so a passkey-only account was
+     * hard-locked out with no usable signal. `ChallengeTwoFactor::secretOf()` already guards exactly
+     * this for the TOTP secret; the passkey path did not. An unreadable credential is treated as one
+     * that does not match, which is the outcome the caller already handles (422).
+     */
+    private function toRecord(Passkey $row): ?PasskeyRecord
     {
+        try {
+            $publicKey = Crypt::decryptString($row->public_key);
+        } catch (\Throwable) {
+            return null;
+        }
+
         return new PasskeyRecord(
             credentialId: $row->credential_id,
             userId: $row->user_id,
-            publicKey: Crypt::decryptString($row->public_key),
+            publicKey: $publicKey,
             // The model already casts `sign_count` to an integer; this only states it.
             signCount: (int) $row->sign_count, // @pest-mutate-ignore: RemoveIntegerCast
             transports: $row->transports ?? [],
@@ -105,6 +137,11 @@ class DatabasePasskeyRepository implements PasskeyRepository
 
     public function deleteForUser(int|string $userId): int
     {
+        // Erasure calls this on every install; see summariesForUser().
+        if (! $this->published()) {
+            return 0;
+        }
+
         return $this->scoped()->where('user_id', $userId)->delete();
     }
 
@@ -114,7 +151,7 @@ class DatabasePasskeyRepository implements PasskeyRepository
         // such table. `lukk:prune` is SCHEDULED DAILY by default — throwing here broke the scheduled
         // prune for every install that never enabled passkeys, taking the refresh-token and lockout
         // sweeps down with it.
-        if (! Schema::hasTable((new Passkey)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -130,7 +167,8 @@ class DatabasePasskeyRepository implements PasskeyRepository
         //
         // Two round trips are affordable HERE, unlike on the `pin` path, because this is a
         // console-only command that runs once a day rather than on every ordinary request.
-        $scopable = Schema::hasColumn((new Passkey)->getTable(), 'guard');
+        $model = new Passkey;
+        $scopable = Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'guard');
 
         // A GLOBAL sweep. It runs from the console, where `$this->guard` is whatever `GuardContext`
         // happens to hold — never null, since it falls back to the default guard — which is
@@ -224,6 +262,19 @@ class DatabasePasskeyRepository implements PasskeyRepository
         }
 
         return $providers;
+    }
+
+    /**
+     * Whether the publish-only migration has run, on the model's own connection and table name.
+     *
+     * Deliberately NOT memoized: a static cache is answered once per PROCESS, so a worker started
+     * before the migration would keep skipping erasure for its whole life.
+     */
+    private function published(): bool
+    {
+        $model = new Passkey;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
     }
 
     /**

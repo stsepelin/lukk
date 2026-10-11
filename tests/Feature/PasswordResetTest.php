@@ -12,6 +12,13 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Timebox;
+use Illuminate\Testing\TestResponse;
+use Lukk\Contracts\PasskeyRepository;
+use Lukk\Events\PasskeyDeleted;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
+use Lukk\Tests\Fixtures\PasswdColumnUser;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('password-reset');
@@ -203,17 +210,45 @@ it('logs in with the new password after a reset', function () {
         ->assertOk()->assertJsonStructure(['access_token']);
 });
 
-it('spends equivalent work on an unknown address, so timing cannot enumerate', function () {
-    // The RESPONSE was already constant; the TIMING was not. A known address costs a `Hash::make`
-    // (the broker hashes the reset token before storing it) plus the notification; a miss returned
-    // immediately. The broker's 200ms Timebox pads a fast path up to its budget but cannot claw
-    // back an overrun, and at Laravel's default BCRYPT_ROUNDS=12 bcrypt costs ~70-120ms on top —
-    // measured as fully disjoint distributions, so a single request classified an address.
-    //
-    // Asserted by counting the work rather than by the wall clock, which no CI box can promise.
-    User::factory()->create(['email' => 'known@y.com']);
+/** Spy on the Timebox; read `->seen` for the budget each forgot-password request was boxed in. */
+function resetBudgets(): object
+{
+    $spy = new class extends Timebox
+    {
+        /** @var list<int> */
+        public array $seen = [];
 
-    $hasher = new class(app('hash')->driver()) implements Hasher
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->seen[] = $microseconds;
+
+            return $callback($this);
+        }
+    };
+    app()->instance(Timebox::class, $spy);
+
+    return $spy;
+}
+
+it('boxes a known and an unknown address in the same budget, so timing cannot enumerate', function () {
+    // The RESPONSE was already constant; the TIMING was not. The broker pads every outcome to its
+    // own 200 ms box, and lukk then ran an equalizing `Hash::make` AFTER it on a miss — so a miss
+    // cost 200 ms plus a hash while a hit cost ~200 ms in total: measured 460 ms against 259 ms at
+    // bcrypt cost 12, never overlapping. Equal WORK was the wrong invariant, because one derivation
+    // sat inside a padded box and the other outside it. The whole call is now boxed.
+    config(['lukk.password_reset.timebox_micros' => 600_000]);
+    User::factory()->create(['email' => 'known@y.com']);
+    $spy = resetBudgets();
+
+    $this->postJson('/auth/forgot-password', ['email' => 'known@y.com'])->assertOk();
+    $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
+
+    expect($spy->seen)->toBe([600_000, 600_000]);
+});
+
+it('does no extra hashing on a miss — the box, not a second derivation, equalizes it', function () {
+    // The post-broker `Hash::make` is what put the two outcomes 200 ms apart; it must not come back.
+    Hash::swap($hasher = new class(app('hash')->driver()) implements Hasher
     {
         public int $made = 0;
 
@@ -240,17 +275,31 @@ it('spends equivalent work on an unknown address, so timing cannot enumerate', f
         {
             return $this->inner->needsRehash($hashedValue, $options);
         }
-    };
+    });
 
-    Hash::swap($hasher);
-
-    $this->postJson('/auth/forgot-password', ['email' => 'known@y.com'])->assertOk();
-    $onHit = $hasher->made;
-
-    $hasher->made = 0;
     $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
 
-    expect($onHit)->toBeGreaterThan(0)->and($hasher->made)->toBe($onHit);
+    expect($hasher->made)->toBe(0);
+});
+
+it('falls back to a one-second reset budget when the key is missing', function () {
+    // Above the broker's own 200 ms box plus one bcrypt derivation at cost 12 plus dispatching the
+    // notification — the three things a hit pays that a miss does not. A config cached before the key
+    // existed must get that, not no box at all.
+    $lukk = (array) config('lukk');
+    unset($lukk['password_reset']['timebox_micros']);
+    config()->set('lukk', $lukk);
+    $spy = resetBudgets();
+
+    $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
+
+    expect($spy->seen)->toBe([1_000_000]);
+});
+
+it('reads a reset budget that arrives as a string', function () {
+    config(['lukk.password_reset.timebox_micros' => '1']);
+
+    $this->postJson('/auth/forgot-password', ['email' => 'nobody@y.com'])->assertOk();
 });
 
 it('revokes existing sessions when revoke_sessions is unset — the default is on', function () {
@@ -278,3 +327,164 @@ it('answers every failed reset with the one generic token message', function () 
         'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
     ])->assertStatus(422)->assertJsonValidationErrors(['email' => __('passwords.token')]);
 });
+
+function resetTo(object $test, User $user, string $password = 'new-password-1'): TestResponse
+{
+    return $test->postJson('/auth/reset-password', [
+        'email' => $user->email,
+        'token' => Password::createToken($user),
+        'password' => $password,
+        'password_confirmation' => $password,
+    ]);
+}
+
+it('keeps passkeys across a reset unless told otherwise, as it keeps the second factor', function () {
+    // NIST SP 800-63B-4 §4.2 does not ask a recovery to drop the other authenticators, and lukk already
+    // keeps TOTP across one; removing passkeys by default would be the odd one out.
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('kept', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect(app(PasskeyRepository::class)->credentialIdsFor($user->id))->toBe(['kept']);
+});
+
+it('removes every passkey on reset when asked, announcing each', function () {
+    // For an install that treats a reset as "start over": a passkey an attacker enrolled while they held
+    // the password, or registered on a squatted account, would otherwise outlive the recovery.
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Event::fake([PasskeyDeleted::class]);
+    $user = User::factory()->create();
+    $other = User::factory()->create();
+    $repo = app(PasskeyRepository::class);
+    $repo->store($user->id, new NewPasskey('a', 'PUB', 0));
+    $repo->store($user->id, new NewPasskey('b', 'PUB', 0));
+    $repo->store($other->id, new NewPasskey('theirs', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect($repo->credentialIdsFor($user->id))->toBe([])
+        ->and($repo->credentialIdsFor($other->id))->toBe(['theirs']);
+    Event::assertDispatchedTimes(PasskeyDeleted::class, 2);
+    Event::assertDispatched(PasskeyDeleted::class, fn ($e) => $e->user->is($user) && $e->credentialId === 'a');
+});
+
+it('resets without a passkeys table when asked to remove passkeys', function () {
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Schema::drop('passkeys');
+
+    resetTo($this, User::factory()->create())->assertOk();
+});
+
+it('writes the new password to the column the model names', function () {
+    // `getAuthPasswordName()` is the framework's seam for a column not called `password`; sign-in already
+    // honoured it, while a reset wrote a `password` attribute the model does not have.
+    Schema::table('users', fn (Blueprint $t) => $t->string('passwd')->nullable());
+    $user = PasswdColumnUser::query()->create(['name' => 'p', 'email' => 'passwd@y.com', 'password' => 'unused']);
+    config(['auth.providers.users.model' => PasswdColumnUser::class]);
+    app('auth')->forgetGuards();
+    DB::table('users')->where('id', $user->id)->update(['passwd' => Hash::make('old-password')]);
+
+    resetTo($this, $user)->assertOk();
+
+    expect(Hash::check('new-password-1', (string) DB::table('users')->where('id', $user->id)->value('passwd')))->toBeTrue();
+});
+
+it('keeps passkeys on an install whose config has lost the revoke_passkeys key', function () {
+    $lukk = config('lukk');
+    unset($lukk['password_reset']['revoke_passkeys']);
+    config(['lukk' => $lukk]);
+    $user = User::factory()->create();
+    app(PasskeyRepository::class)->store($user->id, new NewPasskey('kept', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect(app(PasskeyRepository::class)->credentialIdsFor($user->id))->toBe(['kept']);
+});
+
+it('removes the passkeys of a store that is not the passkeys table when asked', function () {
+    config(['lukk.password_reset.revoke_passkeys' => true]);
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    resetTo($this, $user)->assertOk();
+
+    expect($store->rows)->toBe([]);
+});
+
+/** Spy on the Timebox around a reset: the budget each request was boxed in, and whether it returned early. */
+function resetBoxes(): object
+{
+    $spy = new class extends Timebox
+    {
+        /** @var list<array{int, bool}> */
+        public array $seen = [];
+
+        public function call(callable $callback, int $microseconds)
+        {
+            try {
+                return $callback($this);
+            } finally {
+                $this->seen[] = [$microseconds, $this->earlyReturn];
+            }
+        }
+    };
+    app()->instance(Timebox::class, $spy);
+
+    return $spy;
+}
+
+it('boxes a failed reset for a known and an unknown address in the same budget', function () {
+    // The broker answers both with the same status, but a known address with a pending token row pays a
+    // bcrypt `Hash::check` of the presented token and an unknown one does not. The broker's own 200 ms
+    // box is shorter than one derivation at cost 12, and a Timebox never claws back an overrun — so the
+    // response time said which addresses had an account. The reset is boxed like forgot-password.
+    config(['lukk.password_reset.timebox_micros' => 700_000]);
+    $user = User::factory()->create(['email' => 'known@y.com']);
+    Password::createToken($user);
+    $spy = resetBoxes();
+    $attempt = fn (string $email) => $this->postJson('/auth/reset-password', [
+        'token' => 'not-the-token', 'email' => $email,
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422);
+
+    $attempt('known@y.com');
+    $attempt('nobody@y.com');
+
+    expect($spy->seen)->toBe([[700_000, false], [700_000, false]]);
+});
+
+it('does not hold a successful reset for the rest of the box', function () {
+    // A success announces itself in its status code; padding it only taxes the user.
+    config(['lukk.password_reset.timebox_micros' => 300_000]);
+    $user = User::factory()->create(['email' => 'a@b.c']);
+    $spy = resetBoxes();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => Password::createToken($user), 'email' => 'a@b.c',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertOk();
+
+    expect($spy->seen)->toBe([[300_000, true]]);
+});
+
+it('falls back to the one-second budget for a reset when the key is missing, and reads a string', function (mixed $budget, int $expected) {
+    $lukk = (array) config('lukk');
+    if ($budget === null) {
+        unset($lukk['password_reset']['timebox_micros']);
+    } else {
+        $lukk['password_reset']['timebox_micros'] = $budget;
+    }
+    config()->set('lukk', $lukk);
+    $spy = resetBoxes();
+
+    $this->postJson('/auth/reset-password', [
+        'token' => 'x', 'email' => 'nobody@y.com',
+        'password' => 'new-password-123', 'password_confirmation' => 'new-password-123',
+    ])->assertStatus(422);
+
+    expect($spy->seen)->toBe([[$expected, false]]);
+})->with(['missing' => [null, 1_000_000], 'a string' => ['250000', 250_000]]);

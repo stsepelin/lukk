@@ -123,3 +123,15 @@ it('prints only the secret with --show', function () {
     expect(Artisan::call('lukk:secret', ['--show' => true]))->toBe(0)
         ->and(Artisan::output())->toMatch('/\A[0-9a-f]{64}\n\z/');
 });
+
+it('refuses a guard name that cannot be an env variable, rather than rewriting another line', function (string $guard) {
+    // The name went into a regex unescaped: `a.b` maps to `LUKK_A.B_SECRET`, whose `.` matched any
+    // character, so `LUKK_AXB_SECRET` — another guard's secret — was the line overwritten.
+    file_put_contents(secretEnvPath(), "LUKK_AXB_SECRET=keep-me\n");
+
+    command('lukk:secret', ['--guard' => $guard])
+        ->expectsOutputToContain('A guard name may only contain letters, digits')
+        ->assertFailed();
+
+    expect(file_get_contents(secretEnvPath()))->toBe("LUKK_AXB_SECRET=keep-me\n");
+})->with(['a dot' => ['a.b'], 'a space' => ['a b'], 'a regex quantifier' => ['a+']]);

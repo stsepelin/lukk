@@ -36,9 +36,26 @@ function fresh(string $abstract): mixed
 }
 
 describe('the default guard\'s named limiters', function () {
-    $named = ['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa',
-        'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset',
-        'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'];
+    // DERIVED from config/lukk.php, not a third hardcoded copy. The property test below claims a new
+    // key cannot ship with a loose fallback — which was untrue while this list was written by hand:
+    // a key added to the provider's loop and to the config file simply would not appear here, so
+    // neither test would ever look at it. `login` is excluded because it has its own limiter class,
+    // and `ipv6_prefix` because it is not a limiter at all.
+    $shippedLimits = (require __DIR__.'/../../config/lukk.php')['rate_limits'];
+    $named = [];
+    foreach (array_keys($shippedLimits) as $key) {
+        if (in_array($key, ['login', 'ipv6_prefix'], true)) {
+            continue;
+        }
+
+        $named[$key] = 'lukk-'.match ($key) {
+            'two_factor' => '2fa',
+            'email_verification' => 'email-verification',
+            'password_reset' => 'password-reset',
+            'registration' => 'register',
+            default => $key,
+        };
+    }
 
     it('reads each one\'s limits as numbers from the strings env() delivers', function (string $key, string $name) {
         config(["lukk.rate_limits.{$key}" => ['max_attempts' => '7', 'decay_seconds' => '71']]);
@@ -47,13 +64,34 @@ describe('the default guard\'s named limiters', function () {
         expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([7, 71]);
     })->with(array_map(null, array_keys($named), array_values($named)));
 
-    it('falls back to 30 per 60s when a block is missing, or is not a block at all', function (string $key, string $name) {
+    it('falls back to the SHIPPED limit for that key when a block is missing, or is not a block at all', function (string $key, string $name) {
+        // Per key, not one shared number. A single `?? 30` was 6x looser than the shipped value on
+        // `confirm` (5), `email_verification` (6) and `password_reset` (6), so a degraded config
+        // RELAXED those controls — worst of all on step-up confirmation, which the 0.5.0 changelog
+        // calls an unmetered password oracle. And it is reachable: `rate_limits.confirm` only arrived
+        // in 0.5.0, and an app that ran `config:cache` before then gets no backfill at all, because
+        // `mergeConfigDeep` early-returns when the configuration is cached.
+        $shipped = ['refresh' => 30, 'passkeys' => 30, 'two_factor' => 5, 'email_verification' => 6,
+            'password_reset' => 6, 'registration' => 10, 'confirm' => 5];
+
         foreach ([null, 'garbage'] as $block) {
             config(["lukk.rate_limits.{$key}" => $block]);
             [$limit] = limits($name);
 
-            expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([30, 60]);
+            expect([$limit->maxAttempts, $limit->decaySeconds])->toBe([$shipped[$key], 60]);
         }
+    })->with(array_map(null, array_keys($named), array_values($named)));
+
+    it('never degrades to a LOOSER limit than the one config/lukk.php ships', function (string $key, string $name) {
+        // The property behind the table above, stated so a future key cannot be added with a loose
+        // fallback: whatever the degraded default is, it may not exceed the shipped value.
+        $shippedConfig = require __DIR__.'/../../config/lukk.php';
+        $shippedMax = (int) $shippedConfig['rate_limits'][$key]['max_attempts'];
+
+        config(["lukk.rate_limits.{$key}" => null]);
+        [$limit] = limits($name);
+
+        expect($limit->maxAttempts)->toBeLessThanOrEqual($shippedMax);
     })->with(array_map(null, array_keys($named), array_values($named)));
 
     it('adds a per-user bucket on step-up and email verification, keyed to the guard and the user', function (string $name) {

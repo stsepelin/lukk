@@ -12,7 +12,7 @@ use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
 
 /**
- * Lift an account lockout (NIST SP 800-63B §5.2.2). The operator-facing half of the release story:
+ * Lift an account lockout (NIST SP 800-63B-4 §3.2.2). The operator-facing half of the release story:
  * a locked-out user can't authenticate at all, so without this someone has to touch the database.
  */
 class ReleaseLockoutCommand extends Command
@@ -49,19 +49,31 @@ class ReleaseLockoutCommand extends Command
         // for the others — so the command has to derive the same subject the failure path recorded.
         // `two_factor` and `confirm` key on the USER ID verbatim: lower-casing those would break a
         // ULID (uppercase Crockford base32) wherever comparison is binary (PostgreSQL, SQLite).
-        $subject = $purpose === 'login'
-            ? $this->loginSubject($this->stringArgument('subject'), $guard)
-            : $this->stringArgument('subject');
+        // A `login` lock counts against the account and against the identifier's fold, and before 0.7 a
+        // non-account was keyed by the identifier in plain text. With `release_after` at 0 this command is
+        // the only thing that ever releases any of them, so all are released.
+        $subjects = $purpose === 'login'
+            ? [$this->loginSubject($this->stringArgument('subject'), $guard), LoginRateLimiter::lockoutSubject(null, $this->stringArgument('subject')), LoginRateLimiter::legacyLockoutSubject($this->stringArgument('subject'))]
+            : [$this->stringArgument('subject')];
 
-        // `release()` fires AccountReleased itself, so every path (success, reset, console, expiry)
-        // reports through one place rather than only this one.
-        if ($lockouts->release($purpose, $subject, $guard) === 0) {
+        // Which of them hold a lock, asked before clearing: the output must say whether a LOCK was
+        // released or only a failure count cleared — a counter below the cap, or a lock `release_after`
+        // already lifted. `release()` fires `AccountReleased` itself, for a held lock only, so every
+        // path that lifts one (success, reset, this command, the repository API) reports through one
+        // place; an expiry lifts it without an event. A lock taken between this read and the release
+        // is still released and announced — only the wording here could lag it.
+        $held = count(array_filter($subjects, fn (string $subject) => $lockouts->locked($purpose, $subject, $guard)));
+        $cleared = array_sum(array_map(fn (string $subject) => $lockouts->release($purpose, $subject, $guard), $subjects));
+
+        if ($cleared === 0) {
             $this->components->warn(sprintf('No %s lock found for [%s] on guard [%s].', $purpose, $this->stringArgument('subject'), $guard));
 
             return self::FAILURE;
         }
 
-        $this->components->info(sprintf('Released the %s lock on [%s].', $purpose, $this->stringArgument('subject')));
+        $this->components->info($held > 0
+            ? sprintf('Released the %s lock on [%s].', $purpose, $this->stringArgument('subject'))
+            : sprintf('No %s lock was held for [%s]; cleared its failure count.', $purpose, $this->stringArgument('subject')));
 
         return self::SUCCESS;
     }

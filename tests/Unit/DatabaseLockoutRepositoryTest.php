@@ -225,3 +225,125 @@ it('reads the attempt count as an integer whatever the driver hands back', funct
     // Some PDO drivers return integer columns as strings, and the cap is compared with `>=`.
     expect((new Lockout)->forceFill(['attempts' => '3'])->attempts)->toBe(3);
 });
+
+it('announces a release only where a lock was held', function () {
+    // `AccountReleased` is the lock→released transition, the mirror of `AccountLocked`. It fired whenever
+    // a counter row was deleted — so every successful sign-in after a single typo told an audit log that
+    // a locked account had been unlocked, when no lock had ever existed.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(max: 3);
+    $repo->recordFailure('login', 'ada', null);
+
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertNotDispatched(AccountReleased::class);
+
+    lockSubject($repo);
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertDispatchedTimes(AccountReleased::class, 1);
+});
+
+it('does not announce clearing a lock that had already auto-released', function () {
+    // The lock ended when `release_after` elapsed, and that expiry announces nothing (it is read-only);
+    // deleting the spent row later is not a second release.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(after: 30);
+    lockSubject($repo);
+    $this->travel(31)->seconds();
+
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    Event::assertNotDispatched(AccountReleased::class);
+});
+
+it('never lifts a lock taken between reading the row and deleting it without announcing it', function () {
+    // "Held" was read by a separate SELECT before an unconditional DELETE: a concurrent failure that hit
+    // the cap in between had its fresh lock deleted with no `AccountReleased`. Decided in the deleting
+    // statements now — a lock that arrives late is either announced or left standing.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(max: 3);
+    $repo->recordFailure('login', 'ada', null);
+    $seen = 0;
+    DB::listen(function ($query) use (&$seen) {
+        if (str_contains($query->sql, '"lukk_lockouts"') && ! str_contains($query->sql, 'sqlite_master') && ++$seen === 2) {
+            DB::table('lukk_lockouts')->update(['locked_at' => now()]);
+        }
+    });
+
+    $repo->release('login', 'ada', null);
+
+    $stillLocked = $repo->locked('login', 'ada', null);
+    expect($stillLocked || Event::dispatched(AccountReleased::class)->isNotEmpty())->toBeTrue();
+});
+
+it('tells a held lock from a spent one at the edges of release_after', function (int $after, int $age, bool $announced) {
+    // 0 means held until released, however old; any positive value — one second included — lifts it.
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(after: $after);
+    lockSubject($repo);
+    $this->travel($age)->seconds();
+
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    expect(Event::dispatched(AccountReleased::class)->isNotEmpty())->toBe($announced);
+})->with([
+    'held for good, long after' => [0, 3_600, true],
+    'a one-second release, past it' => [1, 2, false],
+    'a one-second release, within it' => [1, 0, true],
+]);
+
+it('leaves standing a lock that arrives mid-release when locks never lapse, however old its stamp', function () {
+    // With `release_after` at 0 no lock is ever spent, so the second statement must not take one — even
+    // one stamped earlier than this release (a clock behind, a slow transaction committing late).
+    Event::fake([AccountReleased::class]);
+    $repo = lockouts(max: 3, after: 0);
+    $repo->recordFailure('login', 'ada', null);
+    $seen = 0;
+    DB::listen(function ($query) use (&$seen) {
+        if (str_contains($query->sql, '"lukk_lockouts"') && ! str_contains($query->sql, 'sqlite_master') && ++$seen === 2) {
+            DB::table('lukk_lockouts')->update(['locked_at' => now()->subMinute()]);
+        }
+    });
+
+    $repo->release('login', 'ada', null);
+
+    expect($repo->locked('login', 'ada', null))->toBeTrue();
+    Event::assertNotDispatched(AccountReleased::class);
+});
+
+it('agrees with locked() to the sub-second on whether a lock is still held at release_after', function (float $offset, bool $held) {
+    // `locked()` compares with microseconds; the release's SQL bound was bound as `Y-m-d H:i:s`, dropping
+    // them. Between L+R and L+R+1 the lock read as lifted while the release still announced it — and
+    // `lukk:release` printed "no lock was held" beside the event. Whatever the instant, the two agree.
+    Event::fake([AccountReleased::class]);
+    $locked = Carbon::parse('2026-10-10 12:00:00');
+    Carbon::setTestNow($locked);
+    $repo = lockouts(after: 30);
+    lockSubject($repo);
+    Carbon::setTestNow($locked->copy()->addMicroseconds((int) round((30 + $offset) * 1_000_000)));
+
+    expect($repo->locked('login', 'ada', null))->toBe($held);
+    expect($repo->release('login', 'ada', null))->toBe(1);
+    expect(Event::dispatched(AccountReleased::class)->isNotEmpty())->toBe($held);
+})->with([
+    'half a second before release_after' => [-0.5, true],
+    'exactly at release_after' => [0.0, true],
+    'half a second past it' => [0.5, false],
+    'a whole second past it' => [1.0, false],
+]);
+
+it('does not sweep as spent a lock that arrives mid-release exactly at its release_after', function () {
+    // At exactly L+R the lock is still held (`expired()` wants it PAST), so the second statement, which
+    // takes only spent locks, must leave it.
+    Event::fake([AccountReleased::class]);
+    Carbon::setTestNow(Carbon::parse('2026-10-10 12:00:30'));
+    $repo = lockouts(max: 3, after: 30);
+    $repo->recordFailure('login', 'ada', null);
+    $seen = 0;
+    DB::listen(function ($query) use (&$seen) {
+        if (str_contains($query->sql, '"lukk_lockouts"') && ! str_contains($query->sql, 'sqlite_master') && ++$seen === 2) {
+            DB::table('lukk_lockouts')->update(['locked_at' => Carbon::parse('2026-10-10 12:00:00')]);
+        }
+    });
+
+    $repo->release('login', 'ada', null);
+
+    expect($repo->locked('login', 'ada', null))->toBeTrue();
+});

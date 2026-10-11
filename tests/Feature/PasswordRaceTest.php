@@ -11,9 +11,12 @@ use Lukk\Actions\AttemptLogin;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Actions\StartSession;
 use Lukk\Auth\ChallengeToken;
+use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Lukk;
+use Lukk\Support\Abilities;
 use Lukk\Support\PasswordFingerprint;
+use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
 use Lukk\Tests\Fixtures\User;
 use PragmaRX\Google2FA\Google2FA;
@@ -286,3 +289,121 @@ it('fingerprints without a TypeError when the key, the password or the previous 
     'a non-string previous key' => [fn () => config(['app.previous_keys' => [12345]])],
     'a user with no password' => [fn (User $user) => $user->forceFill(['password' => null])],
 ]);
+
+it('takes it back through a rebound TokenIssuer, not a hardcoded sha256', function () {
+    // `TokenIssuer::hash()` is a declared swap point — HMAC-with-a-pepper is the obvious reason to
+    // rebind it — and every other refresh-token lookup in the package goes through it. This one
+    // hashed with `hash('sha256', …)` directly, so under a rebound issuer the lookup missed, the
+    // family revoke below it silently became a no-op, and the session this check exists to take back
+    // stayed live until it expired. Same shape as the `scope`/`pin` seam incidents.
+    app()->extend(TokenIssuer::class, fn (TokenIssuer $inner) => new class($inner) implements TokenIssuer
+    {
+        public function __construct(private readonly TokenIssuer $inner) {}
+
+        public function accessToken(TokenContext $context, array $claims = [], ?Abilities $abilities = null): array
+        {
+            return $this->inner->accessToken($context, $claims, $abilities);
+        }
+
+        public function newRefreshSecret(): string
+        {
+            return $this->inner->newRefreshSecret();
+        }
+
+        /** Peppered — a digest a hardcoded `hash('sha256', $secret)` can never reproduce. */
+        public function hash(string $secret): string
+        {
+            return hash('sha256', 'pepper::'.$secret);
+        }
+    });
+
+    $user = User::factory()->create();
+    app()->extend(StartSession::class, fn (StartSession $start) => new class($start, $user) extends StartSession
+    {
+        public function __construct(private StartSession $inner, private User $user) {}
+
+        public function __invoke(int|string $userId, array $claims = [], ?array $abilities = null): TokenPair
+        {
+            replacePassword($this->user);
+
+            return ($this->inner)($userId, $claims, $abilities);
+        }
+    });
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertUnprocessable();
+
+    expect(liveFamilies($user))->toBe(0);
+});
+
+it('refuses a stale challenge before it spends the factor or starts a session', function () {
+    // The fingerprint used to be compared only after the second factor had verified and a session had been
+    // written: a refused redemption still BURNED the recovery code (single-use), wrote a family it then had
+    // to revoke, and spent the TOTP code in the replay cache. Nothing about a stale challenge needs the
+    // factor to decide, so it is refused first.
+    $user = User::factory()->create();
+    enrolled($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-1')])])->save();
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+    $user->refresh();
+    replacePassword($user);
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-1'])
+        ->assertUnprocessable()->assertJsonValidationErrors('challenge_token');
+
+    expect(DB::table('refresh_tokens')->where('user_id', $user->getKey())->count())->toBe(0)
+        ->and($user->refresh()->useRecoveryCode('RECOVERY-1'))->toBeTrue();
+});
+
+it('leaves the TOTP code of a refused stale challenge usable', function () {
+    $user = User::factory()->create();
+    $secret = enrolled($user);
+    $stale = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+    $user->refresh();
+    replacePassword($user);
+    $code = app(Google2FA::class)->getCurrentOtp($secret);
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $stale, 'code' => $code])->assertUnprocessable();
+    app('auth')->forgetGuards();
+    $fresh = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'the-new-password'])->json('challenge_token');
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $fresh, 'code' => $code])
+        ->assertOk()->assertJsonStructure(['access_token']);
+});
+
+it('refuses a challenge with no fingerprint before it spends the factor or writes a row', function () {
+    $user = User::factory()->create();
+    enrolled($user);
+    $user->forceFill(['two_factor_recovery_codes' => json_encode([Hash::make('RECOVERY-1')])])->save();
+    $challenge = app(ChallengeToken::class)->issue('2fa', $user->getKey(), 300);
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'recovery_code' => 'RECOVERY-1'])
+        ->assertUnprocessable()->assertJsonValidationErrors('challenge_token');
+
+    expect(DB::table('refresh_tokens')->count())->toBe(0)
+        ->and($user->refresh()->useRecoveryCode('RECOVERY-1'))->toBeTrue();
+});
+
+it('still takes back a two-factor session whose password changed after the early check', function () {
+    // The early refusal saves the factor; it cannot close the race. A change landing between it and the
+    // session write is caught only by the check AFTER the session exists.
+    $user = User::factory()->create();
+    $secret = enrolled($user);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+    app('auth')->forgetGuards();
+    app()->extend(StartSession::class, fn (StartSession $start) => new class($start, $user) extends StartSession
+    {
+        public function __construct(private StartSession $inner, private User $user) {}
+
+        public function __invoke(int|string $userId, array $claims = [], ?array $abilities = null): TokenPair
+        {
+            replacePassword($this->user->refresh());
+
+            return ($this->inner)($userId, $claims, $abilities);
+        }
+    });
+
+    $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => app(Google2FA::class)->getCurrentOtp($secret)])
+        ->assertUnprocessable()->assertJsonValidationErrors('challenge_token')->assertJsonMissingPath('access_token');
+
+    expect(liveFamilies($user))->toBe(0);
+});

@@ -196,3 +196,13 @@ function failedRulesFor(array $rules, array $data, string $field): array
 
     return $validator->failed()[$field] ?? [];
 }
+
+/**
+ * An access token for a session established with two factors (`amr` carries `mfa`), as a password-plus-TOTP
+ * sign-in produces. `startSession()` stamps no `amr`, which reads as single-factor: a password step-up on
+ * an account with a second factor is refused there.
+ */
+function mfaSession(Authenticatable $user): string
+{
+    return start()($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp', 'mfa']])->accessToken;
+}

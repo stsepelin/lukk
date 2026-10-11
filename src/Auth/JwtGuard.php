@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace Lukk\Auth;
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Concerns\HasUniqueStringIds;
 use Illuminate\Http\Request;
 use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
 use Lukk\Support\VerifiedToken;
+use ReflectionMethod;
 
 /**
  * Request guard (Sanctum Guard analog): pulls the bearer token, verifies it
@@ -52,6 +55,10 @@ class JwtGuard
             return null;
         }
 
+        if (! $this->couldName($claims->sub)) {
+            return null;
+        }
+
         $user = $this->users->retrieveById($claims->sub);
 
         if ($user === null) {
@@ -75,6 +82,68 @@ class JwtGuard
         $request->attributes->set('lukk.claims', $claims);
 
         return $user;
+    }
+
+    /**
+     * Whether `sub` could name a user at all — refused here only where that is certain without any I/O.
+     *
+     * lukk mints `sub` from a real identifier; a co-issuer sharing the secret (the verify-only topology)
+     * mints its own, and must mint one the identifier column can hold.
+     *
+     * - A NUL is refused for every provider: pdo_pgsql passes a bound string as a C string, so
+     *   `alice\0x` looked up `alice`.
+     * - For a stock `EloquentUserProvider` (exactly that class) whose auth identifier IS the model's key,
+     *   the model itself says what the key holds. With Laravel's `HasUuids`/`HasUlids`/`HasVersion4Uuids`
+     *   generating it, a value the model's own `isValidUniqueId()` refuses (for `HasUuids`: anything but the
+     *   canonical hyphenated form) — the check Laravel's route-model binding applies, honouring an override.
+     *   An incrementing `int` key (the stock `id()`) holds an integer: refused unless canonical and within
+     *   signed 64 bits, the widest integer key there is. On PostgreSQL such a subject was SQLSTATE
+     *   22P02/22003 on the lookup: a 500 where a subject naming no user is a 401.
+     * - Everything else goes to the provider unchecked: a Snowflake key that does not increment, an
+     *   identifier that is another column, a 32-bit `increments('id')` handed a value past int4, a domain
+     *   type, an `EloquentUserProvider` subclass (it may decode its own identifiers) or a custom provider. A
+     *   subject its column cannot hold is then the provider's error, reported as a 500 — the token was
+     *   signed by a trusted issuer, so it is that issuer's bug and should surface. Reading the schema to
+     *   decide it cost every request a catalog query on the write connection, and interpreting the failed
+     *   lookup afterwards hid real outages (a broken scope, a mistyped `$with` relation) as 401s for
+     *   everybody.
+     */
+    private function couldName(mixed $sub): bool
+    {
+        if (is_string($sub) && str_contains($sub, "\0")) {
+            return false;
+        }
+
+        // Exactly the stock provider: a subclass may decode its own identifiers before the lookup. (The
+        // `instanceof` only tells PHPStan what the class comparison below already guarantees.)
+        if (! $this->users instanceof EloquentUserProvider) { // @pest-mutate-ignore: InstanceOfToTrue
+            return true; // @pest-mutate-ignore: RemoveEarlyReturn
+        }
+
+        if ($this->users::class !== EloquentUserProvider::class) {
+            return true;
+        }
+
+        $model = $this->users->createModel();
+
+        if ($model->getAuthIdentifierName() !== $model->getKeyName()) {
+            return true;
+        }
+
+        // The traits generate only the columns `uniqueIds()` names — the key, unless the model says otherwise —
+        // and the model's own (protected) `isValidUniqueId()` is what a valid one is, override included.
+        if (in_array(HasUniqueStringIds::class, class_uses_recursive($model), true)
+            && in_array($model->getKeyName(), $model->uniqueIds(), true)) {
+            return (new ReflectionMethod($model, 'isValidUniqueId'))->invoke($model, $sub) === true;
+        }
+
+        if (! $model->getIncrementing() || ! in_array($model->getKeyType(), ['int', 'integer'], true)) {
+            return true;
+        }
+
+        // An int already is one; a string must be a canonical integer (no sign, padding or space) in range.
+        return is_int($sub)
+            || (is_string($sub) && preg_match('/^(?:0|-?[1-9][0-9]*)\z/', $sub) === 1 && is_int(filter_var($sub, FILTER_VALIDATE_INT)));
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool

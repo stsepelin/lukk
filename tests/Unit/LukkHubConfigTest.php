@@ -139,3 +139,150 @@ it('reads a configured identifier column as it is', function () {
 
     expect(Lukk::usernameField())->toBe('username');
 });
+
+it('refuses an identifier column that cannot work as one, naming the fix', function (string $field) {
+    // `EloquentUserProvider::retrieveByCredentials()` drops every key containing "password", so such a
+    // column looks nothing up and every sign-in fails with an ordinary 422. A dot reads nested
+    // request input and becomes a table-qualified column. Neither is a typo the app would notice.
+    config(['lukk.username' => $field]);
+
+    expect(fn () => Lukk::usernameField())->toThrow(InvalidArgumentException::class, 'lukk.username');
+})->with([
+    'a password column' => ['password'],
+    'one containing password' => ['backup_Password_hint'],
+    'a dotted path' => ['profile.email'],
+    'whitespace' => ['user name'],
+    'a leading digit' => ['1email'],
+]);
+
+it('accepts any plain column name', function (string $field) {
+    config(['lukk.username' => $field]);
+
+    expect(Lukk::usernameField())->toBe($field);
+})->with(['phone', 'user_name', '_login', 'Email2']);
+
+it('refuses a default guard whose token users come from another provider than its passwords', function () {
+    // Sign-in checks the password against `lukk.user_provider`; the lukk-jwt guard resolves the token's
+    // `sub` through `auth.guards.<default>.provider`. Pointed at different providers, a `users` password
+    // minted a token that resolved to the `admins` row with the same id — an account takeover by
+    // configuration, with no error anywhere.
+    config([
+        'auth.providers.admins' => ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\Admin::class],
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'admins'],
+        'lukk.user_provider' => 'users',
+    ]);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'lukk guard [api] resolves its users from the [admins] provider (auth.guards.api.provider), but signs '
+            .'them in against [users] (lukk.user_provider) — a password checked in one would mint a token '
+            .'for the account with the same id in the other. Point both at the same provider.');
+});
+
+it('boots a default guard whose provider matches, or names none, or is not lukk\'s', function (?array $guard) {
+    config(['auth.guards.api' => $guard, 'lukk.user_provider' => 'users']);
+
+    expectNoThrow(fn () => Lukk::assertGuardsIsolated());
+})->with([
+    'the same provider' => [['driver' => 'lukk-jwt', 'provider' => 'users']],
+    'no provider' => [['driver' => 'lukk-jwt']],
+    'an empty provider' => [['driver' => 'lukk-jwt', 'provider' => '']],
+    'another driver' => [['driver' => 'session', 'provider' => 'admins']],
+    'no such guard (a verify-elsewhere service)' => [null],
+]);
+
+it('boots a default guard whose differently named provider reads the same users', function (array $tokens, array $passwords) {
+    // What decides who a token resolves to is the provider's SOURCE — the Eloquent model, the database
+    // table — not the name it is registered under: `api_users` and `users` over one model are one table.
+    config([
+        'auth.providers.api_users' => $tokens,
+        'auth.providers.users' => $passwords,
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'api_users'],
+        'lukk.user_provider' => 'users',
+    ]);
+
+    expectNoThrow(fn () => Lukk::assertGuardsIsolated());
+})->with([
+    'eloquent, one model' => [
+        ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\User::class],
+        ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\User::class],
+    ],
+    'database, one table (no connection named)' => [
+        ['driver' => 'database', 'table' => 'users'],
+        ['driver' => 'database', 'table' => 'users'],
+    ],
+    'database, one table on one connection' => [
+        ['driver' => 'database', 'table' => 'users', 'connection' => 'pgsql'],
+        ['driver' => 'database', 'table' => 'users', 'connection' => 'pgsql'],
+    ],
+    'a custom driver, identical config' => [
+        ['driver' => 'ldap', 'model' => 'App\\Ldap\\User', 'rules' => []],
+        ['driver' => 'ldap', 'model' => 'App\\Ldap\\User', 'rules' => []],
+    ],
+]);
+
+it('refuses a default guard whose differently named provider reads other users', function (array $tokens, array $passwords) {
+    config([
+        'auth.providers.api_users' => $tokens,
+        'auth.providers.users' => $passwords,
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'api_users'],
+        'lukk.user_provider' => 'users',
+    ]);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'resolves its users from the [api_users] provider (auth.guards.api.provider), but signs them in against [users]');
+})->with([
+    'eloquent, another model' => [
+        ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\Admin::class],
+        ['driver' => 'eloquent', 'model' => Lukk\Tests\Fixtures\User::class],
+    ],
+    'database, another table' => [
+        ['driver' => 'database', 'table' => 'admins'],
+        ['driver' => 'database', 'table' => 'users'],
+    ],
+    'database, one table on another connection' => [
+        ['driver' => 'database', 'table' => 'users', 'connection' => 'tenant'],
+        ['driver' => 'database', 'table' => 'users'],
+    ],
+    'another driver over the same name' => [
+        ['driver' => 'database', 'table' => 'users'],
+        ['driver' => 'eloquent', 'model' => 'users'],
+    ],
+    'a custom driver, different config' => [
+        ['driver' => 'ldap', 'model' => 'App\\Ldap\\User', 'rules' => ['staff']],
+        ['driver' => 'ldap', 'model' => 'App\\Ldap\\User', 'rules' => []],
+    ],
+    'eloquent, model missing on both' => [
+        ['driver' => 'eloquent'],
+        ['driver' => 'eloquent'],
+    ],
+    'database, table missing on both' => [
+        ['driver' => 'database'],
+        ['driver' => 'database'],
+    ],
+    'driver missing on both' => [
+        ['model' => Lukk\Tests\Fixtures\User::class],
+        ['model' => Lukk\Tests\Fixtures\User::class],
+    ],
+]);
+
+it('refuses a differently named provider that is not configured at all', function () {
+    // Nothing to compare: the name mismatch stands, as before.
+    config([
+        'auth.providers.api_users' => null,
+        'auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 'api_users'],
+        'lukk.user_provider' => 'users',
+    ]);
+
+    expect(fn () => Lukk::assertGuardsIsolated())->toThrow(RuntimeException::class, '[api_users] provider');
+
+    config(['auth.providers.api_users' => config('auth.providers.users'), 'auth.providers.users' => 'eloquent']);
+
+    expect(fn () => Lukk::assertGuardsIsolated())->toThrow(RuntimeException::class, '[api_users] provider');
+});
+
+it('refuses a default guard naming no provider when Laravel\'s default provider is another', function () {
+    config(['auth.guards.api' => ['driver' => 'lukk-jwt'], 'auth.defaults.provider' => 'admins', 'lukk.user_provider' => 'users']);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'resolves its users from the [admins] provider (auth.defaults.provider)');
+});

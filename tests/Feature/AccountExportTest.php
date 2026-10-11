@@ -3,14 +3,19 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\ExportAccount;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
 use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
@@ -135,6 +140,14 @@ it('exports the lockout counters erasure would delete, in all three key spaces',
         ->and(json_encode($export['lockouts']))->not->toContain('idn:')->not->toContain('id:');
 });
 
+it('exports a non-account counter stored in plain text by an older release', function () {
+    // Erasure deletes it, so an access request has to show it.
+    $user = User::factory()->create(['email' => 'legacy@example.test']);
+    app(LockoutRepository::class)->recordFailure('login', 'idn:legacy@example.test', 'api');
+
+    expect(app(ExportAccount::class)($user)['lockouts'])->toHaveCount(1);
+});
+
 it('exports no lockouts when the lockout table was never published', function () {
     Schema::drop('lukk_lockouts');
 
@@ -168,7 +181,7 @@ it('exports every session field and the account id', function () {
     $export = app(ExportAccount::class)($user);
 
     expect($export['account']['id'])->toBe($user->getKey())
-        ->and(array_keys($export['sessions'][0]))->toBe(['session', 'created_at', 'last_rotated_at', 'revoked_at', 'expires_at']);
+        ->and(array_keys($export['sessions'][0]))->toBe(['session', 'created_at', 'last_rotated_at', 'revoked_at', 'expires_at', 'amr', 'authenticated_at']);
 });
 
 it('formats a raw string timestamp from a model that does not cast it, and reads an empty one as none', function () {
@@ -189,9 +202,161 @@ it('asks the lockout store about all three key spaces, as strings', function () 
     // strict comparison waiting to miss.
     $spy = new RecordingLockoutRepository;
     exporter('email', $spy)(new GenericUser(['id' => 5, 'email' => 'Ada@Example.test']));
-    expect($spy->summarised)->toBe(['id:5', '5', 'idn:ada@example.test']);
+    expect($spy->summarised)->toBe(['id:5', '5', 'idn:sha256:'.hash('sha256', 'ada@example.test'), 'idn:ada@example.test']);
 
     // No identifier: the third key space is empty, which the repository skips.
     exporter('email', $spy)(new GenericUser(['id' => 5]));
-    expect($spy->summarised)->toBe(['id:5', '5', '']);
+    expect($spy->summarised)->toBe(['id:5', '5', '', '']);
+});
+
+it('exports the passkeys of a store that is not the passkeys table', function () {
+    // A rebound PasskeyRepository has no `passkeys` table; gating on that table exported nothing.
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    expect(collect(app(ExportAccount::class)($user)['passkeys'])->pluck('credential_id')->all())->toBe(['elsewhere']);
+});
+
+it('exports the counters of a lockout store that is not the lockout table', function () {
+    // A rebound LockoutRepository (Redis, say) has no `lukk_lockouts` table; gating on it exported nothing.
+    Schema::drop('lukk_lockouts');
+    $spy = new RecordingLockoutRepository;
+
+    exporter('email', $spy)(new GenericUser(['id' => 5, 'email' => 'ada@example.test']));
+
+    expect($spy->summarised)->not->toBe([]);
+});
+
+it('discloses every passkey field erasure destroys, in ISO-8601, and never the public key', function () {
+    // Art. 15 should disclose what Art. 17 destroys. The export carried the id, the name and a last-used
+    // time — as a unix integer, the one timestamp in the file that was not ISO-8601 — while erasure also
+    // destroyed when the passkey was added, the authenticator model (AAGUID) and its transports.
+    // Pinned by hand: `travel()->days($callback)` unfreezes the clock when the callback returns.
+    $now = now()->startOfSecond();
+    $user = User::factory()->create();
+    Carbon::setTestNow($now->copy()->subDays(3));
+    app(PasskeyRepository::class)->store(
+        $user->id, new NewPasskey('cred-1', 'COSE-PUBLIC-KEY', 7, ['usb', 'nfc'], 'adce0002-35bc-c60a-648b-0b25f1f05503'), 'YubiKey',
+    );
+    Carbon::setTestNow($now);
+    app(PasskeyRepository::class)->updateSignCount('cred-1', 8);
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['passkeys'])->toBe([[
+        'credential_id' => 'cred-1',
+        'name' => 'YubiKey',
+        'created_at' => now()->subDays(3)->toIso8601String(),
+        'last_used_at' => now()->toIso8601String(),
+        'aaguid' => 'adce0002-35bc-c60a-648b-0b25f1f05503',
+        'transports' => ['usb', 'nfc'],
+    ]])->and(json_encode($export))->not->toContain('COSE-PUBLIC-KEY');
+});
+
+it('exports only the allowlisted passkey fields a rebound store hands back, typed', function () {
+    // A rebound PasskeyRepository is a swap seam: whatever it returns must not pass through verbatim —
+    // a store that returns its whole row would publish the public key in an export.
+    Schema::drop('passkeys');
+    app()->instance(PasskeyRepository::class, new class extends InMemoryPasskeyRepository
+    {
+        public function summariesForUser(int|string $userId): array
+        {
+            return [[
+                // A numeric id, as a store keyed on integers may hand it back; transports with junk between.
+                'credential_id' => 42, 'name' => 'phone', 'last_used_at' => 1_700_000_000,
+                'public_key' => 'COSE-PUBLIC-KEY', 'sign_count' => 9,
+                'created_at' => 'not a time', 'aaguid' => ['x'], 'transports' => ['usb', 3, ['n'], 'nfc'],
+            ]];
+        }
+    });
+
+    expect(app(ExportAccount::class)(User::factory()->create())['passkeys'])->toBe([[
+        'credential_id' => '42',
+        'name' => 'phone',
+        'created_at' => null,
+        'last_used_at' => Carbon::createFromTimestamp(1_700_000_000)->toIso8601String(),
+        'aaguid' => null,
+        'transports' => ['usb', 'nfc'],
+    ]]);
+});
+
+// ---------------------------------------------------------------------------
+// Art. 15 must disclose what Art. 17 destroys. Erasure deletes a pending password-reset row (it holds the
+// address in plain text), the two-factor columns — including an enrolment never confirmed — and every
+// session with how it was signed in; the export left all three out. The facts, never the secrets: no
+// reset token, no TOTP secret, no recovery-code hash.
+// ---------------------------------------------------------------------------
+
+it('exports when a pending password reset was requested, never its token', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create(['email' => 'reset@example.test']);
+    $token = Password::broker()->createToken($user);
+
+    $export = app(ExportAccount::class)($user);
+
+    expect($export['password_reset'])->toBe(['requested_at' => now()->toIso8601String()])
+        ->and(json_encode($export))->not->toContain($token)
+        ->and(app(ExportAccount::class)(User::factory()->create())['password_reset'])->toBeNull();
+});
+
+it('exports the configured broker\'s pending reset, on that broker\'s connection', function () {
+    Schema::create('lukk_password_resets', function (Blueprint $table) {
+        $table->string('email')->primary();
+        $table->string('token');
+        $table->timestamp('created_at')->nullable();
+    });
+    config([
+        'auth.passwords.lukkbroker' => ['provider' => 'users', 'table' => 'lukk_password_resets', 'expire' => 60],
+        'lukk.password_reset.broker' => 'lukkbroker',
+    ]);
+    Schema::drop('password_reset_tokens');
+    $user = User::factory()->create();
+    Password::broker('lukkbroker')->createToken($user);
+
+    expect(app(ExportAccount::class)($user)['password_reset'])->not->toBeNull();
+});
+
+it('exports no pending reset when the broker has no table', function () {
+    Schema::drop('password_reset_tokens');
+
+    expect(app(ExportAccount::class)(User::factory()->create())['password_reset'])->toBeNull();
+});
+
+it('exports an unconfirmed two-factor enrolment and the recovery codes left, never the codes', function () {
+    $user = User::factory()->create();
+    $user->forceFill([
+        'two_factor_secret' => Crypt::encryptString('JBSWY3DPEHPK3PXP'),
+        'two_factor_recovery_codes' => json_encode([Hash::make('code-one'), Hash::make('code-two')]),
+        'two_factor_confirmed_at' => null,
+    ])->save();
+
+    $export = app(ExportAccount::class)($user->refresh());
+
+    expect($export['two_factor'])->toMatchArray(['enabled' => false, 'pending' => true, 'recovery_codes_remaining' => 2])
+        ->and(json_encode($export))->not->toContain('JBSWY3DPEHPK3PXP');
+
+    $user->forceFill(['two_factor_confirmed_at' => now()])->save();
+    expect(app(ExportAccount::class)($user->refresh())['two_factor'])->toMatchArray(['enabled' => true, 'pending' => false]);
+
+    expect(app(ExportAccount::class)(User::factory()->create())['two_factor'])->toMatchArray(['pending' => false, 'recovery_codes_remaining' => 0]);
+});
+
+it('exports two-factor as not pending, with no count, for a model without two-factor support', function () {
+    $user = new GenericUser(['id' => 1, 'email' => 'generic@example.test']);
+
+    expect(app(ExportAccount::class)($user)['two_factor'])->toMatchArray(['pending' => false, 'recovery_codes_remaining' => null]);
+});
+
+it('exports how, and when, each session was signed in', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    start()($user->getKey(), ['amr' => ['pwd', 'otp', 'mfa']]);
+
+    $session = app(ExportAccount::class)($user)['sessions'][0];
+
+    expect($session['amr'])->toBe(['pwd', 'otp', 'mfa'])
+        ->and($session['authenticated_at'])->toBe(now()->toIso8601String());
 });

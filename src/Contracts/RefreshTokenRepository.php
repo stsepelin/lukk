@@ -60,8 +60,13 @@ interface RefreshTokenRepository
      *                          `''` is a grant pinned to nothing.** The two are different tokens and
      *                          the storage must keep them apart — conflating them lets the most
      *                          restricted token widen to the subject's full grant on first refresh.
+     * @param  ?string  $amr  The session's authentication record — how and when it was signed in
+     *                        (`Support\SessionAuthentication`: `amr` and `auth_time`, JSON). OPAQUE to the
+     *                        repository: store it as given, return it unchanged on
+     *                        `RefreshTokenRecord::$amr`. One that drops it keeps working, with no `amr`
+     *                        and no `auth_time` after the first refresh — so no multi-factor allowance.
      */
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void;
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void;
 
     public function markRotated(string $id): void;
 
@@ -74,6 +79,10 @@ interface RefreshTokenRepository
      */
     public function countLiveTokens(string $familyId): int;
 
+    /**
+     * Revoke every row of the family. Revocation is family-wide only: a row carrying `revokedAt` is
+     * read as "this family's revoke has already run", and presenting it does no further work.
+     */
     public function revokeFamily(string $familyId): void;
 
     /**

@@ -11,7 +11,7 @@ namespace Lukk\Support;
 class RotationOutcome
 {
     private function __construct(
-        public readonly string $type,            // issued|unknown|revoked|expired|reuse
+        public readonly string $type,            // issued|unknown|revoked|dead|expired|reuse
         public readonly ?string $familyId = null,
         public readonly int|string|null $userId = null,
         public readonly ?string $refreshSecret = null,
@@ -23,12 +23,14 @@ class RotationOutcome
          * @var array{token: string, jti: string, expires_in: int}|null
          */
         public readonly ?array $access = null,
+        /** The family's absolute expiry, carried to the issued pair (see `TokenPair::$refreshExpiresAt`). */
+        public readonly ?int $expiresAt = null,
     ) {}
 
     /** @param  array{token: string, jti: string, expires_in: int}  $access */
-    public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings, array $access): self
+    public static function issued(int|string $userId, string $familyId, string $refreshSecret, int $siblings, array $access, int $expiresAt): self
     {
-        return new self('issued', $familyId, $userId, $refreshSecret, $siblings, $access);
+        return new self('issued', $familyId, $userId, $refreshSecret, $siblings, $access, $expiresAt);
     }
 
     public static function unknown(): self
@@ -44,6 +46,12 @@ class RotationOutcome
     public static function revoked(string $familyId): self
     {
         return new self('revoked', $familyId);
+    }
+
+    /** The presented row is itself revoked: the family's revoke already ran, so there is nothing left to do. */
+    public static function dead(): self
+    {
+        return new self('dead');
     }
 
     public static function reuse(string $familyId): self

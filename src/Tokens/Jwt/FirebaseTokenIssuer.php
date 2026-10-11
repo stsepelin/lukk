@@ -126,12 +126,25 @@ class FirebaseTokenIssuer implements TokenIssuer
         return count($audiences) === 1 ? $audiences[0] : $audiences;
     }
 
+    /**
+     * Read, and with a passphrase decrypt, the signing key now rather than at the first sign.
+     *
+     * The issuer is bound, not shared, so each rotation builds a fresh `KeyRing` whose memo is empty —
+     * and the rotation signs INSIDE its transaction. Without this, the key file was read and decrypted
+     * while holding `SELECT … FOR UPDATE` on every refresh. `RotateRefreshToken` calls it before the
+     * transaction opens; HS256 has nothing to load.
+     */
+    public function warm(): void
+    {
+        $this->keys->signingKey();
+    }
+
     public function newRefreshSecret(): string
     {
         return bin2hex(random_bytes(32));
     }
 
-    public function hash(string $secret): string
+    public function hash(#[\SensitiveParameter] string $secret): string
     {
         return hash('sha256', $secret);
     }

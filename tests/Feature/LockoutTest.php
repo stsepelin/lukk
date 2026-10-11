@@ -2,16 +2,24 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Support\Timebox;
+use Lukk\Actions\ConfirmPasswordUnchanged;
+use Lukk\Auth\ChallengeToken;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Events\AccountLocked;
+use Lukk\Events\AccountReleased;
+use Lukk\Lockout\DatabaseLockoutRepository;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\User;
+use PragmaRX\Google2FA\Google2FA;
 
 beforeEach(function () {
     // The cap is what's under test, so keep the decaying throttles out of the way.
@@ -83,9 +91,13 @@ it('fires AccountLocked once, on the transition', function () {
         failLogin();
     }
 
-    // A locked-out user gets no other signal, so an app needs exactly one notification to hang off.
-    Event::assertDispatchedTimes(AccountLocked::class, 1);
-    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === 'id:'.User::firstOrFail()->getKey());
+    // A locked-out user gets no other signal, so an app needs exactly one notification to hang off: one
+    // for the account. The identifier's fold counter locks alongside it, and announces itself with a
+    // digest subject, which is what a non-account lock always looked like and names no one to notify.
+    $id = 'id:'.User::firstOrFail()->getKey();
+    Event::assertDispatchedTimes(AccountLocked::class, 2);
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->purpose === 'login' && $e->subject === $id);
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->subject === LoginRateLimiter::lockoutSubject(null, 'victim@y.com'));
 });
 
 it('auto-releases once release_after has elapsed', function () {
@@ -230,13 +242,15 @@ it('prunes spent counters but never a lock that is still held', function () {
         failLogin();
     }
 
-    expect(Lockout::query()->count())->toBe(3);
+    // Two probe counters, and the victim's two: its account and its identifier's fold.
+    expect(Lockout::query()->count())->toBe(4);
 
     $this->travel(31)->days();
     command('lukk:prune')->assertSuccessful();
 
-    // The two stale probe counters go; the held lock stays, or pruning would be a release path.
-    expect(Lockout::query()->pluck('subject')->all())->toBe(['id:'.User::firstOrFail()->getKey()]);
+    // The two stale probe counters go; the held locks stay, or pruning would be a release path.
+    expect(Lockout::query()->pluck('subject')->sort()->values()->all())
+        ->toBe(collect(['id:'.User::firstOrFail()->getKey(), LoginRateLimiter::lockoutSubject(null, 'victim@y.com')])->sort()->values()->all());
 });
 
 it('rejects an unknown --purpose rather than releasing something else', function () {
@@ -270,28 +284,45 @@ it('recovers when it loses the insert race for a brand-new subject', function ()
     // unique index. Left uncaught that is a QueryException — a 500 on /auth/login — AND the loser's
     // guess goes uncounted, so deliberate concurrency would be strictly better for an attacker.
     //
-    // The winner's row has to be committed BEFORE the loser's INSERT opens its savepoint, or the
-    // rollback to that savepoint would take the winner's row with it. So it is inserted from a
-    // `DB::listen` hook on the lookup SELECT that just missed — the exact instant the real winner
-    // would have committed — rather than from the loser's own `creating` event.
-    $armed = true;
-    DB::listen(function ($query) use (&$armed) {
-        // Match the LOOKUP specifically. A looser `lukk_lockouts` match also catches the
-        // `hasTable` probe that runs first, which would insert the row before the lookup — the
-        // lookup would then find it, no INSERT would collide, and this test would pass while
-        // exercising nothing.
-        if (! $armed || ! str_contains($query->sql, 'from "lukk_lockouts" where "purpose"')) {
-            return;
+    // The row is now created up front, outside the counting transaction (`ensureRow()`), so the insert
+    // inside it is reached only when a success RELEASED that row in between. Staged here: the release
+    // lands right after the up-front insert, and the winner's row is committed right after the locking
+    // lookup misses — the exact instant a real winner would have — so the inner INSERT collides.
+    $stage = 'released';
+    DB::listen(function ($query) use (&$stage) {
+        if ($stage === 'released' && str_starts_with($query->sql, 'insert or ignore into "lukk_lockouts"')) {
+            $stage = 'lookup';
+            DB::table('lukk_lockouts')->where('subject', 'idn:raced@y.com')->delete();
+        } elseif ($stage === 'lookup' && str_starts_with($query->sql, 'select * from "lukk_lockouts" where "purpose"')) {
+            $stage = 'done';
+            DB::table('lukk_lockouts')->insert([
+                'id' => (string) Str::ulid(), 'purpose' => 'login', 'subject' => 'idn:raced@y.com',
+                'guard' => 'api', 'attempts' => 4, 'created_at' => now(), 'updated_at' => now(),
+            ]);
         }
-        $armed = false;
-        DB::table('lukk_lockouts')->insert([
-            'id' => (string) Str::ulid(), 'purpose' => 'login', 'subject' => 'idn:raced@y.com',
-            'guard' => 'api', 'attempts' => 4, 'created_at' => now(), 'updated_at' => now(),
-        ]);
     });
 
     // The loser re-reads the winner's row and increments it, rather than throwing.
-    expect(app(LockoutRepository::class)->recordFailure('login', 'idn:raced@y.com', 'api'))->toBe(5);
+    expect(app(LockoutRepository::class)->recordFailure('login', 'idn:raced@y.com', 'api'))->toBe(5)
+        ->and($stage)->toBe('done');
+});
+
+it('creates a first-failure counter before the counting transaction opens', function () {
+    // MySQL REPEATABLE READ: a locking read of an ABSENT row takes a gap lock, and concurrent first
+    // failures each holding it while inserting into it deadlocked (1213) — a 500 per loser. Pinned on the
+    // real engine in tests/Concurrency/LockoutRaceTest.php; here, the order that avoids it.
+    $levels = [];
+    DB::listen(function ($query) use (&$levels) {
+        if (str_starts_with($query->sql, 'insert') && str_contains($query->sql, 'lukk_lockouts')) {
+            $levels[] = DB::transactionLevel();
+        }
+    });
+
+    // Relative to the test's own wrapping transaction (`RefreshDatabase`).
+    $outer = DB::transactionLevel();
+    app(LockoutRepository::class)->recordFailure('login', 'idn:first@y.com', 'api');
+
+    expect($levels)->toBe([$outer]);
 });
 
 // ---------------------------------------------------------------------------
@@ -461,8 +492,10 @@ it('does not let a look-alike account share, or clear, another account\'s lock',
     }
     failLogin('admin@y.com')->assertStatus(423);
 
-    // The look-alike is a different account, so it holds a different counter and is not locked.
-    failLogin("\u{0430}dmin@y.com")->assertStatus(422);
+    // The look-alike shares the identifier's fold, which the victim's failures locked — the price of
+    // keeping a non-resolving spelling from answering whether an account exists. It is a different
+    // ACCOUNT, though, so its own success or reset cannot release the victim's account counter.
+    failLogin("\u{0430}dmin@y.com")->assertStatus(423);
 
     // And resetting the look-alike's password must not release the victim's lock.
     app('auth')->forgetGuards();
@@ -484,7 +517,7 @@ it('still counts an identifier that names no account, so being locked is not an 
     // A non-existent address locks exactly like a real one — otherwise 423-vs-422 would answer
     // "does this account exist?" for free.
     failLogin('ghost@y.com')->assertStatus(423);
-    expect(Lockout::where('subject', 'idn:ghost@y.com')->exists())->toBeTrue();
+    expect(Lockout::where('subject', 'idn:sha256:'.hash('sha256', 'ghost@y.com'))->exists())->toBeTrue();
 });
 
 it('consumes the attempt before verifying, so concurrency cannot overrun the cap', function () {
@@ -583,3 +616,274 @@ it('answers a held step-up lock with its auto-release wait, and counts nothing m
 
     expect(Lockout::query()->value('attempts'))->toBe(3);
 });
+
+it('stores no readable identifier for an address that names no account', function () {
+    // A lock on a non-account is keyed by what was typed — often someone's real address, a typo of
+    // it, or a stranger's. `prune()` never removes a held lock and `release_after` defaults to 0, so
+    // that address sat in plain text indefinitely, with no account through which its owner could
+    // ever have it erased (GDPR Art. 5(1)(c), data minimisation). The counter only has to compare
+    // equal, so a digest does the job.
+    foreach (range(1, 4) as $i) {
+        failLogin('Stranger@Y.com');
+    }
+
+    $subjects = Lockout::pluck('subject')->all();
+
+    expect($subjects)->toHaveCount(1)
+        ->and($subjects[0])->toStartWith('idn:sha256:')
+        ->and(strtolower($subjects[0]))->not->toContain('stranger')
+        // Still one bucket for every spelling of it, and still locked.
+        ->and(failLogin('  stranger@y.COM ')->status())->toBe(423);
+});
+
+it('locks a spelling that names no row the same whether or not the account exists', function () {
+    // The subject was the account for a resolving spelling and the fold for any other, so failures on a
+    // spelling the database never resolves (a Cyrillic look-alike; another case on a binary collation)
+    // locked the fold for a non-account but nothing a real account's canonical spelling checked: the
+    // canonical probe then answered 423 for a non-account and 422 for a real one. Failures now count
+    // against the fold always, and against the account too when one resolves; either locks.
+    User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+
+    $probe = function (string $email) {
+        $variant = str_replace('i', "\u{0456}", $email); // Cyrillic і, never resolves
+        foreach (range(1, 4) as $i) {
+            failLogin($variant);
+        }
+
+        return failLogin($email)->status();
+    };
+
+    expect($probe('victim@y.com'))->toBe($probe('ghost@y.com'))->toBe(423);
+});
+
+it('lets the account\'s own success, or its own reset, release both of its counters', function () {
+    User::factory()->create(['email' => 'mine@y.com', 'password' => bcrypt('correct')]);
+    foreach (range(1, 2) as $i) {
+        failLogin('mine@y.com');
+    }
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'mine@y.com', 'password' => 'correct'])->assertOk();
+
+    expect(Lockout::count())->toBe(0);
+});
+
+it('does every lockout read and write inside the sign-in timebox', function () {
+    // A real account has two counters and a non-account one, so a wrong password cost 15 queries against
+    // 7 — outside the box, where the difference was measurable and could be averaged. Inside it, the box
+    // pads both to the same wall-clock budget.
+    $inside = false;
+    $outside = 0;
+    app()->instance(Timebox::class, new class($inside) extends Timebox
+    {
+        public function __construct(public bool &$inside) {}
+
+        public function call(callable $callback, int $microseconds)
+        {
+            $this->inside = true;
+            try {
+                return $callback($this);
+            } finally {
+                $this->inside = false;
+            }
+        }
+    });
+    DB::listen(function ($query) use (&$inside, &$outside) {
+        if (! $inside && str_contains($query->sql, 'lukk_lockouts')) {
+            $outside++;
+        }
+    });
+    User::factory()->create(['email' => 'boxed@y.com']);
+
+    failLogin('boxed@y.com');
+    failLogin('nobody@y.com');
+
+    expect($outside)->toBe(0);
+});
+
+it('still answers a locked account 423 without counting it toward the throttle', function () {
+    config(['lukk.rate_limits.login.max_attempts' => 4]);
+    User::factory()->create(['email' => 'held@y.com']);
+    foreach (range(1, 3) as $i) {
+        failLogin('held@y.com');
+    }
+
+    // Locked now; these must not fill the decaying throttle and turn the answer into 429.
+    foreach (range(1, 3) as $i) {
+        failLogin('held@y.com')->assertStatus(423);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// The reservation is not the verdict. Every path counts an attempt BEFORE verifying it, which is what
+// keeps concurrency from overrunning the cap — but the counter used to LOCK at the reservation too, so
+// the attempt that reached the cap with the RIGHT credential stamped `locked_at` and announced
+// `AccountLocked`, then its own success released it and announced `AccountReleased`. An app notifying
+// on those told the owner "someone is breaking into your account" for their own correct sign-in.
+// ---------------------------------------------------------------------------
+
+dataset('reserving paths', [
+    'login' => [fn (User $u, bool $right) => test()->postJson('/auth/login', ['email' => $u->email, 'password' => $right ? 'correct' : 'wrong'])],
+    'step-up confirmation' => [fn (User $u, bool $right) => test()->withToken($u->startSession()->accessToken)
+        ->postJson('/auth/confirm-password', ['password' => $right ? 'correct' : 'wrong'])],
+    'password change' => [fn (User $u, bool $right) => test()->withToken($u->startSession()->accessToken)
+        ->postJson('/auth/password', ['current_password' => $right ? 'correct' : 'wrong', 'password' => 'new-password-1', 'password_confirmation' => 'new-password-1'])],
+    'two-factor challenge' => [function (User $u, bool $right) {
+        $secret = app(TwoFactorProvider::class)->generateSecret();
+        $u->forceFill(['two_factor_secret' => Crypt::encryptString($secret), 'two_factor_confirmed_at' => now()])->save();
+        $challenge = app(ChallengeToken::class)->issue('2fa', $u->getKey(), 300, passwordFingerprint: app(ConfirmPasswordUnchanged::class)->baseline($u));
+
+        return test()->postJson('/auth/two-factor-challenge', [
+            'challenge_token' => $challenge, 'code' => $right ? app(Google2FA::class)->getCurrentOtp($secret) : '000000',
+        ]);
+    }],
+]);
+
+function lockoutUser(): User
+{
+    config(['lukk.rate_limits.confirm.max_attempts' => 500, 'lukk.rate_limits.two_factor.max_attempts' => 500]);
+
+    return User::factory()->create(['password' => bcrypt('correct')]);
+}
+
+it('does not lock, or announce a lock, when the attempt that reaches the cap is right', function (Closure $attempt) {
+    Event::fake([AccountLocked::class, AccountReleased::class]);
+    $user = lockoutUser();
+
+    foreach (range(1, 2) as $ignored) {   // one short of the cap of three
+        app('auth')->forgetGuards();
+        $attempt($user, false)->assertStatus(422);
+    }
+
+    app('auth')->forgetGuards();
+    $attempt($user, true)->assertSuccessful();
+
+    Event::assertNotDispatched(AccountLocked::class);
+    Event::assertNotDispatched(AccountReleased::class);
+})->with('reserving paths');
+
+it('still locks, and announces it, when the attempt that reaches the cap is wrong', function (Closure $attempt) {
+    Event::fake([AccountLocked::class]);
+    $user = lockoutUser();
+
+    foreach (range(1, 3) as $ignored) {
+        app('auth')->forgetGuards();
+        $attempt($user, false)->assertStatus(422);
+    }
+
+    Event::assertDispatched(AccountLocked::class);
+    app('auth')->forgetGuards();
+    $attempt($user, true)->assertStatus(423);
+})->with('reserving paths');
+
+it('keeps a repository written against the base contract working, locking at the reservation', function () {
+    // `ReservesLockoutAttempts` is optional, so a custom `LockoutRepository` from before it existed is
+    // still counted through `recordFailure()` — which locks at the cap itself — and is asked nothing
+    // after a failed check.
+    $inner = new DatabaseLockoutRepository(3, 0);
+    $legacy = new class($inner) implements LockoutRepository
+    {
+        public array $calls = [];
+
+        public function __construct(private LockoutRepository $inner) {}
+
+        public function locked(string $purpose, string $subject, ?string $guard): bool
+        {
+            return $this->inner->locked($purpose, $subject, $guard);
+        }
+
+        public function recordFailure(string $purpose, string $subject, ?string $guard): int
+        {
+            $this->calls[] = 'recordFailure';
+
+            return $this->inner->recordFailure($purpose, $subject, $guard);
+        }
+
+        public function maxAttempts(): int
+        {
+            return $this->inner->maxAttempts();
+        }
+
+        public function release(string $purpose, string $subject, ?string $guard): int
+        {
+            return $this->inner->release($purpose, $subject, $guard);
+        }
+
+        public function availableIn(string $purpose, string $subject, ?string $guard): ?int
+        {
+            return $this->inner->availableIn($purpose, $subject, $guard);
+        }
+
+        public function prune(int $staleAfterDays): int
+        {
+            return $this->inner->prune($staleAfterDays);
+        }
+
+        public function forget(array $subjects, ?string $guard): int
+        {
+            return $this->inner->forget($subjects, $guard);
+        }
+
+        public function summariesForSubjects(array $subjects, ?string $guard): array
+        {
+            return $this->inner->summariesForSubjects($subjects, $guard);
+        }
+    };
+    app()->instance(LockoutRepository::class, $legacy);
+    $user = User::factory()->create(['email' => 'victim@y.com']);
+
+    foreach (range(1, 3) as $ignored) {
+        failLogin()->assertStatus(422);
+    }
+
+    failLogin()->assertStatus(423);
+    expect($legacy->calls)->toBe(array_fill(0, 6, 'recordFailure'))   // two counters per attempt, three attempts
+        ->and(Lockout::where('subject', 'id:'.$user->getKey())->whereNotNull('locked_at')->exists())->toBeTrue();
+});
+
+it('locks, and announces it, when a count runs past the cap with no verdict recorded', function () {
+    // A crash between the reservation and the verdict leaves the row AT the cap and unlocked; the next
+    // reservation runs past it. Locked there, so `release_after` — timed from `locked_at` — can lift it.
+    Event::fake([AccountLocked::class]);
+    $user = User::factory()->create(['email' => 'victim@y.com', 'password' => bcrypt('correct')]);
+    Lockout::create(['purpose' => 'login', 'subject' => 'id:'.$user->getKey(), 'guard' => 'api', 'attempts' => 3, 'locked_at' => null]);
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'victim@y.com', 'password' => 'correct'])->assertStatus(423);
+
+    expect(Lockout::where('subject', 'id:'.$user->getKey())->whereNotNull('locked_at')->exists())->toBeTrue();
+    Event::assertDispatched(AccountLocked::class, fn ($e) => $e->subject === 'id:'.$user->getKey());
+});
+
+it('creates a first-failure counter whole, on any guard, before the transaction', function (?string $guard) {
+    $this->freezeSecond();
+    $levels = [];
+    DB::listen(function ($query) use (&$levels) {
+        if (str_starts_with($query->sql, 'insert') && str_contains($query->sql, 'lukk_lockouts')) {
+            $levels[] = DB::transactionLevel();
+        }
+    });
+    $outer = DB::transactionLevel();
+
+    app(LockoutRepository::class)->recordFailure('login', 'idn:whole@y.com', $guard);
+
+    $row = Lockout::query()->where('subject', 'idn:whole@y.com')->firstOrFail();
+    expect($levels)->toBe([$outer])
+        ->and($row->created_at?->getTimestamp())->toBe(now()->getTimestamp())
+        ->and($row->guard)->toBe((string) $guard);
+})->with(['a named guard' => ['api'], 'no guard' => [null]]);
+
+it('starts a counter released in between at one, on any guard', function (?string $guard) {
+    // The row created up front can be released by a concurrent success before the counting transaction
+    // locks it; the counter is then created inside, from zero.
+    $released = false;
+    DB::listen(function ($query) use (&$released) {
+        if (! $released && str_starts_with($query->sql, 'insert or ignore into "lukk_lockouts"')) {
+            $released = true;
+            DB::table('lukk_lockouts')->where('subject', 'idn:released@y.com')->delete();
+        }
+    });
+
+    expect(app(LockoutRepository::class)->recordFailure('login', 'idn:released@y.com', $guard))->toBe(1)
+        ->and($released)->toBeTrue();
+})->with(['a named guard' => ['api'], 'no guard' => [null]]);

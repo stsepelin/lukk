@@ -37,7 +37,7 @@ trait EmitsTokens
             'expires_in' => $pair->expiresIn,
         ]);
 
-        $response->withCookie((cookie()->make(
+        $cookie = cookie()->make(
             name: RefreshCookie::name(),
             value: $pair->refreshToken,
             minutes: RefreshCookie::ttlMinutes(),
@@ -56,7 +56,12 @@ trait EmitsTokens
             // recipe for sharing a web session across subdomains — had this cookie emitted WITH that
             // Domain. A `__Host-`-prefixed cookie carrying Domain is discarded outright by the browser
             // (rfc6265bis §4.1.3.2), so the visitor was silently signed out when the access token lapsed.
-        ))->withDomain(null));
+        )->withDomain(null);
+
+        // No longer than the session it carries — see `RefreshCookie::expiresAt()`.
+        $expiresAt = RefreshCookie::expiresAt($pair->refreshExpiresAt);
+
+        $response->withCookie($expiresAt === null ? $cookie : $cookie->withExpires($expiresAt));
 
         return $this->noStore($response);
     }

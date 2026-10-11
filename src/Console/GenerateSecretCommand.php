@@ -32,6 +32,15 @@ class GenerateSecretCommand extends Command
 
         [$envVar, $configKey] = $this->target();
 
+        // A guard name lands in an env variable name, so it may only be letters, digits, `_` and `-`.
+        // Anything else either is not a valid variable or — with a `.` — once matched and overwrote
+        // another guard's line.
+        if (preg_match('/^[A-Z0-9_]+$/', $envVar) !== 1) {
+            $this->components->error('A guard name may only contain letters, digits, "_" and "-".');
+
+            return self::FAILURE;
+        }
+
         if (! $this->setSecretInEnvironmentFile($key, $envVar, $configKey)) {
             return self::FAILURE;
         }
@@ -92,6 +101,7 @@ class GenerateSecretCommand extends Command
         }
         // @codeCoverageIgnoreEnd
 
+        // `$envVar` is letters, digits and `_` only (checked in `handle()`), so it is safe in a pattern.
         if (preg_match("/^{$envVar}=/m", $contents) === 1) {
             $contents = preg_replace("/^{$envVar}=.*$/m", "{$envVar}={$key}", $contents);
         } else {

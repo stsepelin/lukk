@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
+use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Passkeys\PasskeyChallengeStore;
 
 uses()->group('passkeys');
@@ -142,4 +143,43 @@ it('lets the same user start a fresh registration ceremony straight after redeem
     challengeStore()->putForUser(8, 'SECOND');
     expect(challengeStore()->pullForUser(8))->toBe('SECOND')
         ->and(challengeStore()->pullForUser(8))->toBeNull();
+});
+
+it('defaults the ceremony to five minutes, the WebAuthn L3 recommendation', function () {
+    // §15.1 recommends 300 s for a ceremony that verifies the user — a PIN or a biometric, often a
+    // phone reached over hybrid transport, which two minutes routinely cut off.
+    $lukk = config('lukk');
+    unset($lukk['passkeys']['challenge_ttl']);
+    $lukk['passkeys']['rp_id'] = 'example.com';
+    $lukk['passkeys']['origins'] = ['https://example.com'];
+    config(['lukk' => $lukk]);
+    app()->forgetInstance(WebAuthnCeremony::class);
+
+    expect(require __DIR__.'/../../config/lukk.php')->passkeys->challenge_ttl->toBe(300);
+    expect(app(WebAuthnCeremony::class)->authenticationOptions('c', [])['timeout'])->toBe(300000);
+
+    // And the store, which reads the same key on its own: 300 + the 30 s margin, to the second.
+    app()->forgetInstance(PasskeyChallengeStore::class);
+    $this->freezeSecond();
+    $kept = challengeStore()->putForCeremony('KEPT');
+    $gone = challengeStore()->putForCeremony('GONE');
+    $this->travel(329)->seconds();
+    expect(challengeStore()->pullForCeremony($kept))->toBe('KEPT');
+    $this->travel(2)->seconds();
+    expect(challengeStore()->pullForCeremony($gone))->toBeNull();
+});
+
+it('keeps a challenge past the advertised timeout for the answer still in transit', function () {
+    // The prompt may close at exactly `challenge_ttl` (WebAuthn L3 §5.4, §5.5) and the assertion then
+    // still has to reach the server; forgetting the challenge at the same instant refused it.
+    $this->freezeSecond();
+    $ttl = (int) config('lukk.passkeys.challenge_ttl');
+    $id = challengeStore()->putForCeremony('LATE');
+    $other = challengeStore()->putForCeremony('TOO-LATE');
+
+    $this->travel($ttl + 20)->seconds();
+    expect(challengeStore()->pullForCeremony($id))->toBe('LATE');
+
+    $this->travel(15)->seconds();
+    expect(challengeStore()->pullForCeremony($other))->toBeNull();
 });

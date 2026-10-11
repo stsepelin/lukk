@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Timebox;
 
 /**
  * Send a password-reset link via Laravel's password broker. The broker status is
@@ -14,24 +14,28 @@ use Illuminate\Support\Facades\Password;
  */
 class SendPasswordResetLink
 {
-    public function __construct(private readonly ?string $broker = null) {}
+    public function __construct(
+        private readonly ?string $broker = null,
+        private readonly int $timeboxMicros = 1_000_000,
+    ) {}
 
     public function __invoke(string $email): void
     {
-        $status = Password::broker($this->broker)->sendResetLink(['email' => $email]);
-
-        // The RESPONSE was already constant; the timing was not. A known address costs a
-        // `Hash::make` (the broker hashes the reset token before storing it) plus the notification;
-        // an unknown one returns immediately. The broker's 200ms Timebox pads a fast path up to its
-        // budget but cannot claw back an overrun, and at Laravel's default BCRYPT_ROUNDS=12 bcrypt
-        // costs ~70-120ms ON TOP of it — measured as fully disjoint distributions, so a single
-        // request classified an address.
+        // The RESPONSE was already constant; the TIMING is what a Timebox makes constant too.
         //
-        // So burn the equivalent work on the miss, exactly as the login path does for an unknown
-        // user. This does not equalize the mail send: queue the notification (the usual advice
-        // anyway) or a synchronous SMTP transport re-opens the gap.
-        if ($status !== Password::RESET_LINK_SENT) {
-            Hash::make('lukk-timing-equalizer');
-        }
+        // The broker pads every outcome to its own 200 ms box, but a hit also hashes the reset token
+        // and dispatches the notification, which at Laravel's default BCRYPT_ROUNDS=12 can run past
+        // 200 ms — and a Timebox never claws back an overrun. lukk used to "equalize" a miss by hashing
+        // once AFTER the broker returned, which put that derivation OUTSIDE the padded box: a miss then
+        // cost 200 ms plus a hash and a hit ~200 ms in total. Measured 460 ms against 259 ms, never
+        // overlapping — equal work, unequal time, and the slower side flipped rather than closed.
+        //
+        // So the whole call is boxed, with a budget above the broker's box plus one derivation plus
+        // the dispatch. A synchronous SMTP transport can still overrun any budget: queue the reset
+        // notification, which is the usual advice anyway.
+        app(Timebox::class)->call(
+            fn () => Password::broker($this->broker)->sendResetLink(['email' => $email]),
+            $this->timeboxMicros,
+        );
     }
 }

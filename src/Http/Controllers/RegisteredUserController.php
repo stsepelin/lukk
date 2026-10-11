@@ -11,6 +11,7 @@ use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\RegisterResponse;
 use Lukk\Http\Controllers\Concerns\DeterminesSessionOutcome;
 use Lukk\Http\Requests\RegisterRequest;
+use Lukk\Support\AuthenticationMethods;
 
 /**
  * First-party registration. `store` creates the user (via `Lukk::registerUsing` or the default
@@ -40,7 +41,7 @@ class RegisteredUserController
                 return $this->twoFactorChallenge($user, $this->challengeTokens);
             }
 
-            return app(RegisterResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => ['pwd']])]);
+            return app(RegisterResponse::class, ['pair' => ($this->start)($user->getAuthIdentifier(), ['amr' => AuthenticationMethods::password()])]);
         }
 
         // No session: a 201 with no tokens — never a false 403. `requires_verification` tells the

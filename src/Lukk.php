@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Enumerable;
+use InvalidArgumentException;
 use Lukk\Guards\GuardContext;
 use Lukk\Models\RefreshToken;
 use Lukk\Support\Abilities;
@@ -489,7 +490,30 @@ class Lukk
     {
         $field = config('lukk.username');
 
-        return is_string($field) && $field !== '' ? $field : 'email';
+        if (! is_string($field) || $field === '') {
+            return 'email';
+        }
+
+        // Loud, because neither failure is: `EloquentUserProvider::retrieveByCredentials()` drops every
+        // key containing "password", so such a column looks nothing up and every sign-in is an ordinary
+        // 422; and a dot reads nested request input and becomes a table-qualified column.
+        if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $field) !== 1 || stripos($field, 'password') !== false) {
+            throw new InvalidArgumentException("lukk.username must name a plain column on your users table (letters, digits, underscores) that does not contain \"password\"; got \"{$field}\".");
+        }
+
+        return $field;
+    }
+
+    /**
+     * The clock-skew leeway, in seconds, from a lukk config block: capped at five minutes. RFC 7519 §4.1.4
+     * allows "some small leeway"; `LUKK_LEEWAY=86400` stretched every `exp` by a day. One clamp for every
+     * decoder — access tokens and challenge tokens alike.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    public static function leeway(array $config): int
+    {
+        return min(300, max(0, (int) ($config['leeway'] ?? 5)));
     }
 
     /**
@@ -551,6 +575,8 @@ class Lukk
         if ((string) (int) $default === $default) {
             throw new RuntimeException(self::numericGuardName($default));
         }
+
+        self::assertDefaultGuardProviderAgrees($default);
 
         // A falsy scalar (`false`, `''`) is "no extra guards", which `isMultiGuard()` reads the same way.
         $guards = config('lukk.guards');
@@ -641,6 +667,73 @@ class Lukk
 
             $pathMounts[$path][] = [$name, $domain];
         }
+    }
+
+    /**
+     * The default guard signs users in against `lukk.user_provider`, but its lukk-jwt driver resolves the
+     * token's `sub` through `auth.guards.<default>.provider` (or, naming none, Laravel's
+     * `auth.defaults.provider`). Pointed at different providers, a password checked in one table minted a
+     * token resolving to the row with the same id in the OTHER — a `users` password signing in as the
+     * `admins` row sharing its id — with no error anywhere. Refused rather than reconciled: either choice
+     * of table silently changes who a working install's tokens resolve to.
+     *
+     * Two provider NAMES over one source (`api_users` and `users`, both Eloquent over `App\Models\User`) are
+     * the same users, so only the sources are compared — see `readSameUsers()`.
+     */
+    private static function assertDefaultGuardProviderAgrees(string $default): void
+    {
+        $guard = config("auth.guards.{$default}");
+
+        if (! is_array($guard) || ($guard['driver'] ?? null) !== 'lukk-jwt') {
+            return;
+        }
+
+        $resolves = $guard['provider'] ?? config('auth.defaults.provider');
+        $signsIn = self::userProviderName($default);
+
+        if ($resolves === null || $resolves === '' || $resolves === $signsIn || self::readSameUsers((string) $resolves, $signsIn)) {
+            return;
+        }
+
+        $source = isset($guard['provider']) ? "auth.guards.{$default}.provider" : 'auth.defaults.provider';
+
+        throw new RuntimeException(
+            "lukk guard [{$default}] resolves its users from the [{$resolves}] provider ({$source}), but signs "
+            ."them in against [{$signsIn}] (lukk.user_provider) — a password checked in one would mint a token "
+            .'for the account with the same id in the other. Point both at the same provider.'
+        );
+    }
+
+    /**
+     * Whether two `auth.providers` entries read the same users: the same driver over the same Eloquent
+     * model, or the same database table on the same connection. A driver lukk does not know is compared
+     * whole — any difference in its config may be a different source. Anything missing (an unconfigured
+     * provider, no driver, no model, no table) is not known to be the same, so the name mismatch stands.
+     */
+    private static function readSameUsers(string $first, string $second): bool
+    {
+        // An entry that is not an array has no `driver`, and so is never the same: `isset` and `??` already
+        // answer that for null or a string, so the casts only state the type for the offsets below.
+        $a = (array) config("auth.providers.{$first}"); // @pest-mutate-ignore: RemoveArrayCast
+        $b = (array) config("auth.providers.{$second}"); // @pest-mutate-ignore: RemoveArrayCast
+
+        if (! isset($a['driver']) || $a['driver'] !== ($b['driver'] ?? null)) {
+            return false;
+        }
+
+        $source = match ($a['driver']) {
+            'eloquent' => 'model',
+            'database' => 'table',
+            default => null,
+        };
+
+        if ($source === null) {
+            return $a === $b;
+        }
+
+        return isset($a[$source])
+            && $a[$source] === ($b[$source] ?? null)
+            && ($source === 'model' || ($a['connection'] ?? null) === ($b['connection'] ?? null));
     }
 
     private static function numericGuardName(string $name): string

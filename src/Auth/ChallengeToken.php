@@ -6,6 +6,7 @@ namespace Lukk\Auth;
 
 use Firebase\JWT\JWT;
 use Illuminate\Support\Str;
+use Lukk\Actions\StartSession;
 use Lukk\Contracts\Denylist;
 use Lukk\Lukk;
 use Lukk\Tokens\Jwt\KeyRing;
@@ -34,7 +35,10 @@ class ChallengeToken
         $this->keys = new KeyRing($config);
     }
 
-    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null): string
+    /**
+     * @param  list<string>|null  $firstFactor  How the FIRST factor was proved — `['pwd']`, `['pop','user']`.
+     */
+    public function issue(string $kind, int|string $userId, int $ttl, ?string $familyId = null, ?string $passwordFingerprint = null, ?array $firstFactor = null): string
     {
         $now = now()->getTimestamp();
 
@@ -67,6 +71,15 @@ class ChallengeToken
             $payload['fid'] = $familyId;
         }
 
+        // How the FIRST factor was proved, so redemption can say so truthfully. Without it the 2FA
+        // controller hardcoded `['pwd','otp']` for every redemption — including a passkey login
+        // routed here, which asserted a password on an account that may not have one at all.
+        $encodedFirstFactor = StartSession::encodeAmr($firstFactor);
+
+        if ($encodedFirstFactor !== null) {
+            $payload['amr'] = $firstFactor;
+        }
+
         // The PASSWORD the first factor was checked against (see `PasswordFingerprint`), for a challenge
         // that stands in for a password sign-in. Redeeming it after that password was changed or reset
         // would start a session on a credential the account no longer has.
@@ -83,7 +96,7 @@ class ChallengeToken
      * Verify WITHOUT consuming — the subject (user id) or null. Lets a wrong
      * second-factor attempt leave the challenge usable for a retry.
      */
-    public function verify(string $kind, string $token): ?string
+    public function verify(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -99,7 +112,7 @@ class ChallengeToken
      * presenting token's own family, so `null === null` passes (the co-issuer topology keeps working)
      * while an unbound challenge is refused to a bearer that does have a family.
      */
-    public function familyOf(string $kind, string $token): ?string
+    public function familyOf(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -111,7 +124,29 @@ class ChallengeToken
      * The password fingerprint a challenge was minted with, or null when it carries none (a co-issuer's,
      * or one from before the claim existed) — which `ConfirmPasswordUnchanged` refuses.
      */
-    public function passwordFingerprintOf(string $kind, string $token): ?string
+    /**
+     * How the first factor was proved, per the challenge itself. Null when it does not say — an
+     * older challenge, or a co-issuer's — and the caller then assumes the password path.
+     *
+     * @return list<string>|null
+     */
+    public function firstFactorOf(string $kind, #[\SensitiveParameter] string $token): ?array
+    {
+        $claims = $this->decode($kind, $token);
+
+        if ($claims === null || ! isset($claims->amr)) {
+            return null;
+        }
+
+        // Re-validated, never trusted: the claim rides a token this process signed, but `decode()`
+        // does not type-check it and a co-issuer sharing the secret can mint any shape. `encodeAmr`
+        // refuses anything but a non-empty list of short strings — never cast it to an array first,
+        // which would promote a bare string to `["pwd"]`.
+
+        return StartSession::decodeAmr(StartSession::encodeAmr($claims->amr));
+    }
+
+    public function passwordFingerprintOf(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -123,7 +158,7 @@ class ChallengeToken
      * Verify and consume (single-use). Returns the subject or null on any failure
      * — bad signature, wrong kind, wrong iss/aud, expired, or already spent.
      */
-    public function consume(string $kind, string $token): ?string
+    public function consume(string $kind, #[\SensitiveParameter] string $token): ?string
     {
         $claims = $this->decode($kind, $token);
 
@@ -138,18 +173,27 @@ class ChallengeToken
         // declared types, not conversions. Pest ignores per line and per mutator name, so the `(int)`
         // annotation also covers the cast on `leeway` — that one is real (an uncast env string "2.5"
         // makes the TTL a float and `revokeJti(int)` a TypeError) and is pinned in `ChallengeTokenTest`.
+        $ttl = max(1, (int) $claims->exp - now()->getTimestamp() + Lukk::leeway($this->config)); // @pest-mutate-ignore: RemoveIntegerCast
+
+        // An atomic claim, not the denylist read `decode()` made: two concurrent redemptions could both
+        // read "unspent" there and both succeed. `add()` writes only when the key is absent, so exactly
+        // one caller gets the subject back — the primitive the passkey challenge and TOTP replay marker use.
+        if (! cache()->store($this->config['denylist_store'] ?? null)->add('lukk:challenge-spent:'.$claims->jti, true, $ttl)) {
+            return null;
+        }
+
         $this->denylist->revokeJti(
             (string) $claims->jti, // @pest-mutate-ignore: RemoveStringCast
-            max(1, (int) $claims->exp - now()->getTimestamp() + (int) ($this->config['leeway'] ?? 5)), // @pest-mutate-ignore: RemoveIntegerCast
+            $ttl,
         );
 
         return (string) $claims->sub; // @pest-mutate-ignore: RemoveStringCast
     }
 
     /** @return (\stdClass&object{sub: mixed, jti: mixed, exp: mixed, fid?: mixed, pwf?: mixed, gid?: mixed, iss?: mixed, aud?: mixed})|null */
-    private function decode(string $kind, string $token): ?object
+    private function decode(string $kind, #[\SensitiveParameter] string $token): ?object
     {
-        JWT::$leeway = $this->config['leeway'] ?? 5;
+        JWT::$leeway = Lukk::leeway($this->config);
 
         try {
             $claims = JWT::decode($token, $this->keys->verificationKeys());
@@ -157,8 +201,13 @@ class ChallengeToken
             // Type-check before anything casts them. A non-scalar `sub` or `fid` — reachable from a
             // co-issuer, a topology this class exists to support — turned `(string)` into an
             // uncaught `Error` and a 500, contradicting this method's own "null on any failure"
-            // contract. RFC 8725 §3.11: validate claim types before use.
-            if (! is_string($claims->sub ?? null) || (isset($claims->fid) && ! is_string($claims->fid))
+            // contract. RFC 8725 §3.10: validate claim types before use.
+            // Non-EMPTY, for parity with `FirebaseTokenVerifier`, which requires the same of `sub`.
+            // `RequireConfirmation` compares the subject against `(string) $request->user()?->…`,
+            // and a null user stringifies to `''` — so an empty `sub` would satisfy that gate on any
+            // route where no user resolved. Not reachable through lukk's own routes (they all
+            // authenticate first) and minting one needs the signing key; parity, not a live hole.
+            if (! is_string($claims->sub ?? null) || $claims->sub === '' || (isset($claims->fid) && ! is_string($claims->fid))
                 || (isset($claims->pwf) && ! is_string($claims->pwf))) {
                 return null;
             }
@@ -167,7 +216,11 @@ class ChallengeToken
             // never expires — against "challenge single-use + short TTL". `consume()` also reads it
             // AFTER the second factor has verified, where an uncaught throw 500s the request and
             // leaves the challenge unburned.
-            if (! is_int($claims->exp ?? null) || ! is_string($claims->jti ?? null)) {
+            //
+            // And no later than the end of year 9999, the bound the access verifier applies: `consume()` turns
+            // the remaining life into a cache TTL, and Redis refuses one near PHP_INT_MAX — another 500 after
+            // the second factor has verified.
+            if (! is_int($claims->exp ?? null) || $claims->exp > 253402300799 || ! is_string($claims->jti ?? null)) {
                 return null;
             }
         } catch (Throwable) {
@@ -217,19 +270,23 @@ class ChallengeToken
         return $claims;
     }
 
-    private function headerType(string $token): ?string
+    private function headerType(#[\SensitiveParameter] string $token): ?string
     {
-        return $this->header($token)->typ ?? null;
+        // A string or nothing: a co-issuer's `"typ": 7` made this `?string` return a TypeError, and so a 500
+        // where every other malformed challenge is simply not one.
+        $typ = $this->header($token)->typ ?? null;
+
+        return is_string($typ) ? $typ : null;
     }
 
     /** Does the token declare critical headers? We understand none, so any is a refusal. */
-    private function headerCrit(string $token): bool
+    private function headerCrit(#[\SensitiveParameter] string $token): bool
     {
         return isset($this->header($token)->crit);
     }
 
     /** The JOSE header, read from the signature-covered segment. */
-    private function header(string $token): object
+    private function header(#[\SensitiveParameter] string $token): object
     {
         $decoded = json_decode(base64_decode(strtr(explode('.', $token)[0], '-_', '+/')) ?: '{}');
 

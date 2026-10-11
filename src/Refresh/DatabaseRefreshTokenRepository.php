@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace Lukk\Refresh;
 
 use Closure;
+use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
 use Lukk\Support\RefreshTokenRecord;
+use RuntimeException;
 
 /**
  * Default storage: the refresh_tokens table via Eloquent. The model is resolved through
@@ -27,7 +30,17 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     public function transaction(Closure $callback): mixed
     {
         /** @var Closure(): mixed $callback */
-        return DB::transaction($callback);
+        return $this->connection()->transaction($callback);
+    }
+
+    /**
+     * The connection the refresh-token model lives on. A transaction opened on the default one while the
+     * queries run on a `useRefreshTokenModel` subclass's own connection guards nothing: the row lock is
+     * taken in autocommit and released at once, so rotation and reuse detection stop being atomic.
+     */
+    private function connection(): ConnectionInterface
+    {
+        return $this->query()->getConnection();
     }
 
     public function findByHash(string $hash): ?RefreshTokenRecord
@@ -44,6 +57,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function familyIsPinned(string $familyId): bool
     {
+        // No family of lukk's: see `isFamilyId()`.
+        if (! self::isFamilyId($familyId)) {
+            return false;
+        }
+
         // Reads the ROW and checks the attribute, rather than naming `scope` in a WHERE clause.
         //
         // Two traps avoided. Naming it fails differently per driver: on sqlite a double-quoted
@@ -80,6 +98,14 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     private function hydrate(mixed $row): ?RefreshTokenRecord
     {
+        // Learn whether this schema carries `amr` from the ROW, the way `familyIsPinned()` reads the
+        // row rather than naming `scope` — a SELECT * already tells us, so the answer is free. It
+        // matters most on the rotation path, which always reads through the non-locking `findByHash`
+        // BEFORE opening its transaction: the probe below would otherwise run under the row lock.
+        if ($row !== null) {
+            $this->rememberAmrSupport(array_key_exists('amr', $row->getAttributes()));
+        }
+
         return $row === null ? null : new RefreshTokenRecord(
             id: $row->id,
             userId: $row->user_id,
@@ -88,6 +114,8 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
+            // `?? null` because a pre-0.7 schema has no such column — the attribute is simply absent.
+            amr: $row->amr ?? null,
             createdAt: $row->created_at?->getTimestamp(),
             // The family's original is the row `StartSession` inserted with no predecessor. Unlike
             // `scope`, this column needs no "is it there" guard: `persist()` writes `previous_id` on
@@ -96,7 +124,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         );
     }
 
-    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+    public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
     {
         $attributes = [
             'user_id' => $userId,
@@ -112,6 +140,20 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             $attributes['scope'] = $scope;
         }
 
+        // `scope`'s "write it only when set" guard is NOT enough here. `scope` is non-null only for
+        // an opt-in pinned grant, so on an un-migrated schema it almost never fires; every single
+        // sign-in supplies an `amr`, so the same guard would name a missing column on every login —
+        // and migrations here are publish-only, which makes that the DEFAULT outcome of upgrading
+        // the package without republishing. So ask the schema, once per application instance.
+        //
+        // Proactively, not by catching the failure: `persist()` runs inside `RotateRefreshToken`'s
+        // transaction, and on PostgreSQL a failed statement aborts it — every later statement then
+        // errors with 25P02 and `COMMIT` silently becomes `ROLLBACK`. A try/catch here would turn a
+        // missing column into a rotation that reports success and stores nothing.
+        if ($amr !== null && $this->supportsAmr()) {
+            $attributes['amr'] = $amr;
+        }
+
         // Only stamp the guard column under multi-guard; a single-guard schema has no such column.
         if ($this->guard !== null) {
             $attributes['guard'] = $this->guard;
@@ -124,7 +166,22 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // it. Both halves of the defence collapsed together, because `familyIsPinned()` reads the
         // same column that was never written. These attributes are lukk's own; the consumer's
         // assignment policy has no business filtering them.
-        $this->query()->newModelInstance()->forceFill($attributes)->save();
+        //
+        // QUIETLY, for the same reason: this runs inside `RotateRefreshToken`'s transaction, under the
+        // parent row's lock, where no application code may run. `save()` fired the model's events, so an
+        // observer on a `useRefreshTokenModel` subclass ran there — serialising the family's refreshes
+        // behind it and, on PostgreSQL, turning a swallowed failing query into a COMMIT that silently
+        // rolled back. And a `creating` listener returning false cancelled the write outright, so rotation
+        // handed back a refresh token that was never stored. Audit sessions from lukk's events instead.
+        //
+        // A column the application must fill (a tenant trait's `tenant_id`, stamped from `creating`) is
+        // therefore filled as the model is BUILT, not saved: `$attributes` defaults on the
+        // `useRefreshTokenModel` subclass, or a trait's `initialize{Trait}()` method, which Eloquent runs
+        // in the constructor with no event — or by overriding `persist()` in a subclass of this repository.
+        // All of these still run under the lock, so they read values already in memory: no query.
+        if (! $this->query()->newModelInstance()->forceFill($attributes)->saveQuietly()) {
+            throw new RuntimeException('lukk could not store a refresh token: the refresh-token model\'s save() reported that nothing was written.');
+        }
     }
 
     public function markRotated(string $id): void
@@ -138,12 +195,21 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             ->where('family_id', $familyId)
             ->whereNull('rotated_at')
             ->whereNull('revoked_at')
-            ->where('expires_at', '>=', now()->getTimestamp())
+            // A Carbon, not a Unix integer: `expires_at` is a datetime column. The integer failed the whole
+            // query on PostgreSQL (a 500 on every in-grace re-consumption, so the client's retry past grace
+            // revoked the family), matched nothing on MySQL (the fork signal never fired), and matched
+            // everything on sqlite. `pruneExpired()` compares the same way.
+            ->where('expires_at', '>=', now())
             ->count();
     }
 
     public function revokeFamily(string $familyId): void
     {
+        // Nothing to revoke in this table: see `isFamilyId()`. (The caller's denylist entry still lands.)
+        if (! self::isFamilyId($familyId)) {
+            return;
+        }
+
         $revoke = fn (): int => $this->scoped()
             ->where('family_id', $familyId)
             ->whereNull('revoked_at')
@@ -178,6 +244,11 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
      */
     private function revokeActiveFamilies(int|string $userId, ?string $exceptFamilyId, ?callable $before = null): array
     {
+        // An "except" naming no family of lukk's spares nothing — every lukk family is an "other" one.
+        if ($exceptFamilyId !== null && ! self::isFamilyId($exceptFamilyId)) {
+            $exceptFamilyId = null;
+        }
+
         $constrain = fn (Builder $query): Builder => $query
             ->where('user_id', $userId)
             ->when($exceptFamilyId !== null, fn (Builder $query) => $query->where('family_id', '!=', $exceptFamilyId))
@@ -188,7 +259,7 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // each statement a fresh snapshot, and InnoDB's UPDATE is a current read, so a session committed
         // between the SELECT and an UPDATE by the user's query is visible to it. Revoked that way, it was never
         // denylisted and never returned: signed out on its next refresh, with nothing recorded as to why.
-        return DB::transaction(function () use ($constrain, $before) {
+        return $this->connection()->transaction(function () use ($constrain, $before) {
             $ids = $constrain($this->scoped())->distinct()->pluck('family_id')->all();
 
             // `$before` denylists, and it runs BEFORE the update and inside the transaction — the
@@ -243,7 +314,32 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one still
         // resolves to `reuse` (fires the reuse event + family cascade) instead of a generic `unknown`
         // reject — they self-delete once they expire. Guard-agnostic: prunes every guard's expired rows.
-        return $this->query()->where('expires_at', '<', now())->delete();
+        //
+        // Nothing to prune where the publish-only migration never ran: the sweep is scheduled on every
+        // install, a verify-only resource server included, and there it threw every day. Asked on the
+        // model's own connection and table, as the passkey and lockout sweeps ask; not memoized, so a
+        // worker started before the migration sees it once it has run.
+        $query = $this->query();
+        $model = $query->getModel();
+
+        if (! Schema::connection($model->getConnectionName())->hasTable($model->getTable())) {
+            return 0;
+        }
+
+        return $query->where('expires_at', '<', now())->delete();
+    }
+
+    /**
+     * Whether a family id could name a row here: lukk mints every family as a UUID (`StartSession`).
+     *
+     * A co-issuer's `fid` need not be one — `42`, `"sess_42"` — and PostgreSQL types the parameter against
+     * the native `uuid` column, so comparing one was SQLSTATE 22P02: a 500 on change-password, logout,
+     * `DELETE /auth/sessions(/others)` and the pinned-ability gate on step-up confirmation, logout's
+     * after the denylist write. Such an id names no family in this table, which is how it is answered.
+     */
+    private static function isFamilyId(string $familyId): bool
+    {
+        return Str::isUuid($familyId);
     }
 
     /**
@@ -265,5 +361,79 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         $query = $this->query();
 
         return $this->guard === null ? $query : $query->where('guard', $this->guard);
+    }
+
+    /**
+     * Does this install's `refresh_tokens` table carry the 0.7 `amr` column?
+     *
+     * Answered from a hydrated row wherever one has been read (free, and the rotation path always
+     * reads one first), and only otherwise by asking the schema.
+     *
+     * Memoized per CONNECTION AND TABLE — and per database, `search_path` and prefix that connection
+     * currently points at — on the application instance. Keying it globally answered
+     * for the wrong schema the moment one application served two connections — a migrated tenant and
+     * an un-migrated one — and the un-migrated INSERT then failed inside the rotate transaction,
+     * which on PostgreSQL aborts it: every later statement errors `25P02` and `COMMIT` silently
+     * becomes `ROLLBACK`. That is the precise failure this probe exists to avoid.
+     *
+     * On the application instance rather than in a `static`, because a process-static memo survives
+     * between tests and between Octane requests and would answer for a schema that has since
+     * migrated.
+     */
+    private function supportsAmr(): bool
+    {
+        $known = $this->rememberAmrSupport(null);
+
+        if ($known !== null) {
+            return $known;
+        }
+
+        $model = $this->query()->newModelInstance();
+
+        try {
+            // No `?? false`: `rememberAmrSupport()` returns null only when it was PASSED null, and
+            // this passes a bool. The mutation run flagged the coalesce as unreachable, and the
+            // repo's rule is to delete an equivalent rather than test it. The cast, likewise, only states
+            // the type for the analyser: passed a bool, it returns that bool.
+            return (bool) $this->rememberAmrSupport( // @pest-mutate-ignore: RemoveBooleanCast
+                Schema::connection($model->getConnectionName())->hasColumn($model->getTable(), 'amr')
+            );
+        } catch (\Throwable) {
+            // A transient probe failure — a blip, a deadlock, a statement timeout — must NOT be
+            // cached: doing so disabled `amr` for the life of the application instance, silently.
+            // Skipping the column for this one write is the safe direction; the next call re-asks.
+            return false;
+        }
+    }
+
+    /**
+     * Read or record what we know about the `amr` column for THIS connection and table.
+     *
+     * Passing null reads; passing a bool records and returns it. Null back means "not yet known".
+     */
+    private function rememberAmrSupport(?bool $supported): ?bool
+    {
+        $model = $this->query()->newModelInstance();
+        $connection = $model->getConnection();
+        // What the connection points at NOW, not only its name: a tenancy package (stancl/tenancy) keeps
+        // one name and switches the database — or, on PostgreSQL, the `search_path` — per tenant, and
+        // a name-keyed answer then crossed tenants. JSON so no two parts can run together.
+        $key = 'lukk.schema.amr.'.json_encode([
+            $connection->getName(),
+            $connection->getDatabaseName(),
+            $connection->getConfig('search_path'),
+            $connection->getTablePrefix(),
+            $model->getTable(),
+        ]);
+        $app = app();
+
+        if ($supported === null) {
+            // The memo only ever stores a bool, so no cast: an equivalent mutant otherwise.
+            return $app->bound($key) ? $app->make($key) : null;
+        }
+
+        $app->instance($key, $supported);
+
+        return $supported;
     }
 }

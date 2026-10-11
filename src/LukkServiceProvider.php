@@ -93,6 +93,9 @@ use Webauthn\AuthenticatorAttestationResponseValidator;
 
 class LukkServiceProvider extends ServiceProvider
 {
+    /** How long a passkey challenge outlives the prompt the browser was told to show. */
+    private const CEREMONY_TRANSIT_SECONDS = 30;
+
     public function register(): void
     {
         $this->mergeConfigDeep(__DIR__.'/../config/lukk.php', 'lukk');
@@ -140,6 +143,9 @@ class LukkServiceProvider extends ServiceProvider
             $kernel->addToMiddlewarePriorityAfter(RequireAbility::class, RequireAllAbilities::class);
             // Same reason: it reads the authenticated user, and a null one makes it a silent no-op.
             $kernel->addToMiddlewarePriorityAfter(RequireAllAbilities::class, RequirePinnedAbility::class);
+            // And the step-up gate: it reads the user and the session presenting the confirmation,
+            // so listed before `auth:{guard}` it saw neither and answered 423 to a good confirmation.
+            $kernel->addToMiddlewarePriorityAfter(RequirePinnedAbility::class, RequireConfirmation::class);
         }
 
         if ($this->config()['routes'] ?? true) {
@@ -220,7 +226,11 @@ class LukkServiceProvider extends ServiceProvider
             // Unguarded, a missing key is a TTL of 0 — and the cache FORGETS a key written with a
             // non-positive TTL, so the ceremony's challenge is gone before the authenticator answers
             // and every passkey login and registration fails.
-            $this->cacheStore(), (int) ($this->config()['passkeys']['challenge_ttl'] ?? 120),
+            //
+            // Plus a margin: the prompt may close at exactly `challenge_ttl` (WebAuthn L3 §5.4, §5.5) and the
+            // assertion still has to reach this server, so forgetting the challenge at the same instant
+            // refused a user who answered at the last moment.
+            $this->cacheStore(), (int) ($this->config()['passkeys']['challenge_ttl'] ?? 300) + self::CEREMONY_TRANSIT_SECONDS,
         ));
 
         // Shares the revocation store: a marker has to be visible to every worker, exactly like the
@@ -240,6 +250,8 @@ class LukkServiceProvider extends ServiceProvider
                 'rp_name' => $passkeys['rp_name'] ?? $this->appName(),
                 'origins' => $passkeys['origins'] ?? [],
                 'user_verification' => $passkeys['user_verification'] ?? 'required',
+                // The prompt closes when the server forgets the challenge (WebAuthn L3 §5.4, §5.5).
+                'timeout' => 1000 * (int) ($passkeys['challenge_ttl'] ?? 300),
             ]);
         });
     }
@@ -283,7 +295,8 @@ class LukkServiceProvider extends ServiceProvider
         // The optional repositories are injected UNCONDITIONALLY here, unlike everywhere else in this
         // provider where a null means "feature off". Erasure is about rows that EXIST, and a feature
         // switched off after use leaves its rows behind — orphaned personal data, while the user row
-        // itself is deleted. `DeleteAccount` guards on the table existing instead.
+        // itself is deleted. Each repository answers an unpublished table itself (the database stores
+        // check for theirs), so a rebound store is erased too.
         $this->app->bind(DeleteAccount::class, fn ($app) => new DeleteAccount(
             $app->make(RefreshTokenRepository::class),
             $app->make(RevokeAllSessions::class),
@@ -301,13 +314,14 @@ class LukkServiceProvider extends ServiceProvider
             // Unconditional, like `DeleteAccount` above: export must reach every row erasure reaches.
             $app->make(LockoutRepository::class),
             Lukk::currentGuard(),
+            $this->config()['password_reset']['broker'] ?? null,
         ));
 
         $this->app->bind(StartSession::class, fn ($app) => new StartSession(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class), Lukk::guardConfig(), Lukk::currentGuard(),
             $this->unclaimedSessions($app)));
         $this->app->bind(RevokeSession::class, fn ($app) => new RevokeSession(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(),
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard(),
             $this->unclaimedSessions($app)));
         $this->app->bind(ClaimSession::class, fn ($app) => new ClaimSession(
             $app->make(UnclaimedSessions::class), $app->make(RevokeSession::class),
@@ -317,9 +331,9 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeSession::class), $app->make(Denylist::class), $app->make(RateLimiter::class),
             Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeAllSessions::class, fn ($app) => new RevokeAllSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RevokeOtherSessions::class, fn ($app) => new RevokeOtherSessions(
-            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig()));
+            $app->make(RefreshTokenRepository::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard()));
         $this->app->bind(RotateRefreshToken::class, fn ($app) => new RotateRefreshToken(
             $app->make(RefreshTokenRepository::class), $app->make(TokenIssuer::class),
             $app->make(RevokeSession::class), $app->make(Denylist::class), Lukk::guardConfig(), Lukk::currentGuard(),
@@ -327,9 +341,11 @@ class LukkServiceProvider extends ServiceProvider
 
         $this->app->bind(LoginRateLimiter::class, fn ($app) => new LoginRateLimiter(
             $app->make(RateLimiter::class),
-            (int) ($this->config()['rate_limits']['login']['max_attempts'] ?? 5),
-            (int) ($this->config()['rate_limits']['login']['decay_seconds'] ?? 60),
-            (int) ($this->config()['rate_limits']['login']['account_max_attempts'] ?? 20),
+            // Per guard, like everything else bound to the current guard here: a guard that hardens itself
+            // with tighter caps must get them, not the default guard's.
+            (int) (Lukk::guardConfig()['rate_limits']['login']['max_attempts'] ?? 5),
+            (int) (Lukk::guardConfig()['rate_limits']['login']['decay_seconds'] ?? 60),
+            (int) (Lukk::guardConfig()['rate_limits']['login']['account_max_attempts'] ?? 20),
             Lukk::usernameField(),
             Lukk::currentGuard(),
         ));
@@ -337,10 +353,10 @@ class LukkServiceProvider extends ServiceProvider
         // admin login authenticates against the admins table, not the users table.
         $this->app->bind(LockoutRepository::class, function () {
             // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
-            $lockout = (array) ($this->config()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
+            $lockout = (array) (Lukk::guardConfig()['lockout'] ?? []); // @pest-mutate-ignore: RemoveArrayCast
             // A non-numeric env value is truthy but casts to 0, and `attempts >= 0` would lock every
             // account on its owner's first typo — the `Limit(0)` failure class this package already
-            // guards elsewhere. 100 is also §5.2.2's ceiling, so clamp rather than trust.
+            // guards elsewhere. 100 is also §3.2.2's ceiling, so clamp rather than trust.
             // Any default of 100 or more clamps to the same 100 below; the value names the ceiling.
             $max = is_numeric($lockout['max_attempts'] ?? null) ? (int) $lockout['max_attempts'] : 100; // @pest-mutate-ignore: IncrementInteger
             // `0` means "manual release only", and the repository reads EVERY value at or below it that way
@@ -354,13 +370,18 @@ class LukkServiceProvider extends ServiceProvider
         $this->app->bind(AttemptLogin::class, fn ($app) => new AttemptLogin(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(LoginRateLimiter::class), $this->lockouts($app)));
         $this->app->bind(ConfirmPasswordUnchanged::class, fn ($app) => new ConfirmPasswordUnchanged(
-            $this->userProviderFor(Lukk::currentGuard()), $app->make(RefreshTokenRepository::class), $app->make(RevokeSession::class)));
+            $this->userProviderFor(Lukk::currentGuard()), $app->make(RefreshTokenRepository::class),
+            $app->make(RevokeSession::class), $app->make(TokenIssuer::class)));
         $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
             $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
             $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
-        $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink($this->config()['password_reset']['broker'] ?? null));
+        $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink(
+            $this->config()['password_reset']['broker'] ?? null,
+            // Cast: a published config can carry an uncast `env()`, and the action takes an int.
+            (int) ($this->config()['password_reset']['timebox_micros'] ?? 1_000_000),
+        ));
         $this->app->bind(ResetPassword::class, fn ($app) => new ResetPassword(
             $app->make(RevokeAllSessions::class), $this->config(), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(Register::class, fn () => new Register(
@@ -376,8 +397,8 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(ChallengeToken::class), $app->make(ChallengeTwoFactor::class), $app->make(RateLimiter::class),
             // Missing means 0 attempts — the "missing rate-limit key locks everyone out" shape, here
             // on the second factor: no one holding a challenge could ever spend it.
-            (int) ($this->config()['rate_limits']['two_factor']['max_attempts'] ?? 5),
-            (int) ($this->config()['rate_limits']['two_factor']['decay_seconds'] ?? 60),
+            (int) (Lukk::guardConfig()['rate_limits']['two_factor']['max_attempts'] ?? 5),
+            (int) (Lukk::guardConfig()['rate_limits']['two_factor']['decay_seconds'] ?? 60),
             $this->lockouts($app), Lukk::currentGuard(),
         ));
         $this->app->bind(RegenerateRecoveryCodes::class, fn () => new RegenerateRecoveryCodes(
@@ -456,11 +477,23 @@ class LukkServiceProvider extends ServiceProvider
     {
         $limiter = $this->app->make(RateLimiter::class);
 
+        // The per-key fallbacks MIRROR config/lukk.php. A single shared `?? 30` was 6x looser than the
+        // shipped value on `confirm` (5), `email_verification` (6) and `password_reset` (6) — so a
+        // degraded config RELAXED the controls instead of preserving them, worst of all on step-up
+        // confirmation, which CHANGELOG 0.5.0 calls "an unmetered password oracle". That is reachable,
+        // not hypothetical: `rate_limits.confirm` only arrived in 0.5.0, and an app that ran
+        // `config:cache` before then gets no backfill at all (`mergeConfigDeep` early-returns when the
+        // configuration is cached). Keep this table in step with the config file.
+        $shipped = [
+            'refresh' => 30, 'passkeys' => 30, 'two_factor' => 5, 'email_verification' => 6,
+            'password_reset' => 6, 'registration' => 10, 'confirm' => 5,
+        ];
+
         foreach (['refresh' => 'lukk-refresh', 'passkeys' => 'lukk-passkeys', 'two_factor' => 'lukk-2fa', 'email_verification' => 'lukk-email-verification', 'password_reset' => 'lukk-password-reset', 'registration' => 'lukk-register', 'confirm' => 'lukk-confirm'] as $key => $name) {
-            $limiter->for($name, function ($request) use ($key, $name) {
+            $limiter->for($name, function ($request) use ($key, $name, $shipped) {
                 // Every read of this goes through `??`, which answers a missing offset on a scalar or null as unset — so the cast decides nothing; it gives the value its array type. (An object block is not supported config.)
                 $limit = (array) ($this->config()['rate_limits'][$key] ?? []); // @pest-mutate-ignore: RemoveArrayCast
-                $max = (int) ($limit['max_attempts'] ?? 30);
+                $max = (int) ($limit['max_attempts'] ?? $shipped[$key]);
                 $decay = (int) ($limit['decay_seconds'] ?? 60);
 
                 $limits = [(new Limit(maxAttempts: $max, decaySeconds: $decay))->by(Lukk::rateLimitKey($request))];
@@ -536,7 +569,7 @@ class LukkServiceProvider extends ServiceProvider
             $this->registerClaimLimiter($limiter, "lukk-{$guardName}-claim", (string) $guardName); // @pest-mutate-ignore: RemoveStringCast
 
             $limiter->for("lukk-{$guardName}-2fa", fn ($request) => (new Limit(
-                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 30),
+                maxAttempts: (int) ($limits['two_factor']['max_attempts'] ?? 5), // the shipped value; see the $shipped table above
                 decaySeconds: (int) ($limits['two_factor']['decay_seconds'] ?? 60)))->by(Lukk::rateLimitKey($request)));
 
             // The extra guards carry confirm-password too, and they need the SAME per-user bucket as
@@ -598,7 +631,8 @@ class LukkServiceProvider extends ServiceProvider
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
     private function lockouts(Application $app): ?LockoutRepository
     {
-        return ($this->config()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
+        // Per guard: a guard that switches the lockout on for itself must get it.
+        return (Lukk::guardConfig()['features']['lockout'] ?? false) ? $app->make(LockoutRepository::class) : null;
     }
 
     private function registerPublishing(): void
@@ -659,7 +693,12 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function config(): array
     {
-        return $this->app->make('config')->get('lukk');
+        // Defaulted, and cast, because the whole `lukk` block is not guaranteed to exist: install the
+        // package into an app that has already run `config:cache` and `mergeConfigDeep` early-returns,
+        // so nothing backfills it. Without the default this returns null into an `array` return type —
+        // a TypeError thrown from `boot()`, which takes the entire application down rather than just
+        // the auth routes. `Lukk::guardConfig()` is null-safe for the same reason.
+        return (array) ($this->app->make('config')->get('lukk') ?? []);
     }
 
     private function appName(): string

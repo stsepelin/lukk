@@ -5,11 +5,12 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Lukk\Actions\ConfirmPassword;
+use Lukk\Actions\EnsurePasswordStepUpMeetsAccountLevel;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Http\Concerns\IssuesConfirmationToken;
 use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
+use Lukk\Http\Requests\ConfirmPasswordRequest;
 
 /**
  * Step-up ("sudo") confirmation by password: `store` re-verifies the user's
@@ -26,9 +27,13 @@ class ConfirmablePasswordController
         private readonly ChallengeToken $challengeTokens,
     ) {}
 
-    public function store(Request $request): JsonResponse
+    public function store(ConfirmPasswordRequest $request, EnsurePasswordStepUpMeetsAccountLevel $meetsAccountLevel): JsonResponse
     {
-        ($this->confirmPassword)($this->authenticated($request), (string) $request->input('password'));
+        // Before the password is checked: a refusal spends no lockout attempt and says nothing about it.
+        $meetsAccountLevel($request, $this->authenticated($request));
+
+        // Validated as a string by the request, so the cast only states the type.
+        ($this->confirmPassword)($this->authenticated($request), (string) $request->validated('password')); // @pest-mutate-ignore: RemoveStringCast
 
         // Bound to the session presenting it, so the confirmation cannot be replayed by another
         // token the same subject holds.

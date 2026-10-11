@@ -83,7 +83,8 @@ it('accepts only the listed origins, not any subdomain of the RP ID', function (
 
     $challenge = app(PasskeyChallengeStore::class)->generate();
     $assertion = spomkyB64u($authenticator->getAssertion('localhost', null, $challenge, 'https://localhost'));
-    expect(spomky()->verifyAssertion($assertion, $challenge, $stored))->toBeInt();
+    // `verifyAssertion` returns what the assertion proved, not just its counter; the counter is still an int.
+    expect(spomky()->verifyAssertion($assertion, $challenge, $stored)->signCount)->toBeInt();
 })->with([
     'a subdomain' => ['https://evil.localhost'],
     'another port' => ['https://localhost:8443'],
@@ -100,7 +101,7 @@ it('leaves the sign-count policy to lukk, reporting a regressed counter instead 
     $challenge = app(PasskeyChallengeStore::class)->generate();
     $assertion = spomkyB64u($authenticator->getAssertion('localhost', null, $challenge, 'https://localhost'));
 
-    expect(spomky()->verifyAssertion($assertion, $challenge, $ahead))->toBeLessThan(1000);
+    expect(spomky()->verifyAssertion($assertion, $challenge, $ahead)->signCount)->toBeLessThan(1000);
 });
 
 it('names a response of the wrong kind rather than failing somewhere inside the library', function () {

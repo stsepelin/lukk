@@ -297,7 +297,11 @@ it('lives for confirm.ttl, read from env as a string, and five minutes when unse
 });
 
 it('answers a confirmation attempt with no password, or a non-string one, with 422', function (array $payload) {
-    // The route reads the field directly; anything but a string must still read as a wrong password.
+    // Anything but a string must read as a wrong password. The three cases this started with were
+    // all ones a `(string)` cast handles quietly — an ARRAY is the one that does not: it raised
+    // "Array to string conversion", which `HandleExceptions` promotes to an ErrorException and
+    // renders as a 500. So the test name claimed a property its data never exercised, and this was
+    // the only endpoint in the package casting request input with no validation behind it.
     $access = User::factory()->create()->startSession()->accessToken;
 
     $this->withToken($access)->postJson('/auth/confirm-password', $payload)->assertStatus(422);
@@ -305,4 +309,26 @@ it('answers a confirmation attempt with no password, or a non-string one, with 4
     'missing' => [[]],
     'null' => [['password' => null]],
     'a number' => [['password' => 1234]],
+    'an array' => [['password' => ['x']]],
+    'a nested array' => [['password' => ['a' => ['b']]]],
+    'over 255 characters' => [['password' => str_repeat('a', 256)]],
 ]);
+
+it('confirms even when the route lists the gate before the auth middleware', function () {
+    // Middleware runs in declaration order unless the class is in the kernel's priority list, and
+    // `Authenticate` is. The gate reads the authenticated user and the presenting session, so
+    // listed first it saw no user and answered 423 to a request carrying a good confirmation —
+    // the same trap the ability gates were already sorted out of.
+    Route::middleware(['lukk.confirm', 'auth:api'])
+        ->post('/_test/sensitive-reordered', fn () => response()->json(['ok' => true]));
+    $access = User::factory()->create()->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+
+    // Earning the confirmation authenticated a request and left that user memoized, with `api` as
+    // the default guard. A real request starts from neither.
+    $this->app['auth']->forgetGuards();
+    config(['auth.defaults.guard' => 'web']);
+
+    $this->withToken($access)->withHeaders($headers)
+        ->postJson('/_test/sensitive-reordered')->assertOk();
+});

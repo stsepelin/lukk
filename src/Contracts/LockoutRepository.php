@@ -35,8 +35,9 @@ interface LockoutRepository
     /**
      * Clear the counter — a successful authentication, a password reset, or an explicit release.
      * Returns how many locks were actually cleared, so an operator tool can tell a hit from a miss.
-     * Implementations MUST fire `AccountReleased` when they clear something, so an audit log sees
-     * every unlock and not just the ones that came through the console.
+     * Implementations MUST fire `AccountReleased` when they clear a HELD lock, so an audit log sees
+     * every unlock and not just the ones that came through the console — and only then: clearing a
+     * counter that never locked is not an unlock.
      */
     public function release(string $purpose, string $subject, ?string $guard): int;
 
@@ -59,13 +60,13 @@ interface LockoutRepository
      * erasure path can find any of them:
      *   - `id:<userId>`            — login failures against a resolvable account
      *   - `<userId>`               — step-up confirmation and two-factor failures
-     *   - `idn:<normalized>`       — login failures against an identifier resolving to no account
+     *   - `idn:sha256:<digest>`    — login failures against an identifier resolving to no account (a SHA-256 of the normalized identifier; releases before 0.7 wrote `idn:<normalized>`)
      *
      * Build them with {@see LoginRateLimiter::lockoutSubject()} rather than by hand: the
      * raw identifier is never a key, so a sweep keyed on it silently matches nothing.
      *
      * Guard-scoped, because two accounts sharing a corporate email share a subject — an unguarded
-     * sweep let erasing one clear a held NIST §5.2.2 lock on a different, live account.
+     * sweep let erasing one clear a held NIST SP 800-63B-4 §3.2.2 lock on a different, live account.
      *
      * @param  array<int, string>  $subjects
      * @return int rows deleted

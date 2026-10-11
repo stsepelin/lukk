@@ -35,12 +35,21 @@ interface PasskeyRepository
      */
     public function credentialIdsFor(int|string $userId): array;
 
-    public function updateSignCount(string $credentialId, int $signCount): void;
+    /**
+     * Move the stored count forward to `$signCount` — never back — and stamp last use. True when the count
+     * moved: false when it was already at or past `$signCount`, which for an advancing count means another
+     * assertion got there first.
+     */
+    public function updateSignCount(string $credentialId, int $signCount): bool;
 
     /**
-     * Lightweight metadata for listing a user's passkeys — no COSE key decryption.
+     * Lightweight metadata for listing a user's passkeys — no COSE key decryption, and never the key.
      *
-     * @return array<int,array{credential_id:string,name:?string,last_used_at:?int}>
+     * `created_at`, `aaguid` and `transports` (lukk 0.7) feed the account export, which must disclose
+     * what erasure destroys (GDPR Art. 15 / Art. 17). They are optional so a store written against 0.6
+     * still conforms; a store that omits them exports null for each.
+     *
+     * @return array<int,array{credential_id:string,name:?string,last_used_at:?int,created_at?:?int,aaguid?:?string,transports?:?array<int,string>}>
      */
     public function summariesForUser(int|string $userId): array;
 

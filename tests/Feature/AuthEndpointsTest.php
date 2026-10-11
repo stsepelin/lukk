@@ -3,8 +3,10 @@
 declare(strict_types=1);
 
 use Firebase\JWT\JWT;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
 use Lukk\Events\RefreshTokenReused;
@@ -227,25 +229,35 @@ it('answers a 401 with the WWW-Authenticate challenge RFC 6750 §3 requires', fu
     }
 });
 
-it('revokes nothing for a bearer that names no session — it would otherwise mean "every one"', function () {
+it('refuses, rather than answering 204, for a bearer that names no session', function (array $fid) {
     // A co-issuer sharing the secret mints tokens with no `fid`. "Others" is defined relative to THIS
     // session, and with no family to except, the call has no way to spare the caller's own: forcing the
     // guard true hands `RevokeOtherSessions` an empty family id, and every session goes — including the
-    // one making the request. The route answers 204 either way, so only the sessions tell them apart.
+    // one making the request. So revoking nothing stays right.
+    //
+    // Answering 204 for it did not: the user asked to log out their other devices, the client read
+    // success, and an attacker's session stayed live for the rest of its refresh_ttl with nothing
+    // saying otherwise. 409 tells the caller the truth and names the route that can sweep them.
     $user = User::factory()->create();
     $kept = $user->startSession();
     $cfg = Lukk::guardConfig();
     $token = JWT::encode([
         'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
-        'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+        'jti' => 'co-issued-others', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600, ...$fid,
     ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
 
-    $this->withToken($token)->deleteJson('/auth/sessions/others')->assertNoContent();
+    $this->withToken($token)->deleteJson('/auth/sessions/others')->assertStatus(409);
 
     expect(RefreshToken::whereNull('revoked_at')->count())->toBe(1);
     app('auth')->forgetGuards();
     $this->postJson('/auth/refresh', ['refresh_token' => $kept->refreshToken])->assertOk();
-});
+})->with([
+    'no fid' => [[]],
+    // An EMPTY `fid` names no session either. `isset()` took it for one, and `family_id != ''` then
+    // spared nothing: "log out my other devices" logged out every device, the caller's included in
+    // spirit — the exact outcome the 409 exists to prevent. Read as absent, as `VerifiedToken` reads it.
+    'an empty fid' => [['fid' => '']],
+]);
 
 it('answers revoke-other-sessions with a bare 204 in body mode too', function () {
     $user = User::factory()->create();
@@ -289,4 +301,258 @@ it('accepts the refresh token in a form-encoded body', function () {
     $pair = User::factory()->create()->startSession();
 
     $this->post('/auth/refresh', ['refresh_token' => $pair->refreshToken])->assertOk();
+});
+
+it('carries amr forward across a refresh, rather than dropping it on the first one', function () {
+    // `amr` (RFC 8176) records how the SESSION was authenticated, and a refresh does not repeat that
+    // — so it has to survive rotation. It used to be stamped only by `StartSession`, so it vanished
+    // from the very first refreshed token: a route gated on it stopped working within one
+    // access_ttl, fail-closed if the gate was written tightly and fail-OPEN if it was written as
+    // `!isset($amr) || in_array(...)`. The docs presented it as durable throughout.
+    $user = User::factory()->create();
+
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+    expect(claims($login->json('access_token'))->amr)->toBe(['pwd']);
+
+    app('auth')->forgetGuards();
+    $refreshed = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd']);
+
+    // And again, so it survives a CHAIN rather than just the row the sign-in wrote.
+    app('auth')->forgetGuards();
+    $again = $this->postJson('/auth/refresh', ['refresh_token' => $refreshed->json('refresh_token')])->assertOk();
+    expect(claims($again->json('access_token'))->amr)->toBe(['pwd']);
+});
+
+it('does not let a claims hook forge or erase the session amr', function () {
+    // Reserved like `scope` and `pin`. Testing this through `/auth/login` proves almost nothing: the
+    // per-login `['pwd']` wins `array_merge` there whatever the hook returns, so the assertion passes
+    // for a reason unrelated to the guard. The exposed path is `$user->startSession()` — the
+    // documented helper behind personal access tokens, impersonation and SSO sign-ins — which passes
+    // NO claims, so before the guard the hook's `amr` was minted AND persisted as the family's own
+    // authentication record, then re-stamped by every rotation for the family's whole life.
+    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn', 'mfa'], 'role' => 'x']);
+
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+
+    expect(claims($pair->accessToken)->amr ?? null)->toBeNull()
+        ->and(claims($pair->accessToken)->role)->toBe('x');
+
+    $rotated = rotate()($pair->refreshToken);
+
+    expect(claims($rotated->accessToken)->amr ?? null)->toBeNull()
+        ->and(claims($rotated->accessToken)->role)->toBe('x');
+});
+
+it('keeps the real amr when a hook tries to replace it on the sign-in path', function () {
+    Lukk::tokenClaimsUsing(fn () => ['amr' => ['webauthn', 'mfa']]);
+
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    app('auth')->forgetGuards();
+    $refreshed = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    expect(claims($refreshed->json('access_token'))->amr)->toBe(['pwd']);
+});
+
+it('still signs in and rotates against a pre-0.8 schema with no amr column', function () {
+    // The back-compat guard is load-bearing, and `amr` needs a STRONGER one than `scope`: `scope` is
+    // non-null only for an opt-in pinned grant, so its "write it only when set" check rarely fires,
+    // while every single sign-in supplies an `amr`. A conditional write alone therefore names a
+    // missing column on every login of an install that upgraded the package but not the schema —
+    // migrations here are publish-only, so that is the DEFAULT outcome of `composer update`.
+    Schema::table('refresh_tokens', fn (Blueprint $table) => $table->dropColumn('amr'));
+
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    // The claim is ABSENT — the stated property. Asserting only that a token came back left a
+    // rotation that forges one (`?? ['forged']`) green, so the comment promised more than the test.
+    expect($rotated->json('access_token'))->not->toBeNull()
+        ->and(claims($rotated->json('access_token'))->amr ?? null)->toBeNull()
+        ->and(claims($login->json('access_token'))->amr)->toBe(['pwd']);
+});
+
+it('refuses a malformed or oversized stored amr instead of stamping it into a token', function (string $stored) {
+    // The column is written through `RefreshTokenRepository`, a documented swap seam, so the ROTATE
+    // path cannot assume its own validation ran — a replacement repository, a hand-edited row or a
+    // restored backup can put anything there. Unit-testing `decodeAmr` proves the validator works;
+    // it does not prove rotation CALLS it, which is the same gap the `scope`/`pin` seam incidents
+    // came through. With a bare `is_array(json_decode(...))` here an object round-trips into the
+    // signed claim, and a long list mints a claim big enough to 431 at the proxy — for the family's
+    // whole refresh_ttl, since every rotation re-stamps it.
+    $user = User::factory()->create();
+    $login = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    DB::table('refresh_tokens')->update(['amr' => $stored]);
+
+    app('auth')->forgetGuards();
+    $rotated = $this->postJson('/auth/refresh', ['refresh_token' => $login->json('refresh_token')])->assertOk();
+
+    expect(claims($rotated->json('access_token'))->amr ?? null)->toBeNull();
+})->with([
+    'an object' => ['{"role":"admin"}'],
+    'a nested list' => ['[["pwd"]]'],
+    'a non-string method' => ['["pwd",5]'],
+    'oversized' => [json_encode(array_fill(0, 400, 'webauthn'))],
+    'not json at all' => ['pwd'],
+]);
+
+/** A token another issuer sharing this guard's key minted: valid, but naming no lukk session. */
+function sessionlessToken(string $guard, int|string $userId): string
+{
+    $cfg = Lukk::guardConfig($guard);
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $userId,
+        'jti' => 'co-issued-'.$guard, 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('names the revoke-all route where this guard actually mounts it', function (string $guard, array $config, string $uri, string $named) {
+    // The message hardcoded `DELETE /auth/sessions`, which does not exist on a custom `lukk.path` or on an
+    // extra guard's mount — pointing the caller at a 404 as the way out.
+    config($config);
+    require dirname(__DIR__, 2).'/src/routes/api.php';
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken($guard, $user->id))->deleteJson($uri)
+        ->assertStatus(409)
+        ->assertJsonPath('message', "This token names no session, so there are no other sessions to revoke. Use DELETE /{$named} to revoke every session, including this one.");
+})->with([
+    'a custom path' => ['api', ['lukk.path' => 'account/auth'], '/account/auth/sessions/others', 'account/auth/sessions'],
+    // Laravel stores a group prefix trimmed, so slashes around the configured path never double up.
+    'a path written with slashes' => ['api', ['lukk.path' => '/account/auth/'], '/account/auth/sessions/others', 'account/auth/sessions'],
+    'a mount at the root' => ['api', ['lukk.path' => ''], '/sessions/others', 'sessions'],
+    'an extra guard' => ['admin', [
+        'auth.guards.admin' => ['driver' => 'lukk-jwt', 'provider' => 'users'],
+        'lukk.guards.admin' => ['audience' => ['https://admin.test'], 'path' => 'staff'],
+    ], '/staff/sessions/others', 'staff/sessions'],
+]);
+
+it('does not point at a revoke-all route this guard has switched off', function () {
+    config(['lukk.features.logout_all' => false, 'lukk.path' => 'account/auth']);
+    require dirname(__DIR__, 2).'/src/routes/api.php';
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken('api', $user->id))->deleteJson('/account/auth/sessions/others')
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'This token names no session, so there are no other sessions to revoke.');
+});
+
+it('lets the refresh cookie live only as long as the session it carries', function () {
+    // A family's expiry is ABSOLUTE — fixed at sign-in, inherited by every successor — but each rotation
+    // re-set the cookie for the full `refresh_ttl`. Late in the family's life the browser then held a
+    // cookie for weeks past the point the server would accept it.
+    $this->freezeSecond();
+    config(['lukk.cookie_mode' => true, 'lukk.refresh_ttl' => 30 * 86_400]);
+    $pair = User::factory()->create()->startSession();
+    $this->travel(30 * 86_400 - 3_600)->seconds();
+
+    $cookie = collect($this->withCredentials()->withUnencryptedCookie('__Host-refresh', $pair->refreshToken)
+        ->postJson('/auth/refresh')->assertOk()->headers->getCookies())
+        ->firstOrFail(fn ($c) => $c->getName() === '__Host-refresh');
+
+    expect($cookie->getExpiresTime())->toBe(now()->getTimestamp() + 3_600);
+});
+
+it('sets a new session\'s refresh cookie for the whole refresh_ttl', function () {
+    $this->freezeSecond();
+    config(['lukk.cookie_mode' => true, 'lukk.refresh_ttl' => 7_200]);
+    $user = User::factory()->create();
+
+    $cookie = collect($this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])
+        ->assertOk()->headers->getCookies())
+        ->firstOrFail(fn ($c) => $c->getName() === '__Host-refresh');
+
+    expect($cookie->getExpiresTime())->toBe(now()->getTimestamp() + 7_200);
+});
+
+it('names the revoke-all route when a cached config predates logout_all, which then defaults on', function () {
+    $lukk = (array) config('lukk');
+    unset($lukk['features']['logout_all']);
+    config()->set('lukk', $lukk);
+    $user = User::factory()->create();
+
+    $this->withToken(sessionlessToken('api', $user->id))->deleteJson('/auth/sessions/others')
+        ->assertStatus(409)
+        ->assertJsonPath('message', 'This token names no session, so there are no other sessions to revoke. Use DELETE /auth/sessions to revoke every session, including this one.');
+});
+
+it('ends the presenting co-issuer bearer on log-out-everywhere, as logout does', function (array $fid) {
+    // A co-issuer's token names no lukk family (no `fid`, or one this table never minted), so revoking
+    // the account's families left the very token that asked for "log out everywhere" live until it
+    // expired — while `POST /auth/logout` with the same token kills it by `jti` (RFC 7009 §2.1: the
+    // revoked token is unusable from then on). Now it is ended the same way.
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-all', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600, ...$fid,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+
+    $this->withToken($token)->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect(verifier()->verify($token))->toBeNull();
+})->with([
+    'no fid' => [[]],
+    'a family lukk never minted' => [['fid' => 'sess_42']],
+]);
+
+it('denylists a presented co-issuer token only for the rest of its life', function () {
+    $this->freezeSecond();
+    $user = User::factory()->create();
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
+        'jti' => 'co-issued-ttl', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+    $denylist = new class(app(Denylist::class)) implements Denylist
+    {
+        public array $jtis = [];
+
+        public function __construct(private Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->jtis[$jti] = $ttlSeconds;
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return $this->inner->has($type, $id);
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return $this->inner->hasAny($types);
+        }
+    };
+    app()->instance(Denylist::class, $denylist);
+
+    $this->withToken($token)->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect($denylist->jtis)->toBe(['co-issued-ttl' => 600 + Lukk::leeway($cfg)]);
+});
+
+it('logs a Lukk::actingAs user out everywhere, with no token presented', function () {
+    // `actingAs()` authenticates the guard directly, so there is no verified token on the request.
+    $user = User::factory()->create();
+    $user->startSession();
+    Lukk::actingAs($user);
+
+    $this->deleteJson('/auth/sessions')->assertSuccessful();
+
+    expect(RefreshToken::whereNull('revoked_at')->count())->toBe(0);
 });

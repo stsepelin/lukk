@@ -5,19 +5,17 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers\Concerns;
 
 use Illuminate\Http\Request;
+use Lukk\Lukk;
 use Lukk\Support\RefreshCookie;
 
 /**
- * The refresh token a request presents — the body field, else the guard's refresh cookie.
+ * The refresh token a request presents — the body field, else (in cookie mode only) the guard's refresh cookie.
  *
  * Used by `/refresh`. In cookie mode the only ambient credential it accepts is the `SameSite=Strict`,
  * `__Host-`, HttpOnly cookie.
  *
- * Deliberately WITHOUT the request-shape check `/logout` applies (`ReadsLogoutCredentials`). A same-site
- * sibling page can still get the cookie sent on a form POST here, but all a forged refresh achieves
- * is a rotation: the new pair lands in a response the attacker cannot read and a cookie the victim's
- * browser keeps, so the victim's session carries on. A forged logout, by contrast, ends the session.
- * Refusing form-shaped refreshes would also break any client that refreshes without a JSON body.
+ * In cookie mode the route itself is behind `RefuseForgeableCookieGrant`, so a cross-site form can
+ * neither replay the victim's cookie nor plant the attacker's own session through a body token.
  */
 trait ReadsPresentedRefreshToken
 {
@@ -29,8 +27,11 @@ trait ReadsPresentedRefreshToken
         // (RFC 9700 §4.3.2). Body only. `post()` covers form encoding, `json()` the JSON body.
         $presented = $request->post('refresh_token') ?? $request->json('refresh_token');
 
-        // An array would raise "Array to string conversion" and hash the literal "Array".
-        $cookie = $request->cookie(RefreshCookie::name());
+        // Only in cookie mode, the one mode with `RefuseForgeableCookieGrant` in front of this route. In
+        // body mode a leftover or sibling-planted cookie would be consumed by any cross-site form: the
+        // attacker cannot read the pair, but the victim's next refresh then presents a rotated token,
+        // and past grace that revokes the family. An array would raise "Array to string conversion".
+        $cookie = (Lukk::guardConfig()['cookie_mode'] ?? false) ? $request->cookie(RefreshCookie::name()) : null;
 
         // No token resolves under any placeholder, so the '' only states the type.
         return is_string($presented) ? $presented : (is_string($cookie) ? $cookie : ''); // @pest-mutate-ignore: EmptyStringToNotEmpty

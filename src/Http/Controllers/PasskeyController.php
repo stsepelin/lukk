@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Lukk\Actions\FinishPasskeyRegistration;
 use Lukk\Contracts\PasskeyRepository;
+use Lukk\Events\PasskeyDeleted;
 use Lukk\Http\Concerns\PreventsCaching;
 use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 use Lukk\Http\Requests\PasskeyRegistrationRequest;
@@ -49,7 +50,12 @@ class PasskeyController
 
     public function destroy(Request $request, string $credentialId): Response
     {
-        $this->passkeys->delete($this->authenticated($request)->getAuthIdentifier(), $credentialId);
+        $user = $this->authenticated($request);
+
+        // Only when a credential was actually removed — the id may be another user's, or long gone.
+        if ($this->passkeys->delete($user->getAuthIdentifier(), $credentialId)) {
+            event(new PasskeyDeleted($user, $credentialId));
+        }
 
         return response()->noContent();
     }

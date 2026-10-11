@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
 use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Contracts\TwoFactorProvider;
+use Lukk\Events\RecoveryCodeUsed;
 
 /**
  * Resolve the challenged user and verify their second factor — a TOTP code or a
@@ -21,7 +22,17 @@ class ChallengeTwoFactor
         private readonly TwoFactorProvider $totp,
     ) {}
 
-    public function __invoke(int|string $userId, ?string $code, ?string $recoveryCode): Authenticatable
+    /**
+     * The account a challenge names, resolved through the same provider the factor is checked against —
+     * for a policy that must refuse BEFORE a factor is spent (the email-verification gate), since a
+     * recovery code burned on a sign-in that was always going to be refused is gone for good.
+     */
+    public function subject(int|string $userId): ?Authenticatable
+    {
+        return $this->users->retrieveById($userId);
+    }
+
+    public function __invoke(int|string $userId, #[\SensitiveParameter] ?string $code, #[\SensitiveParameter] ?string $recoveryCode): Authenticatable
     {
         $user = $this->users->retrieveById($userId);
 
@@ -54,6 +65,10 @@ class ChallengeTwoFactor
 
         // (Likewise: an empty recovery code matches no stored hash.)
         if ($recoveryCode !== null && $recoveryCode !== '' && $user->useRecoveryCode($recoveryCode)) { // @pest-mutate-ignore: EmptyStringToNotEmpty
+            // NIST SP 800-63B-4 §4.2: a recovery is something the subscriber is told about. Announced here,
+            // right after the spend, because the code is gone whatever happens to the sign-in next.
+            event(new RecoveryCodeUsed($user, $user->recoveryCodesRemaining()));
+
             return $user;
         }
 

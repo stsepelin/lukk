@@ -30,6 +30,13 @@ return new class extends Migration
             // which is what a personal access token or an impersonation cap needs, and what a
             // callback keyed on the subject cannot express.
             $table->text('scope')->nullable();
+            // How the SESSION was authenticated (RFC 8176 `amr`), JSON-encoded — `["pwd"]`,
+            // `["pwd","otp","mfa"]`, `["pop","user"]`. Stamped once at sign-in and carried forward by every rotation, because
+            // it describes the authentication EVENT, which a refresh does not repeat. Without it the
+            // claim vanished from the first refreshed token, so a route gated on `amr` silently
+            // stopped working within one access_ttl — fail-closed if written tightly, fail-OPEN if
+            // written as `!isset($amr) || in_array(...)`.
+            $table->text('amr')->nullable();
             $table->timestamp('rotated_at')->nullable(); // set when consumed to mint a successor
             $table->timestamp('revoked_at')->nullable()->index(); // hard kill (logout / reuse cascade); indexed for prune
             $table->timestamp('expires_at')->index();    // absolute family ceiling

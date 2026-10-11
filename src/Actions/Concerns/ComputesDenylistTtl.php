@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Lukk\Actions\Concerns;
 
+use Lukk\Lukk;
+use Lukk\Support\LongestAccessTtl;
+use Lukk\Support\VerifiedToken;
+
 /**
  * How long a revoked family's denylist entry must live — past the last access token that family can
  * still present.
@@ -24,8 +28,65 @@ trait ComputesDenylistTtl
     /**
      * @param  array<string, mixed>  $config
      */
-    private function denylistTtl(array $config): int
+    private function denylistTtl(array $config, string $guard): int
     {
-        return (int) ($config['access_ttl'] ?? 900) + (int) ($config['leeway'] ?? 5);
+        // The configured lifetime, or the longest one minted that may still be alive if that is longer —
+        // `access_ttl` lowered since (see `LongestAccessTtl`).
+        // The guard and store the CALLER was built for, never the ambient ones: an action resolved under one
+        // guard and run under another (a queued job) read the wrong record and under-covered.
+        // The leeway the VERIFIER allows (`Lukk::leeway()`, clamped 0..300), not the raw value: a negative
+        // one shortened the entry below the token's real life, so a revoked family's access token verified
+        // again for its last minutes.
+        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + Lukk::leeway($config);
+
+        // The configured window is only exact while every access token's `exp` really is
+        // `iat + lukk.access_ttl`. Two ordinary things break that, and both under-cover the revoke:
+        //
+        //  - `access_ttl` LOWERED between mint and revoke. Cutting it from 3600 to 300 in response to
+        //    a suspected leak, then forcing a logout, wrote a 305s entry while the leaked token stayed
+        //    valid for another ~55 minutes: it started working again mid-incident.
+        //  - a rebound `TokenIssuer`, which owns `exp` outright and is told nothing about
+        //    `access_ttl`. Every revocation under-covers, permanently and silently.
+        //
+        // So take the longer of the configured window and the one the caller's OWN token proves this
+        // deployment mints. `EndSession` already derives its per-jti TTL from `exp` this way; family
+        // revokes had no token to read until `VerifiedToken` put the verified claims on the request.
+        return max($configured, $this->presentedTokenTtl($config));
+    }
+
+    /**
+     * The remaining life of the access token authenticating this request, plus leeway — or 0 when
+     * there is none (a console command, a queued job, a revoke triggered by a refresh rather than a
+     * bearer).
+     *
+     * Best effort by construction: it bounds the revoke from BELOW, so being wrong costs a denylist
+     * entry that expires too early only in the case it already did. It reads the token this caller
+     * presented, which is representative wherever the issuer mints one lifetime for everyone; a
+     * deployment whose tokens vary in length still needs `lukk.access_ttl` set to the longest.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    private function presentedTokenTtl(array $config): int
+    {
+        try {
+            $token = VerifiedToken::current(app('request'));
+        } catch (\Throwable) {
+            // No request bound at all (console, queue). Nothing to learn; the configured window stands. As
+            // below, any value at or below that window is equivalent: the caller takes the larger.
+            return 0; // @pest-mutate-ignore: DecrementInteger,IncrementInteger
+        }
+
+        // `?? null` already absorbs a missing token; the `?->` states that it may be one.
+        $exp = $token?->claims->exp ?? null; // @pest-mutate-ignore: RemoveNullSafeOperator
+
+        // A shortcut: with no numeric `exp` the arithmetic below casts null to 0 and `max(0, …)` answers 0 anyway.
+        if (! is_numeric($exp)) {
+            // Any value at or below the configured window is equivalent: the caller takes the larger.
+            return 0; // @pest-mutate-ignore: RemoveEarlyReturn,DecrementInteger,IncrementInteger
+        }
+
+        // `exp` is an int on every verified token; the cast states the type. The leeway is the verifier's, as above.
+        // No clamp at 0: a verified token has life left, and the caller takes the larger of this and the window.
+        return (int) $exp - now()->getTimestamp() + Lukk::leeway($config); // @pest-mutate-ignore: RemoveIntegerCast
     }
 }

@@ -6,7 +6,6 @@ namespace Lukk\Concerns;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Crypt;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Lukk\Support\RecoveryCode;
 
@@ -17,7 +16,7 @@ use Lukk\Support\RecoveryCode;
  * reproduce the OTP); recovery codes are hashed (never re-displayable).
  *
  * @property ?string $two_factor_secret encrypted TOTP secret
- * @property ?string $two_factor_recovery_codes encrypted, salted+hashed code set
+ * @property ?string $two_factor_recovery_codes JSON list of password-hashed (salted) codes, not encrypted
  * @property ?Carbon $two_factor_confirmed_at
  */
 trait HasTwoFactorAuthentication
@@ -49,7 +48,7 @@ trait HasTwoFactorAuthentication
         // Clamped, like the lockout's max_attempts. `range(1, 0)` counts DOWN and returns [1, 0],
         // so a configured 0 silently produced two codes, and a negative value produced |n|+1 — the
         // opposite of what was asked for either way.
-        $count = max(1, min(100, $count));
+        $count = RecoveryCode::setSize($count);
 
         $codes = array_map(fn () => RecoveryCode::generate(), range(1, $count));
 
@@ -75,26 +74,59 @@ trait HasTwoFactorAuthentication
     /**
      * Verify a recovery code and, on a match, consume it (single-use).
      */
-    public function useRecoveryCode(string $code): bool
+    public function useRecoveryCode(#[\SensitiveParameter] string $code): bool
     {
-        // Lock the row and re-read inside a transaction so two concurrent
-        // redemptions can't both spend the same single-use code.
-        return DB::transaction(function () use ($code) {
+        // Find the match BEFORE taking the lock. One password-hash derivation per stored code — up to
+        // a hundred — held the user's row under `lockForUpdate()` for seconds on every wrong guess,
+        // stalling every other write to the account. Verifying needs no lock; spending does.
+        $match = null;
+
+        foreach ($this->recoveryCodeHashes() as $hash) {
+            // A code stored under a hasher the app has since left (bcrypt, after a move to argon2id with
+            // `verify` on) makes the check THROW; it is no match, as sign-in treats such a password,
+            // rather than a 500 on the one path left to a user who lost their authenticator.
+            try {
+                $matches = Hash::check($code, $hash);
+            } catch (\Throwable) {
+                $matches = false;
+            }
+
+            if ($matches) {
+                $match = $hash;
+
+                break;
+            }
+        }
+
+        if ($match === null) {
+            return false;
+        }
+
+        // Lock, re-read and spend by VALUE: a concurrent redemption may have spent this code (or
+        // another) since the read above, so it is spent only if it is still there.
+        // On the user's OWN connection: a directory database is supported, and a transaction on the default
+        // one would leave this lock in autocommit, released at once — two redemptions could both spend it.
+        return $this->getConnection()->transaction(function () use ($match) {
             static::query()->whereKey($this->getKey())->lockForUpdate()->first();
             $this->refresh();
 
-            $hashes = json_decode($this->two_factor_recovery_codes ?? '[]', true) ?: [];
+            $hashes = $this->recoveryCodeHashes();
+            $index = array_search($match, $hashes, true);
 
-            foreach ($hashes as $index => $hash) {
-                if (Hash::check($code, $hash)) {
-                    unset($hashes[$index]);
-                    $this->forceFill(['two_factor_recovery_codes' => json_encode(array_values($hashes))])->save();
-
-                    return true;
-                }
+            if ($index === false) {
+                return false;
             }
 
-            return false;
+            unset($hashes[$index]);
+            $this->forceFill(['two_factor_recovery_codes' => json_encode(array_values($hashes))])->save();
+
+            return true;
         });
+    }
+
+    /** @return array<array-key, mixed> the stored hashes, listed or keyed */
+    private function recoveryCodeHashes(): array
+    {
+        return json_decode($this->two_factor_recovery_codes ?? '[]', true) ?: [];
     }
 }

@@ -8,14 +8,18 @@ use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Auth\Events\Lockout;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Timebox;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 use RuntimeException;
 
 /**
@@ -26,6 +30,7 @@ use RuntimeException;
  */
 class AttemptLogin
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -38,38 +43,15 @@ class AttemptLogin
 
     public function __invoke(Request $request): Authenticatable
     {
-        // Lock first: a locked account whose decaying bucket is also full would otherwise be told
-        // "try again in N seconds", which with manual-only release is exactly the untruth that
-        // choosing 423 over 429 exists to avoid.
-        // Resolved once and reused: the gate, the failure count and the release must all name the
-        // same bucket, and re-deriving it per call would mean three provider lookups.
         $this->assertIdentifierColumnExists();
 
-        $subject = $this->lockoutSubject($request);
-
-        $this->ensureIsNotLocked($request, $subject);
-        $this->ensureIsNotThrottled($request);
-
-        // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
-        // the credential check is check-then-act: N concurrent requests all read "not locked", all
-        // reach `Hash::check`, and all count afterwards — so the realized number of password
-        // verifications was `max_attempts + concurrency`, not `max_attempts`. The increment is
-        // transactional and row-locked, so consuming it first makes the count authoritative at the
-        // moment it is taken. Costs one write per attempt, and only when the feature is on: a hard
-        // consecutive cap is not something a decaying counter can approximate.
-        $this->reserve($subject);
-
-        try {
-            $user = $this->resolve($request);
-        } catch (ValidationException $e) {
-            $this->limiter->increment($request);
-
-            throw $e;
-        }
+        [$user, $subjects] = $this->resolve($request);
 
         $this->limiter->clear($request);
         // "Consecutive" is the whole point of the cap: any success ends the run.
-        $this->lockouts?->release('login', $subject, $this->limiter->guard());
+        foreach ($subjects as $subject) {
+            $this->lockouts?->release('login', $subject, $this->limiter->guard());
+        }
         // A step-up lock counts failures against the SAME password, so a successful login is proof
         // enough to clear it — and it's the only self-service escape from a confirm lock an attacker
         // set with a stolen access token (they cannot log in without the password, so this hands
@@ -81,7 +63,7 @@ class AttemptLogin
     }
 
     /**
-     * NIST SP 800-63B §5.2.2. Distinct from the throttles above: those bound a RATE and clear
+     * NIST SP 800-63B-4 §3.2.2. Distinct from the throttles above: those bound a RATE and clear
      * themselves, this bounds a RUN and is held until something releases it. 423 rather than 429
      * because "retry later" may be untrue — with `release_after` at 0 it needs intervention.
      */
@@ -91,7 +73,8 @@ class AttemptLogin
      * A success releases the row immediately below, so the counter still means "consecutive
      * failures" from the outside — it is only *held* for the duration of the credential check.
      */
-    private function reserve(string $subject): void
+    /** @param  list<string>  $subjects */
+    private function reserve(array $subjects): void
     {
         if ($this->lockouts === null) {
             return;
@@ -102,21 +85,91 @@ class AttemptLogin
         // `> max` keeps the documented meaning — `max` failures happen, then the account is locked —
         // while the atomic increment means only `max` requests can ever win a slot, however many
         // arrive at once.
-        if ($this->lockouts->recordFailure('login', $subject, $this->limiter->guard()) > $this->lockouts->maxAttempts()) {
-            $this->throwLocked('login', $subject, $this->field());
+        // Every counter takes the attempt before any refuses it, so they stay in step.
+        $over = [];
+
+        foreach ($subjects as $subject) {
+            if ($this->reserveAttempt($this->lockouts, 'login', $subject) > $this->lockouts->maxAttempts()) {
+                $over[] = $subject;
+            }
+        }
+
+        if ($over !== []) {
+            $this->throwLocked('login', $over[0], $this->field());
         }
     }
 
-    private function ensureIsNotLocked(Request $request, string $subject): void
+    /** @param  list<string>  $subjects */
+    private function ensureIsNotLocked(Request $request, array $subjects): void
     {
-        if ($this->lockouts === null || ! $this->lockouts->locked('login', $subject, $this->limiter->guard())) {
-            return;
+        foreach ($subjects as $subject) {
+            if ($this->lockouts?->locked('login', $subject, $this->limiter->guard())) {
+                $this->throwLocked('login', $subject, $this->field());
+            }
         }
-
-        $this->throwLocked('login', $subject, $this->field());
     }
 
-    private function resolve(Request $request): Authenticatable
+    /** @return array{0: Authenticatable, 1: list<string>} the user, and the lockout subjects it counted against */
+    private function resolve(Request $request): array
+    {
+        // Every failure costs the same WALL CLOCK, not merely the same number of key derivations —
+        // and the box holds EVERYTHING that differs between a real account and an unknown one: the
+        // provider lookup, the lockout reads and writes (a real account has two counters, a non-account
+        // one: 15 queries against 7), and the key derivation. An unknown identifier hashes at the
+        // CONFIGURED cost while a real account is checked at the cost embedded in its stored hash, so a
+        // row left behind by a `BCRYPT_ROUNDS` bump answers several times faster and an unreadable one
+        // (`!`, `*`, an import) answers instantly.
+        //
+        // A Timebox pads a fast path up to the budget and never shortens a slow one, so a budget set
+        // below the real cost is ineffective rather than harmful — and `throw`s still propagate, after
+        // the padding, so a 422, 423 or 429 keeps its timing too.
+        return app(Timebox::class)->call(function (Timebox $timebox) use ($request) {
+            // The account the identifier names, looked up ONCE: it keys the counters below and is the
+            // row the password is then checked against.
+            $candidate = $this->candidate($request);
+            $subjects = LoginRateLimiter::lockoutSubjects($candidate, (string) $request->input($this->field()));
+
+            // Lock first: a locked account whose decaying bucket is also full would otherwise be told
+            // "try again in N seconds", which with manual-only release is exactly the untruth that
+            // choosing 423 over 429 exists to avoid.
+            $this->ensureIsNotLocked($request, $subjects);
+            $this->ensureIsNotThrottled($request);
+
+            // RESERVE the attempt before verifying anything. Reading `locked()` and then counting after
+            // the credential check is check-then-act: N concurrent requests all read "not locked", all
+            // reach `Hash::check`, and all count afterwards. The increment is transactional and
+            // row-locked, so consuming it first makes the count authoritative at the moment it is taken.
+            $this->reserve($subjects);
+
+            try {
+                $user = $this->resolveWithin($request, $candidate);
+            } catch (ValidationException $e) {
+                // Only a failed credential feeds the decaying throttle; a 423 or 429 above never reaches here.
+                $this->limiter->increment($request);
+
+                // The reservation above only COUNTED the attempt; the lock lands now that it failed. The
+                // attempt that reaches the cap with the right password therefore neither locks nor
+                // announces anything (`CountsLockoutAttempts`). Inside the box like every other counter
+                // write, so a real account's second counter costs no visible time.
+                foreach ($subjects as $subject) {
+                    $this->attemptFailed($this->lockouts, 'login', $subject);
+                }
+
+                throw $e;
+            }
+
+            // A success announces itself in its status code, so padding it hides nothing and only
+            // taxes every legitimate sign-in. The box is for telling FAILURES apart.
+            $timebox->returnEarly();
+
+            return [$user, $subjects];
+            // No `max(0, …)`: a Timebox only sleeps a positive remainder, so a negative budget is
+            // already no box. The cast is load-bearing — a string from an uncast `env()` would be a
+            // TypeError under strict types.
+        }, (int) (Lukk::guardConfig()['login_timebox_micros'] ?? 500_000));
+    }
+
+    private function resolveWithin(Request $request, ?Authenticatable $candidate): Authenticatable
     {
         if (Lukk::$authenticateUsing !== null) {
             $user = (Lukk::$authenticateUsing)($request);
@@ -128,28 +181,106 @@ class AttemptLogin
             $this->fail();
         }
 
-        $field = $this->field();
-        $credentials = [
-            $field => (string) $request->input($field),
-            // The identifier cast is load-bearing — a null there becomes `WHERE … IS NULL`, which
-            // matches an account with no identifier set. A null password only reaches the hasher,
-            // where it fails like any wrong one; the cast keeps it out of a PHP that may refuse it.
-            'password' => (string) $request->input('password'), // @pest-mutate-ignore: RemoveStringCast
-        ];
+        $credentials = $this->credentials($request);
+        $user = $candidate;
 
-        $user = $this->users->retrieveByCredentials($credentials);
-
+        // ONE key-derivation per attempt, on every path, so the answer's timing says nothing about
+        // which accounts exist. `Hash::make` runs the same KDF at the same configured cost as the
+        // `Hash::check` the real path runs, and — unlike a dummy hash — it needs nothing stored.
+        //
+        // The previous equalizer memoized a dummy in a `static`, which PHP resets at request
+        // shutdown: under PHP-FPM every unknown-identifier attempt paid `make` + `check` while a
+        // known one paid a single `check`. Measured at bcrypt cost 12: 472ms vs 236ms — a 2x
+        // enumeration oracle, inverted from the one being defended against but just as usable. The
+        // memo is also why no test could see it: one process, every request after the first cheap.
+        //
         if ($user === null) {
-            // Equivalent hash so an unknown email costs the same as a wrong password (no timing enumeration).
-            Hash::check($credentials['password'], $this->timingHash());
+            // The equalizer must never be able to THROW on attacker-controlled input, whatever the
+            // hasher is. `password_hash` raises `ValueError` on a NUL byte where `password_verify`
+            // only returns false, which turned this branch into a 500 while a real account still got
+            // its 422 — a deterministic, single-request account oracle, and one that escaped the
+            // failure limiter, since that counts `ValidationException` and not `ValueError`.
+            // `LoginRequest` now rejects NUL outright; this is the belt to that braces, and it also
+            // covers a rebound hasher with its own opinions about what it will not hash.
+            try {
+                Hash::make($credentials['password']);
+            } catch (\Throwable) {
+                // Nothing to report: the work was the only point, and the failure below is the answer.
+            }
+
             $this->fail();
         }
 
-        if (! $this->users->validateCredentials($user, $credentials)) {
+        // Wrapped for the same reason the equalizer above is: `Hash::check` can throw too. With
+        // `hashing.driver` on argon2id and a bcrypt row left by an import or a partial migration,
+        // `AbstractHasher::check` raises "This password does not use the Argon2id algorithm" — a 500
+        // where an unknown identifier gets a 422, which is the same single-request account oracle the
+        // NUL byte opened on the branch above, on the neighbouring line. A stored hash the active
+        // driver cannot read is not a credential anyone can present, so it fails closed.
+        try {
+            $valid = $this->users->validateCredentials($user, $credentials);
+        } catch (\Throwable) {
+            $valid = false;
+        }
+
+        // bcrypt reads 72 bytes, so against a bcrypt row a longer password is verified only in part:
+        // every string sharing the prefix says yes. NIST SP 800-63B-4 §3.1.1.2 requires verifying the
+        // ENTIRE password. lukk no longer stores one this long, but releases before 0.7 did, so its
+        // owner is told to reset rather than that it is wrong. Decided AFTER the check, so the
+        // derivation is still paid; counted as a failure like any other refusal.
+        if ($valid && HashablePassword::verifiesOnlyInPart($user, $credentials['password'])) {
+            throw HashablePassword::mustReset($this->field());
+        }
+
+        if (! $valid) {
+            // Equalize the COST, not just the count. `Hash::check` runs at the cost embedded in the
+            // stored hash; `Hash::make` above runs at the configured one. A row left behind by a
+            // `BCRYPT_ROUNDS` bump — Laravel 11 raised the default from 10 to 12 — was checked several
+            // times faster than an unknown identifier was equalized (15 ms against 118 ms at cost 11),
+            // and an unreadable value (`!`, `*`, an import) answered at once. A Timebox shorter than the
+            // hash pads none of that, so these also pay one derivation at the configured cost.
+            //
+            // That includes the password-LESS account — passkey-only, SSO, invited-not-yet-set. The
+            // framework answers a null or empty column without deriving anything, which made those
+            // the fastest response of all and pointed an attacker at exactly the accounts worth
+            // phishing a passkey or a reset link out of. `needsRehash` says yes for both, so the same
+            // line covers them; a separate branch for them used to sit above and is no longer needed.
+            if ($this->storedHashIsWeak($user)) {
+                try {
+                    Hash::make($credentials['password']);
+                } catch (\Throwable) {
+                    // As above: the work is the point; the failure below is the answer.
+                }
+            }
+
             $this->fail();
+        }
+
+        // What Laravel's own `SessionGuard` does on every successful login, and lukk never did: bring
+        // a weaker stored hash up to the configured cost, so rows written before a cost increase stop
+        // being both weaker and distinguishable. Off when the application turned it off.
+        if (config('hashing.rehash_on_login', true)) {
+            try {
+                $this->rehash($user, $credentials['password']);
+            } catch (\Throwable $e) {
+                // A failed upgrade must not fail a correct sign-in; the next one tries again.
+                report($e);
+            }
         }
 
         return $user;
+    }
+
+    /** Would the hasher rehash this stored value — weaker than configured, or not one it can read? */
+    private function storedHashIsWeak(Authenticatable $user): bool
+    {
+        try {
+            // A password-less row arrives here as null. Without the cast PHP still answers true, but
+            // logs a null-to-string deprecation on every such attempt — noise, not behaviour.
+            return Hash::needsRehash((string) $user->getAuthPassword()); // @pest-mutate-ignore: RemoveStringCast
+        } catch (\Throwable) {
+            return true;
+        }
     }
 
     private function ensureIsNotThrottled(Request $request): void
@@ -222,39 +353,109 @@ class AttemptLogin
         );
     }
 
-    /** The identifier field (config `lukk.username`) — the request field + the error key. */
     /**
-     * The lockout subject for this attempt. Costs one provider lookup, and only when the feature is
-     * on — see `LoginRateLimiter::lockoutSubject()` for why the identifier alone is not safe to key
-     * on. The lookup reads `lukk.username`, which is the same field the counter has always keyed
-     * on, so a `Lukk::authenticateUsing` callback that authenticates elsewhere is no worse off than
-     * before (config/lukk.php documents that it must set `lukk.username` to match).
+     * Upgrade a weak stored hash — but only the hash this sign-in checked.
+     *
+     * The row was read at the start of the attempt. Saving that model, as the provider's own
+     * `rehashPasswordIfRequired()` does, wrote `Hash::make(<this password>)` over anything committed
+     * since: a password reset landing in between was REVERTED, and the session, fingerprinted from the
+     * rehashed model, survived the password-unchanged check. So the write is conditional on the stored
+     * value still being the one checked. Losing that race to a concurrent upgrade of the same password
+     * is harmless, and the model adopts the winner's hash so its own session is not taken for a change.
+     *
+     * The STOCK `EloquentUserProvider` only — the exact class, as `assertIdentifierColumnExists()` keys
+     * on it. `Hash::make(<password>)` is the value that provider checks against; a provider of its own
+     * may check something else (a peppered `Hash::check($password.$pepper, …)`), and replacing its
+     * working hash with an unpeppered one failed every later sign-in. Nor is the provider's own
+     * `rehashPasswordIfRequired()` the way out: the stock one, which a subclass inherits, both saves
+     * the stale model (the revert above) and makes the same unpeppered hash. Another provider gives no
+     * conditional write to make, and lukk does not risk either for a cost upgrade.
      */
-    private function lockoutSubject(Request $request): string
+    private function rehash(Authenticatable $user, #[\SensitiveParameter] string $password): void
     {
-        if ($this->lockouts === null) {
-            // The value is never read: every consumer of the subject short-circuits on this same check.
-            return ''; // @pest-mutate-ignore: EmptyStringToNotEmpty
+        // Only a successful check reaches here, so the password is a string; the cast states it.
+        $stored = (string) $user->getAuthPassword(); // @pest-mutate-ignore: RemoveStringCast
+
+        // The exact class, over the application's own hasher: constructed with a hasher of its own (a
+        // pepper), the stock class checks what that hasher makes, not what `Hash::make()` does.
+        if ($this->users::class !== EloquentUserProvider::class || $this->users->getHasher() !== app('hash') || ! Hash::needsRehash($stored)) {
+            return;
         }
 
-        $identifier = (string) $request->input($this->field());
+        // The stock provider only ever hands back its own model, so this states the type rather than
+        // deciding anything (a `Lukk::authenticateUsing` user returns before the rehash is reached).
+        assert($user instanceof Model); // @pest-mutate-ignore: RemoveFunctionCall,InstanceOfToTrue
 
-        return LoginRateLimiter::lockoutSubject(
-            $this->users->retrieveByCredentials([$this->field() => $identifier]),
-            $identifier,
-        );
+        $column = $user->getAuthPasswordName();
+        $upgraded = Hash::make($password);
+
+        if ($user->newQueryWithoutScopes()->whereKey($user->getKey())->where($column, $stored)->update([$column => $upgraded]) === 1) {
+            $this->storeRaw($user, $column, $upgraded);
+
+            return;
+        }
+
+        // A row deleted meanwhile reads null, which no check accepts either way; the cast states the type.
+        $current = (string) $user->newQueryWithoutScopes()->whereKey($user->getKey())->value($column); // @pest-mutate-ignore: RemoveStringCast
+
+        if (Hash::check($password, $current)) {
+            $this->storeRaw($user, $column, $current);
+        }
     }
 
+    /**
+     * Put a hash on the model as stored, past any mutator: a legacy `setPasswordAttribute()` that hashes
+     * what it is given would hash the hash, and the session's password fingerprint, taken from this
+     * model, would then match nothing stored.
+     */
+    private function storeRaw(Model $user, string $column, string $hash): void
+    {
+        $user->setRawAttributes([...$user->getAttributes(), $column => $hash]);
+        // Already stored: left dirty, a later `save()` of this instance would write it again, over a
+        // reset that landed meanwhile, and observers keyed on `isDirty()` would see a password change.
+        $user->syncOriginalAttribute($column);
+    }
+
+    /**
+     * The account the identifier names, or null — the one provider lookup a sign-in makes.
+     *
+     * It keys the persistent lockout (`LoginRateLimiter::lockoutSubject()` explains why the identifier
+     * alone is not safe to key on there), and the stock path then checks the
+     * password against this same row rather than querying again. The lookup runs inside the
+     * Timebox, with the derivation the box exists to hide; a hit and a miss are one indexed SELECT
+     * each, so it adds nothing the box has to cover.
+     *
+     * A `Lukk::authenticateUsing` app may name a `lukk.username` that is no column. The lockout
+     * documents that it must match, so for such an app the lookup runs only when the lockout is on;
+     * otherwise its buckets keep the identifier fold, as before.
+     */
+    private function candidate(Request $request): ?Authenticatable
+    {
+        if ($this->lockouts === null && Lukk::$authenticateUsing !== null) {
+            return null;
+        }
+
+        return $this->users->retrieveByCredentials($this->credentials($request));
+    }
+
+    /** @return array<string, string> the identifier under `lukk.username`, and the password */
+    private function credentials(Request $request): array
+    {
+        $field = $this->field();
+
+        return [
+            $field => (string) $request->input($field),
+            // The identifier cast is load-bearing — a null there becomes `WHERE … IS NULL`, which
+            // matches an account with no identifier set. A null password only reaches the hasher,
+            // where it fails like any wrong one; the cast keeps it out of a PHP that may refuse it.
+            'password' => (string) $request->input('password'), // @pest-mutate-ignore: RemoveStringCast
+        ];
+    }
+
+    /** The identifier field (config `lukk.username`) — the request field + the error key. */
     private function field(): string
     {
         return Lukk::usernameField();
-    }
-
-    private function timingHash(): string
-    {
-        static $hash;
-
-        return $hash ??= Hash::make('lukk-timing-equalizer');
     }
 
     private function lockoutGuard(): string

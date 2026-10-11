@@ -11,6 +11,7 @@ use InvalidArgumentException;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Support\NewPasskey;
+use Lukk\Support\PasskeyAssertion;
 use Lukk\Support\PasskeyRecord;
 use Symfony\Component\Serializer\SerializerInterface;
 use Throwable;
@@ -22,6 +23,7 @@ use Webauthn\AuthenticatorAttestationResponse;
 use Webauthn\AuthenticatorAttestationResponseValidator;
 use Webauthn\AuthenticatorSelectionCriteria;
 use Webauthn\CeremonyStep\CeremonyStepManagerFactory;
+use Webauthn\CredentialRecord;
 use Webauthn\Denormalizer\WebauthnSerializerFactory;
 use Webauthn\PublicKeyCredential;
 use Webauthn\PublicKeyCredentialCreationOptions;
@@ -81,7 +83,7 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             rp: PublicKeyCredentialRpEntity::create($this->config['rp_name'], $this->config['rp_id']),
             user: PublicKeyCredentialUserEntity::create($userName, (string) $userId, $userName),
             challenge: $this->decode($challenge),
-            pubKeyCredParams: [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)],
+            pubKeyCredParams: $this->pubKeyCredParams(),
             // Login is usernameless (empty allowCredentials → discoverable), so the credential
             // MUST be created as a resident/discoverable key — otherwise a real authenticator
             // stores a non-discoverable credential that passwordless login can never find. UV is
@@ -92,9 +94,32 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 residentKey: AuthenticatorSelectionCriteria::RESIDENT_KEY_REQUIREMENT_REQUIRED,
             ),
             excludeCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $excludeCredentialIds),
+            timeout: $this->timeout(),
         );
 
         return $this->toArray($options);
+    }
+
+    /**
+     * How long the browser may prompt, in milliseconds: the challenge's own lifetime, when configured.
+     *
+     * @return positive-int|null
+     */
+    private function timeout(): ?int
+    {
+        $timeout = $this->config['timeout'] ?? null;
+
+        return is_int($timeout) && $timeout > 0 ? $timeout : null;
+    }
+
+    /**
+     * The COSE algorithms lukk advertises AND accepts — the same pair the algorithm manager is pinned to.
+     *
+     * @return list<PublicKeyCredentialParameters>
+     */
+    private function pubKeyCredParams(): array
+    {
+        return [PublicKeyCredentialParameters::createPk(ES256::ID), PublicKeyCredentialParameters::createPk(RS256::ID)];
     }
 
     public function verifyRegistration(int|string $userId, array $response, string $challenge): NewPasskey
@@ -118,6 +143,10 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 // and user-verification requirement.
                 user: PublicKeyCredentialUserEntity::create('', (string) $userId, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
                 challenge: $this->decode($challenge),
+                // WebAuthn L3 §7.1 step 22 checks the key's alg against THESE params. Left empty, the
+                // library substitutes its own default — equal to ours today, so no test can tell, but
+                // a library change would widen what registration accepts without a line changing here.
+                pubKeyCredParams: $this->pubKeyCredParams(),
                 authenticatorSelection: AuthenticatorSelectionCriteria::create(
                     // A string from env either way; the cast only states it.
                     userVerification: (string) ($this->config['user_verification'] ?? 'required'), // @pest-mutate-ignore: RemoveStringCast
@@ -142,22 +171,43 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
         );
     }
 
-    public function authenticationOptions(string $challenge, array $allowCredentialIds): array
+    public function authenticationOptions(string $challenge, array $allowCredentialIds, ?string $userVerification = null): array
     {
         $options = PublicKeyCredentialRequestOptions::create(
             challenge: $this->decode($challenge),
             rpId: $this->config['rp_id'],
             allowCredentials: array_map(fn (string $id) => PublicKeyCredentialDescriptor::create('public-key', $this->decode($id)), $allowCredentialIds),
-            userVerification: $this->config['user_verification'] ?? 'required',
+            userVerification: $this->userVerification($userVerification),
+            timeout: $this->timeout(),
         );
 
         return $this->toArray($options);
     }
 
-    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored): int
+    public function isMultiFactor(PasskeyRecord $stored): bool
+    {
+        try {
+            return $this->source($stored)->uvInitialized === true;
+        } catch (Throwable) {
+            // Unreadable is not "multi-factor": the conservative answer for a question whose TRUE
+            // lets a step-up demand more, and whose FALSE never lets anyone skip a factor.
+            return false;
+        }
+    }
+
+    public function verifyAssertion(array $response, string $challenge, PasskeyRecord $stored, ?string $userVerification = null, int|string|null $owner = null): PasskeyAssertion
     {
         // Decode the stored credential outside the try — a corrupt record is infra failure, not verification failure.
-        $source = $this->serializer->deserialize($stored->publicKey, PublicKeyCredentialSource::class, 'json');
+        $source = $this->source($stored);
+
+        // Read BEFORE `check()`: the library sets `uvInitialized` from this assertion's UV flag in
+        // memory (WebAuthn L3 §7.2, "update credentialRecord with new state values"), and the spec
+        // forbids relying on the flag in the very ceremony that would flip it — "including an
+        // authentication ceremony where it would be updated to TRUE". lukk persists only the sign
+        // count, so that update is skipped, which the same step allows: it "SHOULD require
+        // authorization by an additional authentication factor equivalent to WebAuthn user
+        // verification; if not authorized, skip this step." A TOTP is possession, not equivalent.
+        $wasUvInitialized = $source->uvInitialized === true;
 
         try {
             $authenticatorResponse = $this->credentialResponse($response);
@@ -169,11 +219,13 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             $options = PublicKeyCredentialRequestOptions::create(
                 challenge: $this->decode($challenge),
                 rpId: $this->config['rp_id'],
-                userVerification: $this->config['user_verification'] ?? 'required',
+                userVerification: $this->userVerification($userVerification),
             );
 
             // Usernameless: the user is resolved from our credential_id→userId mapping, so pass null here.
-            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], null); // @pest-mutate-ignore: RemoveStringCast
+            // The owner a step-up already identified (WebAuthn L3 §7.2 step 6), or null at sign-in, where the
+            // response must carry the user handle.
+            $record = $this->assertion->check($source, $authenticatorResponse, $options, (string) $this->config['rp_id'], $owner === null ? null : (string) $owner); // @pest-mutate-ignore: RemoveStringCast
         } catch (PasskeyVerificationFailed $e) {
             throw $e;
         } catch (Throwable $e) {
@@ -181,7 +233,29 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             throw new PasskeyVerificationFailed('The passkey assertion could not be verified.', previous: $e);
         }
 
-        return $record->counter;
+        $userVerified = $authenticatorResponse->authenticatorData->isUserVerified();
+
+        return new PasskeyAssertion(
+            signCount: $record->counter,
+            userVerified: $userVerified,
+            multiFactor: $userVerified && $wasUvInitialized,
+        );
+    }
+
+    /**
+     * The stored credential, deserialized. Typed as `CredentialRecord` — the parent — because that is
+     * what the library's serializer actually returns for this payload; `uvInitialized` and the
+     * backup flags live there.
+     */
+    private function source(PasskeyRecord $stored): CredentialRecord
+    {
+        return $this->serializer->deserialize($stored->publicKey, PublicKeyCredentialSource::class, 'json');
+    }
+
+    /** The requirement for one ceremony: the caller's, or the configured one. */
+    private function userVerification(?string $requested): string
+    {
+        return $requested ?? ($this->config['user_verification'] ?? 'required');
     }
 
     /** @param  array<string, mixed>  $response */

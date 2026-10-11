@@ -6,6 +6,7 @@ namespace Lukk\TwoFactor;
 
 use Illuminate\Contracts\Cache\Repository;
 use Lukk\Contracts\TwoFactorProvider;
+use PragmaRX\Google2FA\Exceptions\Contracts\Google2FA as Google2FAException;
 use PragmaRX\Google2FA\Google2FA;
 
 /**
@@ -30,14 +31,24 @@ class Google2FaTotpProvider implements TwoFactorProvider
         return $this->engine->generateSecretKey(32); // 32 base32 chars = 160-bit seed
     }
 
-    public function otpauthUri(string $holder, string $secret): string
+    public function otpauthUri(string $holder, #[\SensitiveParameter] string $secret): string
     {
         return $this->engine->getQRCodeUrl($this->config['issuer'], $holder, $secret);
     }
 
-    public function verify(string $secret, string $code): bool
+    public function verify(#[\SensitiveParameter] string $secret, #[\SensitiveParameter] string $code): bool
     {
-        if (! $this->engine->verifyKey($secret, $code, $this->config['window'])) {
+        try {
+            $matches = $this->engine->verifyKey($secret, $code, $this->config['window']);
+        } catch (Google2FAException $e) {
+            // Only a STORED secret can be unreadable (a restored backup, a hand-edited row): no code
+            // matches it, and a 500 on every sign-in helps nobody. The operator still hears about it.
+            report($e);
+
+            return false;
+        }
+
+        if (! $matches) {
             return false;
         }
 

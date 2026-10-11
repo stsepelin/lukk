@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\DeleteAccount;
 use Lukk\Actions\ExportAccount;
+use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Events\AccountDeleted;
@@ -20,6 +21,8 @@ use Lukk\Http\Middleware\RequirePinnedAbility;
 use Lukk\Lukk;
 use Lukk\Models\Lockout;
 use Lukk\Models\RefreshToken;
+use Lukk\Support\NewPasskey;
+use Lukk\Tests\Fixtures\InMemoryPasskeyRepository;
 use Lukk\Tests\Fixtures\RecordingLockoutRepository;
 use Lukk\Tests\Fixtures\User;
 
@@ -447,7 +450,8 @@ it('clears the idn: lockout counter, the one that outlives the user row', functi
 
     // Fail a login for an address with NO account: that is what produces `idn:<normalized>`.
     $this->postJson('/auth/login', ['email' => 'later-me@example.test', 'password' => 'wrong']);
-    expect(Lockout::pluck('subject')->all())->toContain('idn:later-me@example.test');
+    $subject = LoginRateLimiter::lockoutSubject(null, 'later-me@example.test');
+    expect(Lockout::pluck('subject')->all())->toContain($subject);
 
     // ...then that address registers. The counter is still keyed by identifier, not by the new id.
     $user = User::factory()->create(['email' => 'later-me@example.test']);
@@ -455,8 +459,20 @@ it('clears the idn: lockout counter, the one that outlives the user row', functi
 
     deleteAccount()($user);
 
-    expect(Lockout::where('subject', 'idn:later-me@example.test')->count())->toBe(0)
+    expect(Lockout::where('subject', $subject)->count())->toBe(0)
         ->and(Lockout::count())->toBe(0);
+});
+
+it('erases a non-account counter stored in plain text by an older release', function () {
+    // Those rows are exactly the readable copies of the address that erasure exists to remove, and
+    // with `release_after` at 0 nothing else ever deletes them.
+    config(['lukk.features.lockout' => true]);
+    app(LockoutRepository::class)->recordFailure('login', 'idn:later-me@example.test', 'api');
+    $user = User::factory()->create(['email' => 'later-me@example.test']);
+
+    deleteAccount()($user);
+
+    expect(Lockout::count())->toBe(0);
 });
 
 it('erases without a passkeys table, which most installs do not have', function () {
@@ -539,8 +555,32 @@ it('erases the lockout counters in all three key spaces, keyed as strings', func
     Lukk::deleteUserUsing(fn () => null);
 
     app(DeleteAccount::class)(new GenericUser(['id' => 5, 'phone' => 5551234]));
-    expect($spy->forgotten)->toBe(['id:5', '5', 'idn:5551234']);
+    expect($spy->forgotten)->toBe(['id:5', '5', 'idn:sha256:'.hash('sha256', '5551234'), 'idn:5551234']);
 
     app(DeleteAccount::class)(new GenericUser(['id' => 5]));
-    expect($spy->forgotten)->toBe(['id:5', '5', '']);
+    expect($spy->forgotten)->toBe(['id:5', '5', '', '']);
+});
+
+it('erases the passkeys of a store that is not the passkeys table', function () {
+    // A rebound PasskeyRepository has no `passkeys` table; gating on that table left its rows — personal
+    // data, each one linkable to the person — behind an erasure that reported success.
+    Schema::drop('passkeys');
+    $store = new InMemoryPasskeyRepository;
+    app()->instance(PasskeyRepository::class, $store);
+    $user = User::factory()->create();
+    $store->store($user->id, new NewPasskey('elsewhere', 'PUB', 0));
+
+    deleteAccount()($user);
+
+    expect($store->rows)->toBe([]);
+});
+
+it('erases the counters of a lockout store that is not the lockout table', function () {
+    Schema::drop('lukk_lockouts');
+    $spy = new RecordingLockoutRepository;
+    app()->instance(LockoutRepository::class, $spy);
+
+    deleteAccount()(User::factory()->create());
+
+    expect($spy->forgotten)->not->toBe([]);
 });

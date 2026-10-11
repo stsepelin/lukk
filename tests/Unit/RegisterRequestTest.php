@@ -30,6 +30,10 @@ it('applies each default rule on its own', function (string $field, array $overr
     'name required' => ['name', ['name' => null], 'Required'],
     'name a string' => ['name', ['name' => ['x']], 'String'],
     'name bounded' => ['name', ['name' => str_repeat('a', 256)], 'Max'],
+    // pdo_pgsql ends a bound string at NUL: the row would hold a different name than was validated.
+    'name without a NUL byte' => ['name', ['name' => "New\0Admin"], 'NotRegex'],
+    // Whatever sign-in refuses, registration must refuse first, or the account could never sign in.
+    'email without an invisible character' => ['email', ['email' => "new\u{200B}@user.com"], 'NotRegex'],
     'email required' => ['email', ['email' => null], 'Required'],
     'email a string' => ['email', ['email' => ['x']], 'String'],
     'email bounded' => ['email', ['email' => str_repeat('a', 250).'@x.com'], 'Max'],
@@ -38,7 +42,7 @@ it('applies each default rule on its own', function (string $field, array $overr
     'password required' => ['password', ['password' => null], 'Required'],
     'password confirmed' => ['password', ['password_confirmation' => 'other-password-123'], 'Confirmed'],
     'password bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
-    'password without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
+    // The NUL-byte and type checks live in `after()`, for every rule set; BcryptLengthTest pins them.
     'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
 ]);
 
@@ -53,6 +57,7 @@ it('applies each rule to a username identifier too', function (array $overrides,
     'a string' => [['username' => ['x']], 'String'],
     'bounded' => [['username' => str_repeat('a', 256)], 'Max'],
     'unique' => [['username' => 'taken'], 'Unique'],
+    'without an invisible character' => [['username' => "new\0user"], 'NotRegex'],
 ]);
 
 it('keys the identifier on email when lukk.username is null', function () {

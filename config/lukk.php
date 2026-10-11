@@ -162,6 +162,33 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Sign-in Timebox
+    |--------------------------------------------------------------------------
+    |
+    | How long a FAILED sign-in takes, in microseconds, regardless of why it
+    | failed. Equal hashing work is not equal TIME: an unknown identifier hashes
+    | at the configured cost, while checking a real account runs at the cost
+    | embedded in that row's stored hash. A row left at cost 8 by a
+    | `BCRYPT_ROUNDS` bump answers ~8x faster, and an unreadable hash (the `!`
+    | or `*` placeholder an import leaves) answers instantly — so a stopwatch
+    | tells an attacker which addresses have accounts, in one request each.
+    |
+    | lukk equalizes the WORK first: a failed check against a weaker or
+    | unreadable stored hash also derives once at the configured cost, and a
+    | successful sign-in rehashes a weaker row (`hashing.rehash_on_login`). The
+    | box hides what is left. Set it above one derivation at your configured
+    | cost PLUS one at the oldest cost still stored — measure it on your own
+    | hardware (`php -r 'password_hash("x", PASSWORD_BCRYPT, ["cost"=>12]);'`).
+    | Too low is ineffective, not harmful: a Timebox pads a fast path and never
+    | shortens a slow one. A SUCCESSFUL sign-in leaves the box at once — its
+    | status code already says it succeeded. Zero switches it off.
+    |
+    */
+
+    'login_timebox_micros' => (int) env('LUKK_LOGIN_TIMEBOX_MICROS', 500_000),
+
+    /*
+    |--------------------------------------------------------------------------
     | Rate Limits
     |--------------------------------------------------------------------------
     |
@@ -190,7 +217,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | Only used when features.lockout is on. "max_attempts" is the consecutive
-    | failure cap — NIST SP 800-63B §5.2.2 says no more than 100, so treat that
+    | failure cap — NIST SP 800-63B-4 §3.2.2 says no more than 100, so treat that
     | as a ceiling, not a target. The counter is cleared by any successful
     | authentication, never by time.
     |
@@ -199,7 +226,7 @@ return [
     | code clears it.
     |
     | The two settings pull against each other, so choose deliberately. 0 is the
-    | strict §5.2.2 reading — a run broken only by a SUCCESS — but it means an
+    | strict §3.2.2 reading — a run broken only by a SUCCESS — but it means an
     | attacker who locks an account has denied it until someone intervenes.
     | Setting it trades that for a decaying cap: 100 / 3600 is no longer "100
     | consecutive, ever", it is 100 per hour, which is exactly OWASP ASVS V2.2.1
@@ -223,14 +250,29 @@ return [
         | Login
         |--------------------------------------------------------------------------
         |
-        | The failures-only limiter: only failed attempts count, a success clears
-        | the counter. "max_attempts" is keyed on the normalized email + IP (the
-        | tight per-origin limit); "account_max_attempts" is keyed on the email
+        | The failures-only limiter: only failed attempts count; a success clears
+        | the per-IP counter (the account counter only decays, see below). "max_attempts" is keyed on the identifier + IP (the tight
+        | per-origin limit); "account_max_attempts" is keyed on the identifier
         | alone — an IP-independent cap so a distributed attacker can't get
         | "max_attempts" guesses per IP against one account (keep it above
         | max_attempts for legit multi-device users). "ip_max_attempts" is a
         | separate coarse per-IP cap on ALL login requests, so password spraying
         | (varying the email) can't slip past the per-account limit.
+        |
+        | Both buckets key on the case- and script-folded identifier, so 429
+        | answers the same whether or not an account exists. A success clears
+        | only the per-IP bucket; the account bucket decays, so a look-alike
+        | account sharing the fold cannot sign in to reset this one's count.
+        | The fold also drops what a database's equality may ignore (control,
+        | format and combining characters, outer Unicode whitespace), and sign-in
+        | refuses an identifier carrying a control or format character or any
+        | whitespace but the ASCII space — so no respelling is a fresh bucket.
+        |
+        | The account bucket needs an identifier under `lukk.username`. With
+        | `Lukk::authenticateUsing()` reading another field there is none, and the
+        | account bucket is skipped (one bucket shared by every caller would let
+        | anyone throttle every sign-in) — only the per-IP limits apply. Point
+        | `lukk.username` at your field to get the account cap back.
         |
         */
 
@@ -298,7 +340,9 @@ return [
         | Passkeys
         |--------------------------------------------------------------------------
         |
-        | A per-IP guard on the passkey login/registration endpoints.
+        | A per-IP guard on the passkey sign-in endpoints — `passkeys/login-options`,
+        | `passkeys/login` — and on `confirm-passkey/options`. Not registration:
+        | that sits behind step-up confirmation and its own limiter.
         |
         */
 
@@ -441,6 +485,21 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Multi-factor Session Age
+        |--------------------------------------------------------------------------
+        |
+        | On an account with a second factor, a password-only step-up is accepted
+        | only inside a session signed in with both factors — and only for this
+        | many seconds after that sign-in (NIST SP 800-63B-4 §2.2.3: an AAL2
+        | session's overall limit SHOULD be about 24 hours). After it, confirm
+        | with a user-verifying passkey or sign in again with the second factor.
+        |
+        */
+
+        'mfa_max_age' => (int) env('LUKK_CONFIRM_MFA_MAX_AGE', 86400),
+
+        /*
+        |--------------------------------------------------------------------------
         | Confirmation Header
         |--------------------------------------------------------------------------
         |
@@ -507,23 +566,33 @@ return [
         | Challenge Lifetime
         |--------------------------------------------------------------------------
         |
-        | How long, in seconds, a WebAuthn challenge stays valid while the user
-        | completes the registration or login ceremony.
+        | How long, in seconds, the browser may prompt for a registration or
+        | login ceremony (sent as the WebAuthn `timeout`). Five minutes is the
+        | WebAuthn L3 recommendation for a ceremony that verifies the user. The
+        | server keeps the challenge 30 seconds longer, for the answer still in
+        | transit when the prompt closes. With `user_verification` "discouraged"
+        | everywhere, WebAuthn suggests 120 instead: a tap needs less time.
         |
         */
 
-        'challenge_ttl' => (int) env('LUKK_PASSKEY_CHALLENGE_TTL', 120),
+        'challenge_ttl' => (int) env('LUKK_PASSKEY_CHALLENGE_TTL', 300),
 
         /*
         |--------------------------------------------------------------------------
         | User Verification
         |--------------------------------------------------------------------------
         |
-        | Whether the authenticator must verify the user (biometric / PIN) rather
-        | than just their presence (a tap). Default "required" — passkey login and
-        | step-up are single-factor (possession), so enforcing user verification
-        | makes them phishing-resistant, AAL2-style. Lower to "preferred" only if
-        | you must support authenticators that can't verify the user.
+        | What sign-in and registration ASK the authenticator for: verifying the
+        | user (biometric / PIN) rather than just their presence (a tap). Default
+        | "required". Lower to "preferred" only if you must support
+        | authenticators that can't verify the user.
+        |
+        | It does not decide whether a passkey counts as multi-factor. That is
+        | read from each assertion: the UV flag on a credential that had already
+        | shown user verification before (WebAuthn L3 §4, uvInitialized). A
+        | single-factor assertion on an account with confirmed two-factor still
+        | gets the TOTP challenge, and a step-up asks for "required" whenever the
+        | account can reach AAL2, whatever this says.
         | One of: "required", "preferred", "discouraged".
         |
         */
@@ -605,8 +674,11 @@ return [
     | Routes
     |--------------------------------------------------------------------------
     |
-    | Whether to register the package's auth routes (login / refresh / logout /
-    | logout-all), the URI prefix they mount under, and an optional host. Leave
+    | Whether to register the package's auth routes — login, refresh, logout,
+    | logout-all and logout-others, session claim, step-up confirmation, JWKS,
+    | and each enabled feature's own (registration, password change and reset,
+    | email verification, two-factor, passkeys, account export and deletion) —
+    | the URI prefix they mount under, and an optional host. Leave
     | "domain" null to serve on any host, or set it (e.g. "api.example.com") to
     | bind the routes to a subdomain — the stronger isolation for multi-guard.
     |
@@ -747,6 +819,44 @@ return [
 
         /*
         |--------------------------------------------------------------------------
+        | Revoke Passkeys on Reset
+        |--------------------------------------------------------------------------
+        |
+        | When true, a successful reset also removes every passkey on the
+        | account, dispatching `PasskeyDeleted` for each. Off by default: a reset
+        | proves control of the mailbox, and lukk keeps the second factor across
+        | it too. Turn it on if a reset should mean "start over", so a passkey an
+        | attacker enrolled while holding the password does not survive it.
+        | Only useful with `revoke_sessions` on: a session that outlives the
+        | reset can step up and enroll a new passkey at once.
+        |
+        */
+
+        'revoke_passkeys' => (bool) env('LUKK_RESET_REVOKE_PASSKEYS', false),
+
+        /*
+        |--------------------------------------------------------------------------
+        | Forgot- and reset-password Timebox
+        |--------------------------------------------------------------------------
+        |
+        | How long every `forgot-password` request, and every FAILED
+        | `reset-password` request, takes, in microseconds, whether or not the
+        | address has an account. A forgot hit hashes the reset token and
+        | dispatches the notification; a reset against a known address with a
+        | pending token checks the presented token's hash. A miss does neither,
+        | so without this the response time says which addresses exist. Set it
+        | ABOVE the broker's own box (`auth.timebox_duration`, 200 ms by default)
+        | plus one bcrypt derivation at your cost plus the notification dispatch.
+        | Queue the notification: a synchronous SMTP transport can overrun any
+        | budget, and a Timebox only pads — it never shortens. A successful reset
+        | is not held. Zero switches it off.
+        |
+        */
+
+        'timebox_micros' => (int) env('LUKK_RESET_TIMEBOX_MICROS', 1_000_000),
+
+        /*
+        |--------------------------------------------------------------------------
         | Broker
         |--------------------------------------------------------------------------
         |
@@ -860,12 +970,17 @@ return [
         | Gate lukk's own session-management routes
         |--------------------------------------------------------------------------
         |
-        | `DELETE /auth/sessions` and `/auth/sessions/others` revoke OTHER sessions,
-        | so a token pinned to a narrow grant should not reach them — otherwise the
-        | most restricted token you can issue can still log the account out
-        | everywhere. Derived grants are never gated at all, so a
-        | human's session is unaffected and only a pinned grant has to ask for it.
-        | Pinned-ness is carried by the `pin` claim, stamped only on those tokens.
+        | A token pinned to a narrow grant should not reach the routes that manage
+        | the account — otherwise the most restricted token you can issue can still
+        | log the account out everywhere, or step up and take it over. Gated:
+        |   - `lukk.sessions`: `DELETE /auth/sessions`, `DELETE /auth/sessions/others`;
+        |   - `lukk.account`: `POST /auth/confirm-password`, `POST /auth/confirm-passkey`
+        |     and `/confirm-passkey/options`, `POST /auth/password`,
+        |     `GET /auth/passkeys`, `GET /auth/two-factor/recovery-codes`.
+        | Account export and deletion are gated whatever this says. Derived grants
+        | are never gated at all, so a human's session is unaffected and only a
+        | pinned grant has to ask. Pinned-ness is carried by the `pin` claim,
+        | stamped only on those tokens.
         |
         */
 
@@ -888,7 +1003,7 @@ return [
         | Account Lockout
         |--------------------------------------------------------------------------
         |
-        | NIST SP 800-63B §5.2.2 requires a verifier to limit CONSECUTIVE failed
+        | NIST SP 800-63B-4 §3.2.2 requires a verifier to limit CONSECUTIVE failed
         | authentication attempts on one account to no more than 100. The throttles
         | above are decaying windows — they bound a rate, not a run — so satisfying
         | the clause needs a persistent counter. Requires the published lockout
@@ -902,11 +1017,13 @@ return [
         | RETENTION: a counter row is created for every failed identifier, existing or
         | not — including addresses that name no account, which is deliberate (a
         | lock that only existed for real accounts would answer "does this account
-        | exist?"). The table therefore accumulates plaintext identifiers an attacker
-        | probed, third parties' addresses among them. "lukk:prune" drops spent rows
-        | (--lockout-days, default 30); if that retention doesn't suit your privacy
-        | posture, shorten it or swap LockoutRepository for one that stores an HMAC
-        | of the subject.
+        | exist?"). Subjects are not stored as plaintext addresses: an account is
+        | keyed by its id, anything else by a SHA-256 digest of the folded
+        | identifier — but a digest of a guessable address is still linkable to it,
+        | so the table accumulates pseudonymous records of identifiers an attacker
+        | probed, third parties' among them. "lukk:prune" drops spent rows (--lockout-days, default 30); if
+        | that retention doesn't suit your privacy posture, shorten it, or swap
+        | LockoutRepository for one that keys on an HMAC under a secret.
         |
         | The counter keys on the "username" field above. If you use
         | Lukk::authenticateUsing() to authenticate on a DIFFERENT field, set

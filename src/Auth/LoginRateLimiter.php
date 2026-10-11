@@ -19,7 +19,7 @@ use Lukk\Lukk;
  *     isn't locked, but a botnet is still bounded.
  * The identifier (email/username, per `lukk.username`) is trimmed, lowercased, and transliterated
  * so trailing whitespace or Unicode look-alikes can't mint a fresh bucket. Only failed attempts
- * increment; a success clears both.
+ * increment; a success clears the per-IP bucket, and the IP-independent one only decays.
  */
 class LoginRateLimiter
 {
@@ -32,43 +32,106 @@ class LoginRateLimiter
         private readonly string $guard = 'api',
     ) {}
 
+    /*
+     * Both buckets key on the identifier FOLD (case, script), which every spelling shares whether or not
+     * an account exists. Nothing is keyed on the account: a bucket only real accounts had was visible
+     * through its timer, since a spelling the database does not resolve counts in the fold alone and the
+     * two drift apart — Retry-After, and after one expired the status itself, told them apart.
+     *
+     * A success clears only the caller's per-address bucket. The IP-independent one decays and nothing
+     * else: clearing it is what let a look-alike account's owner, who shares the fold, sign in to reset
+     * the victim's count between bursts. A real user loses nothing short of `account_max_attempts`
+     * failures inside one window. The price is the fold's: a victim's failures can briefly throttle a
+     * look-alike account too.
+     */
+
+    /*
+     * A BLANK identifier keys no account bucket at all. It is blank on every attempt when
+     * `Lukk::authenticateUsing` reads a field other than `lukk.username`, and `acct|<guard>|sha256('')`
+     * was then ONE bucket for the whole application: `account_max_attempts` wrong guesses from anywhere
+     * answered every sign-in 429 — a denial of service for anyone who cared to send them. Such an app keeps
+     * the per-address bucket, and gets the account cap back by pointing `lukk.username` at its field.
+     */
+
     public function tooManyAttempts(Request $request): bool
     {
         return $this->limiter->tooManyAttempts($this->key($request), $this->maxAttempts)
-            || $this->limiter->tooManyAttempts($this->accountKey($request), $this->accountMaxAttempts);
+            || ($this->keysAnAccount($request) && $this->limiter->tooManyAttempts($this->accountKey($request), $this->accountMaxAttempts));
     }
 
     public function increment(Request $request): void
     {
         $this->limiter->hit($this->key($request), $this->decaySeconds);
-        $this->limiter->hit($this->accountKey($request), $this->decaySeconds);
+
+        if ($this->keysAnAccount($request)) {
+            $this->limiter->hit($this->accountKey($request), $this->decaySeconds);
+        }
     }
 
     public function clear(Request $request): void
     {
         $this->limiter->clear($this->key($request));
-        $this->limiter->clear($this->accountKey($request));
     }
 
     public function availableIn(Request $request): int
     {
-        // Whichever bucket is blocking has the longer remaining window.
+        // Whichever bucket is blocking has the longer remaining window. With no account bucket, 0 adds
+        // nothing: the per-address wait is never negative, so any value up to 0 reads the same.
         return max(
             $this->limiter->availableIn($this->key($request)),
-            $this->limiter->availableIn($this->accountKey($request)),
+            $this->keysAnAccount($request) ? $this->limiter->availableIn($this->accountKey($request)) : 0, // @pest-mutate-ignore: DecrementInteger
         );
     }
 
     public function key(Request $request): string
     {
-        return $this->guard.'|'.$this->identifier($request).'|'.Lukk::rateLimitKey($request);
+        // Without an identifier the bucket is the caller's address alone, rather than an address paired
+        // with the digest of nothing.
+        return $this->keysAnAccount($request)
+            ? $this->guard.'|'.$this->identifierKey($request).'|'.Lukk::rateLimitKey($request)
+            : $this->guard.'|'.Lukk::rateLimitKey($request);
+    }
+
+    private function keysAnAccount(Request $request): bool
+    {
+        return $this->identifier($request) !== '';
     }
 
     /** IP-independent per-account bucket (distributed brute-force cap). Guard-scoped, so a flood
      *  on one guard's login can't lock a colliding account out of another guard. */
     public function accountKey(Request $request): string
     {
-        return 'acct|'.$this->guard.'|'.$this->identifier($request);
+        return 'acct|'.$this->guard.'|'.$this->identifierKey($request);
+    }
+
+    /**
+     * The identifier's contribution to a cache key: HASHED, never the identifier itself.
+     *
+     * These keys reach `Illuminate\Cache\RateLimiter` directly, so they never get the md5 that
+     * `ThrottleRequests` applies — only `cleanRateLimiterKey`, which is `htmlentities()` plus an
+     * entity-shortening regex, i.e. a MANY-TO-ONE fold. `a&b@x.com` and `aab@x.com` are both valid
+     * addresses and both land on the key `aab@x.com`, so they shared a bucket. Since a successful
+     * login calls `clear()`, and `clear()` cleans the key the same way, whoever registered the
+     * look-alike could reset the victim's per-account counter on demand — and that counter is the
+     * IP-INDEPENDENT one, the backstop that exists so a distributed attacker can't get
+     * `max_attempts` guesses per IP against one account. That left only the per-IP cap it backstops.
+     *
+     * Hashing also puts the `|` delimiter out of reach of an identifier field that carries no
+     * charset rule, so a submitted identifier can no longer shape the key's structure.
+     *
+     * **Hashing does not make these buckets per-account.** `normalize()` is many-to-one by design —
+     * `Str::transliterate` folds Cyrillic `а` onto `a` and `Str::lower` folds case, neither of which a
+     * binary-collation unique index folds — so `аdmin@x.com` and `admin@x.com` share a bucket. The fold
+     * is deliberate: without it an attacker spreads guesses across spellings and evades the bucket, and
+     * keying on the resolved account instead makes the throttle's timing an existence oracle (see the
+     * note above `tooManyAttempts()`). A success therefore never clears the shared IP-independent one.
+     *
+     * Equality-compared only, so nothing else about the limiter changes. Existing buckets are
+     * orphaned on deploy, which costs at most one decay window of counting.
+     */
+    private function identifierKey(Request $request): string
+    {
+        return hash('sha256', $this->identifier($request));
     }
 
     /** The guard this limiter is scoped to, so a lock on one guard can't reach another. */
@@ -91,7 +154,7 @@ class LoginRateLimiter
      * index compares binary) both fold onto `admin@x.com` — so two real accounts shared one lock
      * row. Since a password reset releases on that subject, whoever controlled a look-alike account
      * could lock the victim, reset their own password, clear the victim's lock, and repeat: the
-     * §5.2.2 cap degraded back to the decaying throttle it exists to replace.
+     * §3.2.2 cap degraded back to the decaying throttle it exists to replace.
      *
      * The fallback keeps the two properties that made normalization right in the first place: an
      * identifier naming no account still gets a counter, so being locked is not an existence
@@ -110,7 +173,77 @@ class LoginRateLimiter
         // the non-empty `idn:`, slipping past the repository's empty-subject refusal and putting
         // every unkeyable caller into ONE never-decaying bucket — locking the whole application at
         // attempt 100. That refusal is the guard; don't hand it a truthy value.
+        //
+        // A DIGEST, never the identifier. What was typed is often someone's real address, or a
+        // stranger's; a held lock is never pruned, and no account exists through which its owner
+        // could have it erased. The counter only compares for equality, so nothing is lost.
+        return $normalized === '' ? '' : 'idn:sha256:'.hash('sha256', $normalized);
+    }
+
+    /**
+     * Every login counter an account's own success, reset or password change releases: its account
+     * counter, and the fold of its own identifier (`lukk.username`). The cast matters: a numeric
+     * identifier column (a phone number) arrives as an int.
+     *
+     * @return list<string>
+     */
+    public static function subjectsOf(Authenticatable $user): array
+    {
+        // Property access reaches an Eloquent attribute and a GenericUser's alike.
+        $identifier = $user->{Lukk::usernameField()} ?? null;
+
+        return self::lockoutSubjects($user, is_scalar($identifier) ? (string) $identifier : '');
+    }
+
+    /**
+     * Every persistent-lockout counter a login attempt touches: the identifier FOLD always, and the
+     * account too when the identifier resolves to one. Either being locked refuses the attempt.
+     *
+     * The fold alone would let a look-alike account's owner reset the victim's lock with their own
+     * success or password reset. The account alone was an existence oracle: failures on a spelling the
+     * database never resolves (a Cyrillic look-alike, another case on a binary collation) locked the fold
+     * of a non-account, which its canonical spelling then also checked, and nothing a real account's
+     * canonical spelling checked — 423 versus 422. Counting both, a non-resolving spelling locks the same
+     * fold in either case, and only the account's own success or reset releases its account counter.
+     *
+     * @return list<string>
+     */
+    public static function lockoutSubjects(?Authenticatable $user, string $identifier): array
+    {
+        return array_values(array_filter(array_unique([self::lockoutSubject(null, $identifier), self::lockoutSubject($user, $identifier)]), fn (string $s) => $s !== ''));
+    }
+
+    /**
+     * The plain-text subject releases before 0.7 wrote for an identifier naming no account. Read
+     * only to release, erase and export those rows; nothing writes this form any more.
+     */
+    public static function legacyLockoutSubject(string $identifier): string
+    {
+        $normalized = self::normalize($identifier);
+
         return $normalized === '' ? '' : 'idn:'.$normalized;
+    }
+
+    /**
+     * The identifier without what a database's equality may skip, so the fold is never FINER than it.
+     *
+     * A fold finer than the lookup is a fresh bucket per spelling. MySQL's `utf8mb4_unicode_ci` gives
+     * control, format and combining code points no primary weight (U+200B, U+034F, U+FE0F, an accent typed
+     * as a separate mark) and pads trailing whitespace, while `Str::transliterate` turned U+200B and U+3000
+     * into spaces and U+034F into `?`. Stripped and trimmed here — Unicode whitespace, not just ASCII — the
+     * spellings MySQL resolves to one account key together. Coarser than PostgreSQL's equality, which is the
+     * safe direction: look-alikes share a bucket, as the case fold already makes them. `LoginRequest`
+     * refuses most of this set outright (`Identifier`); NUL, which pdo_pgsql truncates at, needs that refusal.
+     *
+     * Invalid UTF-8 makes both passes answer null; it is then folded as before rather than to nothing.
+     */
+    private static function visible(string $identifier): string
+    {
+        $stripped = preg_replace('/[\p{Cc}\p{Cf}\p{Mn}\p{Me}]+/u', '', $identifier);
+
+        // The second pass runs on what the first returned, which is valid UTF-8, so it cannot fail; the cast
+        // states the type.
+        return $stripped === null ? trim($identifier) : (string) preg_replace('/^[\s\p{Z}]+|[\s\p{Z}]+$/u', '', $stripped); // @pest-mutate-ignore: RemoveStringCast
     }
 
     /**
@@ -126,7 +259,7 @@ class LoginRateLimiter
      */
     public static function normalize(string $identifier): string
     {
-        $normalized = Str::transliterate(Str::lower(trim($identifier)));
+        $normalized = Str::transliterate(Str::lower(self::visible($identifier)));
 
         return strlen($normalized) > 190 ? 'sha256:'.hash('sha256', $normalized) : $normalized;
     }

@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Exceptions;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\TwoFactor\Google2FaTotpProvider;
+use PragmaRX\Google2FA\Exceptions\InvalidCharactersException;
+use PragmaRX\Google2FA\Exceptions\SecretKeyTooShortException;
 use PragmaRX\Google2FA\Google2FA;
 
 uses()->group('two-factor');
@@ -74,4 +77,19 @@ it('holds the replay marker for the code\'s whole validity band, and no longer',
 
     $this->travel(2)->seconds();
     expect($cache->has($key))->toBeFalse();
+});
+
+it('rejects, and reports, a stored secret the TOTP library cannot read', function () {
+    // The library throws on a secret with non-base32 characters or too short to be one. Only stored
+    // data can be like that (a restored backup, a hand-edited row), but uncaught it answered the user
+    // a 500 on every sign-in. A code checked against an unreadable secret does not match; the
+    // operator still hears about it.
+    Exceptions::fake();
+
+    expect(totp()->verify('not base32!', '123456'))->toBeFalse()
+        ->and(totp()->verify('ABC', '123456'))->toBeFalse();
+
+    Exceptions::assertReportedCount(2);
+    Exceptions::assertReported(InvalidCharactersException::class);
+    Exceptions::assertReported(SecretKeyTooShortException::class);
 });

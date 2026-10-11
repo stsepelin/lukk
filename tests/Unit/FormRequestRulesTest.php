@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\ChangePasswordRequest;
+use Lukk\Http\Requests\ConfirmPasswordRequest;
 use Lukk\Http\Requests\ForgotPasswordRequest;
 use Lukk\Http\Requests\LoginRequest;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
@@ -31,6 +32,18 @@ it('applies each change-password rule on its own', function (string $field, arra
     'new bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
     'new without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
     'new meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
+]);
+
+it('applies each step-up confirm-password rule on its own', function (string $field, array $data, string $rule) {
+    // This route used to take a bare `Request` and cast `$request->input('password')` — the only
+    // endpoint in the package doing so. `{"password":["x"]}` raised "Array to string conversion",
+    // which `HandleExceptions` promotes to an ErrorException and renders as a 500, on an
+    // ability-gated but reachable security route. `PasskeyAssertionRequest` documents the same bug.
+    expect(failedRulesFor((new ConfirmPasswordRequest)->rules(), $data, $field))->toHaveKey($rule);
+})->with([
+    'required' => ['password', [], 'Required'],
+    'a string' => ['password', ['password' => ['x']], 'String'],
+    'bounded' => ['password', ['password' => str_repeat('a', 256)], 'Max'],
 ]);
 
 it('applies each two-factor challenge rule on its own', function (string $field, array $data, string $rule) {
@@ -83,6 +96,9 @@ it('applies each forgot-password rule on its own', function (array $data, string
     'a string' => [['email' => ['x']], 'String'],
     'well-formed' => [['email' => 'not-an-email'], 'Email'],
     'bounded' => [['email' => str_repeat('a', 250).'@x.com'], 'Max'],
+    // On its own: `email` happens to refuse a NUL as well, but the broker's lookup must not depend on
+    // which email validator mode the app configures — pdo_pgsql would look up the truncated prefix.
+    'without an invisible character' => [['email' => "ada@example.test\0x"], 'NotRegex'],
 ]);
 
 it('applies each sign-in rule on its own', function (array $data, string $field, string $rule) {
@@ -92,6 +108,52 @@ it('applies each sign-in rule on its own', function (array $data, string $field,
     'identifier bounded' => [['email' => str_repeat('a', 256), 'password' => 'secret-123456'], 'email', 'Max'],
     'password a string' => [['email' => 'ada@example.test', 'password' => ['x']], 'password', 'String'],
     'password bounded' => [['email' => 'ada@example.test', 'password' => str_repeat('a', 256)], 'password', 'Max'],
+    // Pinned here, on its own, because the equalizer's try/catch masks it end to end: delete this
+    // rule alone and the whole suite stayed green. `password_hash` raises `ValueError` on a NUL byte
+    // where `password_verify` only returns false, so hashing one on the no-usable-password branch
+    // answered 500 while a real account answered 422 — a deterministic, single-request account
+    // oracle that also escaped the failure limiter. `ChangePasswordRequest` carried the rule already.
+    'password without a NUL byte' => [['email' => 'ada@example.test', 'password' => "a\0b"], 'password', 'NotRegex'],
+]);
+
+// The throttle keys on the identifier's FOLD, so a spelling the DATABASE resolves to an account while the
+// fold keys it apart is a fresh bucket of guesses. pdo_pgsql ends a bound string at NUL; MySQL's
+// `utf8mb4_unicode_ci` ignores default-ignorable code points and pads trailing U+3000. Refused here, so
+// no such spelling reaches the lookup (tests/Concurrency/IdentifierRespellingTest.php pins both engines).
+it('refuses an identifier carrying a character no one types into one', function (string $identifier) {
+    expect(failedRulesFor((new LoginRequest)->rules(), ['email' => $identifier, 'password' => 'secret-123456'], 'email'))
+        ->toHaveKey('NotRegex');
+})->with([
+    'NUL' => ["victim@example.com\0x1"],
+    'C0 control' => ["victim\x01@example.com"],
+    'C1 control (NEL)' => ["victim@example.com\u{0085}"],
+    'zero-width space' => ["victim\u{200B}@example.com"],
+    'soft hyphen' => ["vic\u{00AD}tim@example.com"],
+    'combining grapheme joiner' => ["victim\u{034F}@example.com"],
+    'enclosing mark' => ["victim\u{20DD}@example.com"],
+    'ideographic space' => ["victim@example.com\u{3000}"],
+    'no-break space' => ["victim\u{00A0}@example.com"],
+    'tab' => ["victim\t@example.com"],
+]);
+
+it('accepts the identifiers people actually have', function (string $identifier) {
+    expect(failedRulesFor((new LoginRequest)->rules(), ['email' => $identifier, 'password' => 'secret-123456'], 'email'))
+        ->toBe([]);
+})->with([
+    'ASCII' => ['ada@example.test'],
+    'precomposed accents' => ['jérôme.müller@exämple.test'],
+    'Devanagari (combining vowel signs and virama)' => ['हिन्दी@उदाहरण.भारत'],
+    'Thai (combining marks)' => ['ผู้ใช้@ตัวอย่าง.ไทย'],
+    'CJK' => ['用户@例子.广告'],
+    'a username with an ASCII space' => ['Ada Lovelace'],
+    'apostrophe' => ["o'brien@example.ie"],
+    // U+200C/U+200D are format characters (`\p{Cf}`) that spelling needs — RFC 5892 lists them as
+    // CONTEXTJ, valid in an IDN label: Persian writes `می‌خواهم` with a ZWNJ, an emoji ZWJ sequence
+    // joins its parts with a ZWJ, and a keycap emoji ends in U+20E3 (`\p{Me}`). The fold strips all
+    // three, so each still keys the account's bucket (LoginRateLimiterTest).
+    'Persian with a zero-width non-joiner' => ["\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}"],
+    'an emoji ZWJ sequence' => ["dev\u{1F469}\u{200D}\u{1F4BB}"],
+    'a keycap emoji' => ["room1\u{FE0F}\u{20E3}"],
 ]);
 
 it('leaves a missing sign-in field to the credential check, not to validation', function (string $field) {

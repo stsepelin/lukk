@@ -18,6 +18,10 @@ it('clamps the claim window to the access token lifetime plus leeway, and to a m
     'a fractional window' => [['claim_seconds' => '1000.5', 'access_ttl' => 100, 'leeway' => 5], 1000],
     'a fractional access_ttl' => [['claim_seconds' => 10, 'access_ttl' => '100.7', 'leeway' => 5], 105],
     'a fractional leeway' => [['claim_seconds' => 10, 'access_ttl' => 100, 'leeway' => '5.5'], 105],
+    // Clamped as the verifier clamps it (0..300): a negative leeway put the clamp inside the original
+    // access token's real acceptance band, so its first use there was judged late and revoked the family.
+    'a negative leeway counts as none' => [['claim_seconds' => 10, 'access_ttl' => 100, 'leeway' => -50], 100],
+    'a leeway past the cap counts as the cap' => [['claim_seconds' => 10, 'access_ttl' => 100, 'leeway' => 1000], 400],
     'off when unset' => [[], 0],
     'off when zero' => [['claim_seconds' => '0'], 0],
     'off when not a number' => [['claim_seconds' => 'soon'], 0],

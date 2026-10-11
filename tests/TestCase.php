@@ -35,6 +35,8 @@ class TestCase extends Orchestra
         Lukk::$rateLimitKeyUsing = null;
         Lukk::$refreshTokenModel = null;
         Lukk::$runsScheduledPruning = true;
+        Fixtures\ObservedRefreshToken::$onEvent = null;
+        Fixtures\TenantScopedRefreshToken::$tenant = null;
 
         parent::tearDown();
     }
@@ -52,6 +54,11 @@ class TestCase extends Orchestra
         // once per mutant, so the nightly and the per-PR job shrink by the same factor. Nothing here
         // asserts a cost or a duration; the production value is the consumer's own config.
         $app['config']->set('hashing.bcrypt.rounds', 4);
+        // No sign-in Timebox in the suite: it sleeps out the budget on every failed login, which made
+        // the serial run three times slower and raised mutation TIMEOUTs — which count as caught and
+        // prove nothing. The tests that pin the box set a budget of their own.
+        $app['config']->set('lukk.login_timebox_micros', 0);
+        $app['config']->set('lukk.password_reset.timebox_micros', 0);
 
         $app['config']->set('database.default', 'testing');
         $app['config']->set('database.connections.testing', [
@@ -125,7 +132,9 @@ class TestCase extends Orchestra
         $table->id();
         $table->string('name')->nullable();
         $table->string('email')->unique();
-        $table->string('password');
+        // Nullable because lukk ships passkeys: a passkey-only, SSO or invited-not-yet-set account
+        // has no password, and that row shape is what `LoginTimingTest` pins the equal cost of.
+        $table->string('password')->nullable();
         $table->text('two_factor_secret')->nullable();
         $table->text('two_factor_recovery_codes')->nullable();
         $table->timestamp('two_factor_confirmed_at')->nullable();

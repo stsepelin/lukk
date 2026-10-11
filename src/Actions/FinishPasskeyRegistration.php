@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Validation\ValidationException;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Events\PasskeyRegistered;
 use Lukk\Exceptions\PasskeyVerificationFailed;
 use Lukk\Passkeys\PasskeyChallengeStore;
 
@@ -63,6 +64,8 @@ class FinishPasskeyRegistration
         }
 
         $this->passkeys->store($user->getAuthIdentifier(), $passkey, $name);
+
+        event(new PasskeyRegistered($user, $passkey->credentialId, $name));
     }
 
     private function fail(): never

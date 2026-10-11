@@ -2,18 +2,24 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
 use Lukk\Actions\RevokeSession;
 use Lukk\Actions\RotateRefreshToken;
 use Lukk\Contracts\Denylist;
+use Lukk\Contracts\RefreshTokenRepository;
+use Lukk\Contracts\TokenIssuer;
 use Lukk\Events\RefreshFamilyForked;
 use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Refresh\DatabaseRefreshTokenRepository;
+use Lukk\Support\Abilities;
 use Lukk\Support\RefreshTokenRecord;
+use Lukk\Support\TokenContext;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -135,6 +141,36 @@ it('kills the family if a hard-revoked token is presented', function () {
     } catch (InvalidRefreshToken $e) {
         expect($e->reason)->toBe('revoked');
     }
+});
+
+it('does no revocation work for a token whose own row is already revoked', function () {
+    // Re-revoking wrote the denylist and ran two UPDATEs per request, so one dead token replayed
+    // against an unauthenticated route was a write amplifier. EndSession already treats it as dead.
+    $pair = start()(1);
+    revokeSession()(familyId());
+
+    $denylist = Mockery::spy(app(Denylist::class));
+    app()->instance(Denylist::class, $denylist);
+    $writes = 0;
+    DB::listen(function ($query) use (&$writes) {
+        if (str_starts_with(strtolower(ltrim($query->sql)), 'update')) {
+            $writes++;
+        }
+    });
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'revoked');
+    $denylist->shouldNotHaveReceived('revokeFamily');
+    expect($writes)->toBe(0);
+});
+
+it('still revokes again when only the denylist says a revoke is in flight', function () {
+    // The row is live, but a revoke has written its denylist entry and not yet its rows: the
+    // rotation must revoke AFTER its own commit so the successor it just inserted is caught.
+    $pair = start()(1);
+    app(Denylist::class)->revokeFamily(familyId(), 60);
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'revoked');
+    expect(RefreshToken::where('family_id', familyId())->whereNull('revoked_at')->count())->toBe(0);
 });
 
 it('revoke-all revokes only that user', function () {
@@ -451,4 +487,121 @@ it('says what to do when the pre-read disagrees with the locked read', function 
         RuntimeException::class,
         'the pre-transaction read disagreed with the locked read. Nothing was consumed; retry.',
     );
+});
+
+it('dates auth_time from the stored sign-in, whatever refresh_ttl is configured or missing', function (?int $refreshTtl) {
+    // Once derived as `expires_at − refresh_ttl`; now stored with the family (`SessionAuthentication`), so
+    // neither the configured value nor a cached config lacking it moves the sign-in. Changed BETWEEN the
+    // sign-in and the refresh — the operator lowering `refresh_ttl` on live sessions: with the value
+    // unchanged the old derivation landed on the sign-in too, so only a change tells the two apart.
+    config(['lukk.refresh_ttl' => 7 * 86400]);
+    $signedIn = now()->getTimestamp() - 100;
+    $pair = $this->travel(-100)->seconds(fn () => start()(1));
+    $this->freezeSecond();
+
+    $lukk = config('lukk');
+    if ($refreshTtl === null) {
+        unset($lukk['refresh_ttl']);
+    } else {
+        $lukk['refresh_ttl'] = $refreshTtl;
+    }
+    config(['lukk' => $lukk]);
+
+    expect(verifier()->verify(rotate()($pair->refreshToken)->accessToken)->auth_time)->toBe($signedIn);
+})->with(['configured' => [3600], 'default, key missing' => [null]]);
+
+it('records the rotated token\'s lifetime in the configured denylist store', function () {
+    // Revocation reads the longest live lifetime from that store; recorded elsewhere, a lowered
+    // access_ttl would let a revoke expire before this token does.
+    config(['cache.stores.lukk-deny' => ['driver' => 'array'], 'lukk.denylist_store' => 'lukk-deny']);
+    $pair = start()(1);
+    Cache::store('lukk-deny')->flush();
+
+    rotate()($pair->refreshToken);
+
+    expect(Cache::store('lukk-deny')->get('lukk:access-ttls:api'))->not->toBeNull();
+});
+
+it('does not count an expired row among the family\'s live tokens', function () {
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+    RefreshToken::query()->whereNull('rotated_at')->update(['expires_at' => now()->subMinute()]);
+
+    expect(app(RefreshTokenRepository::class)->countLiveTokens(familyId()))->toBe(0);
+});
+
+it('reads and decrypts an asymmetric signing key before it takes the row lock', function () {
+    // The issuer is bound, not shared, so every rotation built a fresh KeyRing whose memo was empty: the
+    // first sign — inside the transaction — read the key file and, with a passphrase, decrypted it while
+    // holding `SELECT … FOR UPDATE`. Here the file vanishes once the lock is taken; a key already in hand
+    // signs anyway, and one read under the lock fails there.
+    $kp = rsaKeypair('s3cret');
+    $path = tempnam(sys_get_temp_dir(), 'lukk-key');
+    file_put_contents($path, $kp['private']);
+    config(['lukk.algorithm' => 'RS256', 'lukk.keys' => [
+        'active' => 'k1', 'private' => $path, 'passphrase' => 's3cret', 'public' => ['k1' => $kp['public']],
+    ]]);
+    $pair = start()(1);
+    app()->bind(RefreshTokenRepository::class, fn () => new class($path) extends DatabaseRefreshTokenRepository
+    {
+        public function __construct(private readonly string $path)
+        {
+            parent::__construct();
+        }
+
+        public function findByHashForUpdate(string $hash): ?RefreshTokenRecord
+        {
+            @unlink($this->path);
+
+            return parent::findByHashForUpdate($hash);
+        }
+    });
+
+    $next = rotate()($pair->refreshToken);
+
+    expect(verifier()->verify($next->accessToken)?->sub)->toBe('1');
+});
+
+it('does not read the signing key for a token it is going to refuse, so reuse detection still runs', function () {
+    // Warming the key ahead of the transaction must not move a key failure ahead of the reuse branch: a
+    // replay must still revoke its family when the key cannot be read.
+    $kp = rsaKeypair();
+    $path = tempnam(sys_get_temp_dir(), 'lukk-key');
+    file_put_contents($path, $kp['private']);
+    config(['lukk.algorithm' => 'RS256', 'lukk.keys' => [
+        'active' => 'k1', 'private' => $path, 'passphrase' => null, 'public' => ['k1' => $kp['public']],
+    ]]);
+    $pair = start()(1);
+    rotate()($pair->refreshToken);
+    $this->travel(31)->seconds();
+    unlink($path);
+
+    expect(fn () => rotate()($pair->refreshToken))->toThrow(InvalidRefreshToken::class, 'reuse');
+});
+
+it('rotates through a rebound issuer that has no key to warm', function () {
+    // The warm-up is the default issuer's; a replacement owns its own key handling and need not offer one.
+    $pair = start()(1);
+    $inner = app(TokenIssuer::class);
+    app()->bind(TokenIssuer::class, fn () => new class($inner) implements TokenIssuer
+    {
+        public function __construct(private readonly TokenIssuer $inner) {}
+
+        public function accessToken(TokenContext $context, array $claims = [], ?Abilities $abilities = null): array
+        {
+            return $this->inner->accessToken($context, $claims, $abilities);
+        }
+
+        public function newRefreshSecret(): string
+        {
+            return $this->inner->newRefreshSecret();
+        }
+
+        public function hash(#[SensitiveParameter] string $secret): string
+        {
+            return $this->inner->hash($secret);
+        }
+    });
+
+    expect(rotate()($pair->refreshToken)->refreshToken)->toBeString();
 });

@@ -12,10 +12,13 @@ use Lukk\Events\RefreshTokenReused;
 use Lukk\Exceptions\InvalidRefreshToken;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
+use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\RefreshTokenRecord;
 use Lukk\Support\RotationOutcome;
+use Lukk\Support\SessionAuthentication;
 use Lukk\Support\TokenContext;
 use Lukk\Support\TokenPair;
+use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use RuntimeException;
 use Throwable;
 
@@ -56,7 +59,7 @@ class RotateRefreshToken
         private readonly ?ClaimSession $claim = null,
     ) {}
 
-    public function __invoke(string $presentedSecret): TokenPair
+    public function __invoke(#[\SensitiveParameter] string $presentedSecret): TokenPair
     {
         $hash = $this->issuer->hash($presentedSecret);
         $grace = (int) ($this->config['grace_seconds'] ?? 30);
@@ -107,8 +110,13 @@ class RotateRefreshToken
                 return RotationOutcome::unknown();
             }
 
+            // The row itself is revoked, so its family's revoke has already run — denylist first,
+            // then every row, twice (see DatabaseRefreshTokenRepository::revokeFamily). Running it
+            // again here wrote the denylist and two UPDATEs per request, which made one dead token
+            // replayed at an unauthenticated route a write amplifier. Only the denylist-only case
+            // below, a revoke still in flight, needs a second pass.
             if ($record->revokedAt !== null) {
-                return RotationOutcome::revoked($record->familyId);
+                return RotationOutcome::dead();
             }
 
             if ($record->expiresAt < now()->getTimestamp()) {
@@ -142,6 +150,12 @@ class RotateRefreshToken
                 $secretHash,
                 $record->expiresAt,
                 $record->scope,
+                // Carried forward with the grant, and for the same reason: it records how and when the
+                // SESSION was authenticated (`SessionAuthentication`), which a refresh does not repeat. Losing it made the
+                // claim vanish from the first refreshed token, so a route gated on it stopped
+                // working within one access_ttl — fail-closed if the gate was written tightly,
+                // fail-OPEN if written as `!isset($amr) || in_array(...)`.
+                $record->amr,
             );
 
             // A concurrent family revoke is a set-based UPDATE. Under READ COMMITTED (PostgreSQL)
@@ -196,7 +210,7 @@ class RotateRefreshToken
             // mutating the fallback is equivalent. Pest ignores per line and per mutator name, not per
             // literal, so this necessarily covers the `+ 1` as well — that one is real, and is pinned
             // by the exact sibling counts asserted in `RotateRefreshTokenTest`.
-            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access); // @pest-mutate-ignore: DecrementInteger,IncrementInteger
+            return RotationOutcome::issued($record->userId, $record->familyId, $secret, ($siblings ?? 0) + 1, $access, $record->expiresAt); // @pest-mutate-ignore: DecrementInteger,IncrementInteger
         });
 
         // ADVISORY, so it must not be able to cost the caller its session. Dispatched synchronously
@@ -216,6 +230,7 @@ class RotateRefreshToken
         return match ($outcome->type) {
             'issued' => $this->pair($outcome),
             'revoked', 'reuse' => $this->killFamily($outcome->familyId, $outcome->type),
+            'dead' => throw new InvalidRefreshToken('revoked'),
             'expired' => throw new InvalidRefreshToken('expired'),
             default => throw new InvalidRefreshToken('unknown'),
         };
@@ -241,9 +256,46 @@ class RotateRefreshToken
     {
         $abilities = $this->abilitiesFor($record, $grace);
 
-        return [$abilities, $record === null || $abilities === null && $this->rejectable($record, $grace)
-            ? []
-            : Lukk::customClaimsFor($record->userId)];
+        if ($record === null || $abilities === null && $this->rejectable($record, $grace)) {
+            return [$abilities, []];
+        }
+
+        // The signing key too: the mint below signs under the row lock, and an asymmetric key is a file
+        // read plus, with a passphrase, a decrypt — neither belongs inside `FOR UPDATE`. After the reject
+        // short-circuit, so an unreadable key cannot pre-empt reuse detection; a failure here consumes
+        // nothing, and the client's retry is an ordinary one. A rebound issuer owns its own key handling.
+        if ($this->issuer instanceof FirebaseTokenIssuer) {
+            $this->issuer->warm();
+        }
+
+        // `amr` after the consumer's claims, like `scope` and `pin`: it is the family's own record of
+        // how this session was authenticated, and a `tokenClaimsUsing` hook may neither forge one nor
+        // erase the real one.
+        $claims = Lukk::customClaimsFor($record->userId);
+        unset($claims['amr'], $claims['auth_time']);
+
+        // How and WHEN the SESSION was authenticated, which a refresh repeats neither: the family's own
+        // record (`SessionAuthentication`). Re-validated on the way OUT, not trusted because it was
+        // validated on the way in — the column is written through `RefreshTokenRepository`, a documented
+        // swap seam, and `RefreshTokenRecord::$amr` is a plain string, so a replacement repository, or a
+        // row edited by hand, can put anything there. RFC 8176 §1 / RFC 7519 §4.1 make `amr` an array of
+        // StringOrURI.
+        //
+        // The time is the STORED sign-in time, never derived. It used to be `expires_at − refresh_ttl`, and
+        // lowering `refresh_ttl` moved an old multi-factor sign-in forward into the step-up allowance. A
+        // family written before the time was stored has none: the claim is omitted, which the allowance
+        // reads as no recent sign-in.
+        $session = SessionAuthentication::decode($record->amr);
+
+        if ($session->authTime !== null) {
+            $claims['auth_time'] = $session->authTime;
+        }
+
+        if ($session->methods !== null) {
+            $claims['amr'] = $session->methods;
+        }
+
+        return [$abilities, $claims];
     }
 
     /** Whether the unlocked read already shows a token the transaction will refuse. */
@@ -304,7 +356,17 @@ class RotateRefreshToken
         // the analyser rather than any runtime check.
         assert($outcome->access !== null && $outcome->refreshSecret !== null); // @pest-mutate-ignore: BooleanAndToBooleanOr,RemoveFunctionCall
 
-        return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in']);
+        // After commit, never under the row lock: see `LongestAccessTtl`. ADVISORY, like the fork event
+        // above: the successor is committed and the parent consumed, so a cache error here answering 500
+        // sent the client's retry past the grace window, where it reads as a replay and revokes the
+        // family. Reported, and the rotation stands.
+        try {
+            LongestAccessTtl::record((int) $outcome->access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null); // @pest-mutate-ignore: RemoveIntegerCast
+        } catch (Throwable $e) {
+            report($e);
+        }
+
+        return new TokenPair($outcome->access['token'], $outcome->refreshSecret, $outcome->access['expires_in'], $outcome->expiresAt);
     }
 
     private function killFamily(string $familyId, string $reason): never

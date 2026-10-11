@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Contracts\Hashing\Hasher;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\Grammars\SQLiteGrammar;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
 use Lukk\Actions\DisableTwoFactor;
 use Lukk\Tests\Fixtures\User;
@@ -90,4 +93,66 @@ it('locks the user row inside the transaction before reading the codes', functio
     $user->useRecoveryCode($code);
 
     expect($grammar->locks)->toBe([['users', true, $level + 1]]);
+});
+
+it('derives no hash while holding the lock on the user row', function () {
+    // One bcrypt per stored code — up to a hundred — ran inside `lockForUpdate()`. A wrong guess
+    // therefore held the user's row for seconds, stalling every other write to that account (a
+    // sign-in's rehash, a profile save) for as long as someone kept guessing. Verifying needs no lock;
+    // only removing the matched hash does.
+    $user = User::factory()->create();
+    [, $second] = $user->generateRecoveryCodes(3);
+
+    $levels = [];
+    $inner = app('hash')->driver();
+    Hash::swap(new class($inner, $levels) implements Hasher
+    {
+        public function __construct(private readonly Hasher $inner, private array &$levels) {}
+
+        public function info($hashedValue): array
+        {
+            return $this->inner->info($hashedValue);
+        }
+
+        public function make(#[SensitiveParameter] $value, array $options = []): string
+        {
+            return $this->inner->make($value, $options);
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            $this->levels[] = DB::transactionLevel();
+
+            return $this->inner->check($value, $hashedValue, $options);
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            return $this->inner->needsRehash($hashedValue, $options);
+        }
+    });
+
+    // The suite may wrap each test in a transaction of its own, so compare with the level outside.
+    $outside = DB::transactionLevel();
+
+    expect($user->useRecoveryCode('wrong-guess'))->toBeFalse()
+        ->and($user->useRecoveryCode($second))->toBeTrue()
+        // Three for the miss, then two to find the second code: the search stops at the match.
+        ->and($levels)->toHaveCount(5)
+        ->and(array_values(array_unique($levels)))->toBe([$outside])
+        ->and($user->refresh()->recoveryCodesRemaining())->toBe(2)
+        ->and($user->useRecoveryCode($second))->toBeFalse();
+});
+
+it('takes no lock for a code that matches nothing', function () {
+    // Every wrong guess would otherwise still lock the row, just more briefly.
+    $user = User::factory()->create();
+    $user->generateRecoveryCodes(2);
+    $opened = 0;
+    Event::listen(TransactionBeginning::class, function () use (&$opened) {
+        $opened++;
+    });
+
+    expect($user->useRecoveryCode('wrong-guess'))->toBeFalse()
+        ->and($opened)->toBe(0);
 });

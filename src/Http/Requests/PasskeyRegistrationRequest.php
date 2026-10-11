@@ -23,7 +23,8 @@ class PasskeyRegistrationRequest extends FormRequest
     {
         return [
             'credential' => ['required', 'array'],
-            'name' => ['nullable', 'string', 'max:255'],
+            // Valid UTF-8: it is inserted, and PostgreSQL refuses an invalid sequence (SQLSTATE 22021).
+            'name' => ['nullable', 'string', 'max:255', 'regex:/^/u'],
         ];
     }
 }

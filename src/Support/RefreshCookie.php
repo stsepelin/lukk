@@ -53,4 +53,19 @@ class RefreshCookie
         // One second more on the default is still 43,200 whole minutes.
         return (int) ((int) (Lukk::guardConfig()['refresh_ttl'] ?? 2592000) / 60); // @pest-mutate-ignore: IncrementInteger
     }
+
+    /**
+     * When the cookie must expire, as a unix timestamp: the session's own absolute expiry, or null when
+     * the pair does not know it (then `ttlMinutes()` applies).
+     *
+     * The family's expiry is fixed at sign-in and every successor inherits it, so re-setting the cookie
+     * for the full `refresh_ttl` on each rotation left the browser holding it for up to that long past
+     * the point the server stops accepting it. At least a second ahead: an expiry of 0 is a SESSION
+     * cookie, which would outlive the session instead, and one in the past deletes the cookie the
+     * response is delivering.
+     */
+    public static function expiresAt(?int $familyExpiresAt): ?int
+    {
+        return $familyExpiresAt === null ? null : max(now()->getTimestamp() + 1, $familyExpiresAt);
+    }
 }

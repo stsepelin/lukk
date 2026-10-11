@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Support;
 
 use Illuminate\Contracts\Cache\Repository;
+use Lukk\Lukk;
 
 /**
  * The cache markers behind `claim_seconds`: one entry per session family that has been issued but not
@@ -46,10 +47,11 @@ class UnclaimedSessions
         }
 
         $accessTtl = is_numeric($config['access_ttl'] ?? null) ? (int) $config['access_ttl'] : 900;
-        // 5, not 0, when absent or unusable — the same default the verifier reads. Short by `leeway`, the
-        // clamp landed inside the token's real acceptance band, and a session whose first use was its
-        // original access token in that gap was judged late and had its whole family revoked.
-        $leeway = is_numeric($config['leeway'] ?? null) ? (int) $config['leeway'] : 5;
+        // 5, not 0, when absent or unusable. Short by `leeway`, the clamp landed inside the token's real
+        // acceptance band, and a session whose first use was its original access token in that gap was
+        // judged late and had its whole family revoked. A number is clamped as the verifier clamps it
+        // (`Lukk::leeway()`, 0..300): a negative one put the clamp inside that band all the same.
+        $leeway = is_numeric($config['leeway'] ?? null) ? Lukk::leeway($config) : 5;
 
         return max((int) $window, $accessTtl + $leeway, 60);
     }

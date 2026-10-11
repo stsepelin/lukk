@@ -318,3 +318,87 @@ it('carries the password fingerprint it was issued with, and only a string one',
             ->and(challenge()->passwordFingerprintOf('2fa', $forged))->toBeNull();
     }
 });
+
+it('spends a challenge once even when two requests read it as unspent at the same moment', function () {
+    // The check (`has()` in decode) and the mark (`revokeJti()`) were two steps, so two concurrent
+    // redemptions could both read "unspent" and both succeed — two sessions from one challenge, each
+    // with a different valid factor. The spend is now an atomic claim. A denylist that never reports a
+    // jti stands in for both reads landing before either write.
+    $blind = new class(app(Denylist::class)) implements Denylist
+    {
+        public function __construct(private readonly Denylist $inner) {}
+
+        public function revokeJti(string $jti, int $ttlSeconds): void
+        {
+            $this->inner->revokeJti($jti, $ttlSeconds);
+        }
+
+        public function revokeFamily(string $familyId, int $ttlSeconds): void
+        {
+            $this->inner->revokeFamily($familyId, $ttlSeconds);
+        }
+
+        public function has(string $type, string $id): bool
+        {
+            return false;
+        }
+
+        public function hasAny(array $types): bool
+        {
+            return false;
+        }
+    };
+    app()->instance(Denylist::class, $blind);
+    app()->forgetInstance(ChallengeToken::class);
+    $token = challenge()->issue('2fa', 42, 300);
+
+    expect(challenge()->consume('2fa', $token))->toBe('42')
+        ->and(challenge()->consume('2fa', $token))->toBeNull();
+});
+
+it('claims the spend in the denylist store, under its own key', function () {
+    config(['cache.stores.denylist' => ['driver' => 'array'], 'lukk.denylist_store' => 'denylist']);
+    app()->forgetInstance(ChallengeToken::class);
+    $token = challenge()->issue('2fa', 42, 300);
+    $jti = json_decode(base64_decode(strtr(explode('.', $token)[1], '-_', '+/')), true)['jti'];
+
+    challenge()->consume('2fa', $token);
+
+    expect(cache()->store('denylist')->get('lukk:challenge-spent:'.$jti))->toBeTrue()
+        ->and(cache()->store()->get('lukk:challenge-spent:'.$jti))->toBeNull();
+});
+
+it('refuses a challenge with an empty subject', function () {
+    expect(challenge()->consume('2fa', coIssuedChallenge(['sub' => ''])))->toBeNull();
+});
+
+it('caps the leeway at five minutes, as the access-token verifier does', function () {
+    // RFC 7519 §4.1.4 allows "some small leeway". The cap reached only the access-token verifier, so with
+    // `LUKK_LEEWAY=86400` a five-minute 2FA challenge or step-up confirmation stayed good for a day.
+    config(['lukk.leeway' => 86400]);
+    app()->forgetInstance(ChallengeToken::class);
+    $expired = $this->travel(-1)->hours(fn () => challenge()->issue('2fa', 42, 300));
+
+    expect(challenge()->verify('2fa', $expired))->toBeNull();
+});
+
+it('refuses a challenge expiring past any timestamp, whose remaining life no cache will take as a TTL', function () {
+    // `consume()` hands `exp - now + leeway` to the cache AFTER the second factor has verified; Redis
+    // answers an `exp` near PHP_INT_MAX with "invalid expire time", a 500 there. The access verifier
+    // already bounds time claims to the end of year 9999.
+    expect(challenge()->consume('2fa', coIssuedChallenge(['exp' => PHP_INT_MAX])))->toBeNull()
+        ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300800])))->toBeNull()
+        ->and(challenge()->consume('2fa', coIssuedChallenge(['exp' => 253402300799])))->toBe('42');
+});
+
+it('refuses a challenge whose typ header is not a string, rather than throwing', function (mixed $typ) {
+    // `headerType()` returns `?string`, so a co-issuer's `"typ": 7` raised a TypeError — a 500 on the
+    // challenge route instead of the "invalid challenge" every other malformed token gets.
+    $cfg = Lukk::guardConfig();
+    $token = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '42', 'jti' => (string) Str::uuid(),
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 300,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => $typ]);
+
+    expect(challenge()->verify('2fa', $token))->toBeNull();
+})->with(['a number' => [7], 'a list' => [['2fa+challenge']], 'an object' => [['typ' => '2fa+challenge']]]);

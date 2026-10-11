@@ -62,3 +62,20 @@ it('converts the refresh TTL from seconds to whole minutes', function (mixed $tt
     'unset: thirty days' => [null, 43200],
     'garbage: zero, not a TypeError' => ['garbage', 0],
 ]);
+
+it('expires with the session, and never sooner than a second from now', function (int $left, int $ahead) {
+    // An expiry of 0 would make it a SESSION cookie — one that outlives the session — and one in the past
+    // would delete the very cookie the response delivers.
+    $this->freezeSecond();
+
+    expect(RefreshCookie::expiresAt(now()->getTimestamp() + $left))->toBe(now()->getTimestamp() + $ahead);
+})->with([
+    'an hour' => [3_600, 3_600],
+    'a second' => [1, 1],
+    'nothing' => [0, 1],
+    'already past' => [-10, 1],
+]);
+
+it('leaves the expiry to refresh_ttl when the pair does not know the session\'s', function () {
+    expect(RefreshCookie::expiresAt(null))->toBeNull();
+});

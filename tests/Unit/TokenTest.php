@@ -187,6 +187,33 @@ it('rejects an access token whose sub is missing, empty, or not a string', funct
         ->and(verifier()->verify($arraySub))->toBeNull();
 });
 
+it('refuses a token whose jti or fid is not a scalar, rather than 500ing past the denylist', function () {
+    // `exp` and `sub` were type-checked and these were not. A co-issuer token carrying
+    // `"jti": ["a","b"]` raised "Array to string conversion" — which `HandleExceptions` promotes to
+    // an ErrorException, i.e. a 500 on every request presenting it. Worse than the 500: the cast
+    // yields the literal string `Array`, so the denylist was asked for `lukk:dl:fid:Array` and a
+    // REVOKED FAMILY stopped matching. `ChallengeToken::decode()` already hardened exactly this
+    // (RFC 8725 §3.11); the access path had not.
+    $claims = [
+        'iss' => config('lukk.issuer'),
+        'aud' => config('lukk.audience'),
+        'sub' => '1',
+        'iat' => time(),
+        'nbf' => time(),
+        'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $arrayJti = JWT::encode(['jti' => ['a', 'b']] + $claims, $secret, 'HS256', head: $head);
+    $arrayFid = JWT::encode(['jti' => 'j-ok', 'fid' => ['f']] + $claims, $secret, 'HS256', head: $head);
+    $objectFid = JWT::encode(['jti' => 'j-ok2', 'fid' => ['n' => 1]] + $claims, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($arrayJti))->toBeNull()
+        ->and(verifier()->verify($arrayFid))->toBeNull()
+        ->and(verifier()->verify($objectFid))->toBeNull();
+});
+
 // No `lukk` config key is guaranteed at runtime. `mergeConfigDeep` early-returns when the
 // application's config is CACHED (the production norm), so a key added in a later release is never
 // backfilled; and the merge that does run backfills on `array_key_exists`, so a per-guard
@@ -331,4 +358,91 @@ it('honours the configured leeway, and five seconds when it is unset', function 
 it('reads a jti or fid another issuer encoded as a number', function () {
     // Both reach the denylist as strings; a JSON number there was a TypeError on every request.
     expect(verifier()->verify(signedClaims(['jti' => 42, 'fid' => 7])))->not->toBeNull();
+});
+
+it('refuses an aud that is not a list of scalars, rather than 500ing before the jti guard', function () {
+    // `array_intersect` compares elements AS STRINGS, so a nested array or object in `aud` raised
+    // "Array to string conversion" — the same ErrorException the `jti`/`fid` guard was added for,
+    // two lines EARLIER in the same method, so that guard never got the chance to run. RFC 7519
+    // §4.1.3 makes `aud` a StringOrURI or an array of them; RFC 8725 §3.11 says check before use.
+    $base = [
+        'iss' => config('lukk.issuer'),
+        'sub' => '1', 'jti' => 'j-aud', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $nested = JWT::encode(['aud' => [[config('lukk.audience')]]] + $base, $secret, 'HS256', head: $head);
+    $object = JWT::encode(['aud' => ['n' => config('lukk.audience')]] + $base, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($nested))->toBeNull()
+        ->and(verifier()->verify($object))->toBeNull();
+});
+
+it('keeps accepting an ordinary string and list aud', function () {
+    // The guard must not refuse what RFC 7519 §4.1.3 allows.
+    $base = [
+        'iss' => config('lukk.issuer'),
+        'sub' => '1', 'jti' => 'j-aud-ok', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $secret = config('lukk.secret');
+    $head = ['typ' => 'at+jwt'];
+
+    $asString = JWT::encode(['aud' => config('lukk.audience')[0] ?? config('lukk.audience')] + $base, $secret, 'HS256', head: $head);
+    $asList = JWT::encode(['aud' => (array) config('lukk.audience')] + $base, $secret, 'HS256', head: $head);
+
+    expect(verifier()->verify($asString))->not->toBeNull()
+        ->and(verifier()->verify($asList))->not->toBeNull();
+});
+
+it('reads an aud another issuer encoded as a number', function () {
+    // `is_scalar`, not `is_string` — the permissive half, pinned the way the sibling `jti`/`fid`
+    // guard already pins it. Narrowing it would refuse a co-issuer that encodes its audience as a
+    // number, which is the topology this verifier exists to support.
+    config(['lukk.audience' => [7]]);
+
+    $token = JWT::encode([
+        'iss' => config('lukk.issuer'), 'aud' => 7, 'sub' => '1', 'jti' => 'j-aud-num',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ], config('lukk.secret'), 'HS256', head: ['typ' => 'at+jwt']);
+
+    expect(verifier()->verify($token))->not->toBeNull();
+});
+
+it('refuses a time claim no integer can hold, and keeps a fractional one RFC 7519 allows', function (string $claim, mixed $value, bool $accepted) {
+    // A co-issuer holding the key could stamp `exp: 1e30` (or `iat: 1e30` beside an `nbf`, where the
+    // library skips its own iat check); every later `(int)` cast of it warned into a 500 — on logout,
+    // logout-all, and with claim_seconds on, every authenticated request. NumericDate may be
+    // non-integer (§2), so a fraction near now stays valid; a value past year 9999 does not.
+    $claims = [
+        'iss' => config('lukk.issuer'), 'aud' => config('lukk.audience'), 'sub' => '1', 'jti' => 'j-time', 'fid' => 'f-time',
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 900,
+    ];
+    $claims[$claim] = $value;
+    $token = JWT::encode($claims, config('lukk.secret'), 'HS256', head: ['typ' => 'at+jwt']);
+
+    expect(verifier()->verify($token) !== null)->toBe($accepted);
+})->with([
+    'huge exp' => ['exp', 1e30, false],
+    'huge iat beside nbf' => ['iat', 1e30, false],
+    'huge nbf' => ['nbf', -1e30, false],
+    'exp as a numeric string, which some issuers send' => ['exp', (string) (time() + 900), true],
+    'exp as a huge numeric string' => ['exp', '1e30', false],
+    'fractional exp' => ['exp', time() + 900.5, true],
+    'fractional iat' => ['iat', time() - 0.5, true],
+    // The edges, both ways.
+    'iat at the epoch' => ['iat', 0, true],
+    'iat before it' => ['iat', -1, false],
+    'iat a fraction before it' => ['iat', -0.5, false],
+    'exp at the end of year 9999' => ['exp', 253402300799, true],
+    'exp a second later' => ['exp', 253402300800, false],
+]);
+
+it('refuses an audience that is a JSON object, whose values would otherwise pass as a list', function () {
+    // RFC 7519 §4.1.3: `aud` is a StringOrURI or an ARRAY of them. The `(array)` cast turned an object
+    // into its property values, so `{"x": "<our audience>"}` intersected and was accepted.
+    $audience = ((array) Lukk::guardConfig()['audience'])[0];
+
+    expect(verifier()->verify(signedClaims(['aud' => (object) ['x' => $audience]])))->toBeNull()
+        ->and(verifier()->verify(signedClaims(['aud' => [$audience]])))->not->toBeNull();
 });

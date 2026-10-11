@@ -8,10 +8,13 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
+use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\PasswordChanged;
+use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 
 /**
  * Change the password of an already-authenticated user, having re-verified the current one.
@@ -32,6 +35,7 @@ use Lukk\Events\PasswordChanged;
  */
 class ChangePassword
 {
+    use CountsLockoutAttempts;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -43,7 +47,7 @@ class ChangePassword
         private readonly ?string $guard = null,
     ) {}
 
-    public function __invoke(Authenticatable $user, string $current, string $password, ?string $currentFamilyId): void
+    public function __invoke(Authenticatable $user, #[\SensitiveParameter] string $current, #[\SensitiveParameter] string $password, ?string $currentFamilyId): void
     {
         $subject = (string) $user->getAuthIdentifier();
 
@@ -54,15 +58,21 @@ class ChangePassword
         // Reserved before the credential check, like every other password path: reading "is it
         // locked" and counting afterwards lets concurrent requests each get a guess.
         if ($this->lockouts !== null
-            && $this->lockouts->recordFailure('confirm', $subject, $this->guard) > $this->lockouts->maxAttempts()) {
+            && $this->reserveAttempt($this->lockouts, 'confirm', $subject) > $this->lockouts->maxAttempts()) {
             $this->throwLocked('confirm', $subject, 'current_password');
         }
 
-        if (! $this->users->validateCredentials($user, ['password' => $current])) {
-            throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
+        // The lock lands only once the check has failed — see `CountsLockoutAttempts`.
+        try {
+            $this->verifyCurrent($user, $current);
+        } catch (ValidationException $e) {
+            $this->attemptFailed($this->lockouts, 'confirm', $subject);
+
+            throw $e;
         }
 
-        $user->forceFill(['password' => Hash::make($password)])->save();
+        // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
+        $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
 
         // BOTH counters. The failures they hold were against a password that no longer exists, and
         // the reset path already releases both for exactly that reason. Releasing only `confirm`
@@ -72,7 +82,9 @@ class ChangePassword
         // line required proving the current password.
         $this->lockouts?->release('confirm', $subject, $this->guard);
         // (The identifier argument is unused when a user is passed.)
-        $this->lockouts?->release('login', LoginRateLimiter::lockoutSubject($user, ''), $this->guard); // @pest-mutate-ignore: EmptyStringToNotEmpty
+        foreach (LoginRateLimiter::subjectsOf($user) as $subject) {
+            $this->lockouts?->release('login', $subject, $this->guard);
+        }
 
         // Every OTHER session dies; this one survives. Changing a password is what a user does when
         // they think someone else is in the account, so leaving those sessions alive would defeat
@@ -90,6 +102,27 @@ class ChangePassword
             : ($this->revokeOtherSessions)($user->getAuthIdentifier(), $currentFamilyId);
 
         event(new PasswordChanged($user));
+    }
+
+    private function verifyCurrent(Authenticatable $user, #[\SensitiveParameter] string $current): void
+    {
+        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
+        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
+        // can present — fail closed with the ordinary answer, not a 500.
+        try {
+            $valid = $this->users->validateCredentials($user, ['password' => $current]);
+        } catch (\Throwable) {
+            $valid = false;
+        }
+
+        if (! $valid) {
+            throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
+        }
+
+        // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
+        if (HashablePassword::verifiesOnlyInPart($user, $current)) {
+            throw HashablePassword::mustReset('current_password');
+        }
     }
 
     private function lockoutGuard(): ?string

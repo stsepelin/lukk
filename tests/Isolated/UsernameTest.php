@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\UsernameTestCase;
@@ -38,4 +39,16 @@ it('registers by username instead of email', function () {
 
     $user = User::where('username', 'newbie')->first();
     expect($user)->not->toBeNull()->and($user->name)->toBe('New User');
+});
+
+it('refuses a username that is not valid UTF-8 before the uniqueness query', function () {
+    // The `email` rule refuses such bytes in an address; a username had only `string`, so `\xFF` reached
+    // the `unique` lookup — SQLSTATE 22021 and a 500 on PostgreSQL.
+    DB::enableQueryLog();
+
+    $this->post('/auth/register', [
+        'name' => 'Ada', 'username' => "\xFF", 'password' => 'password-123', 'password_confirmation' => 'password-123',
+    ], ['Accept' => 'application/json'])->assertStatus(422)->assertJsonValidationErrors('username');
+
+    expect(collect(DB::getQueryLog())->filter(fn ($q) => str_contains($q['query'], 'users')))->toBeEmpty();
 });

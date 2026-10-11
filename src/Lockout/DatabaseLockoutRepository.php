@@ -9,7 +9,7 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Lukk\Contracts\LockoutRepository;
+use Lukk\Contracts\ReservesLockoutAttempts;
 use Lukk\Events\AccountLocked;
 use Lukk\Events\AccountReleased;
 use Lukk\Models\Lockout;
@@ -21,10 +21,10 @@ use Lukk\Models\Lockout;
  * authentication, a password reset, `lukk:release`, or this API. Any positive value auto-releases
  * that many seconds after the lock was set, which bounds the denial an attacker gets by burning a
  * known account's budget on purpose. That bound has a cost: a run broken by TIME rather than by a
- * success is no longer "consecutive" in the strict NIST SP 800-63B §5.2.2 sense, so the two knobs
+ * success is no longer "consecutive" in the strict NIST SP 800-63B-4 §3.2.2 sense, so the two knobs
  * pull against each other and the docs say so.
  */
-class DatabaseLockoutRepository implements LockoutRepository
+class DatabaseLockoutRepository implements ReservesLockoutAttempts
 {
     public function __construct(
         private readonly int $maxAttempts,
@@ -52,11 +52,44 @@ class DatabaseLockoutRepository implements LockoutRepository
 
     public function recordFailure(string $purpose, string $subject, ?string $guard): int
     {
+        return $this->count($purpose, $subject, $guard, $this->maxAttempts);
+    }
+
+    public function reserve(string $purpose, string $subject, ?string $guard): int
+    {
+        // Locks only PAST the cap: the attempt that reaches it is still being verified, and locks
+        // through `lockIfSpent()` if it fails. Past the cap and not locked, that verdict never came
+        // back (see the contract) — lock rather than strand a lock `release_after` cannot time.
+        return $this->count($purpose, $subject, $guard, $this->maxAttempts + 1);
+    }
+
+    public function lockIfSpent(string $purpose, string $subject, ?string $guard): void
+    {
+        if (! $this->usable($subject)) {
+            return;
+        }
+
+        // One conditional statement, so the transition is decided by the write itself: of two failures
+        // landing together, only the one whose UPDATE took the row announces it.
+        $locked = $this->query($purpose, $subject, $guard)
+            ->where('attempts', '>=', $this->maxAttempts)->whereNull('locked_at')
+            ->update(['locked_at' => Carbon::now()]);
+
+        if ($locked > 0) {
+            event(new AccountLocked($purpose, $subject, $guard));
+        }
+    }
+
+    /** Count one attempt, locking (and announcing it) once the run reaches `$lockAt`. */
+    private function count(string $purpose, string $subject, ?string $guard, int $lockAt): int
+    {
         if (! $this->usable($subject)) {
             return 0;
         }
 
-        [$attempts, $justLocked] = DB::transaction(function () use ($purpose, $subject, $guard) {
+        $this->ensureRow($purpose, $subject, $guard);
+
+        [$attempts, $justLocked] = DB::transaction(function () use ($purpose, $subject, $guard, $lockAt) {
             $row = $this->locate($purpose, $subject, $guard);
 
             // An auto-release lapsed: start a fresh run rather than leaving the account one
@@ -67,7 +100,7 @@ class DatabaseLockoutRepository implements LockoutRepository
             }
 
             $row->attempts++;
-            $locking = $row->attempts >= $this->maxAttempts && $row->locked_at === null;
+            $locking = $row->attempts >= $lockAt && $row->locked_at === null;
 
             if ($locking) {
                 $row->locked_at = Carbon::now();
@@ -80,8 +113,8 @@ class DatabaseLockoutRepository implements LockoutRepository
 
         if ($justLocked) {
             // Fired once, on the transition — a locked-out user gets no other signal, so this is
-            // where an app tells the account's owner. NOTE for listeners: `subject` is whatever was
-            // submitted and need not name a real account, so rate-limit any mail you send off it.
+            // where an app tells the account's owner. NOTE for listeners: only an `id:` (login) or bare
+            // user-id (two-factor, confirm) subject names an account; an `idn:` digest names no one.
             event(new AccountLocked($purpose, $subject, $guard));
         }
 
@@ -101,13 +134,26 @@ class DatabaseLockoutRepository implements LockoutRepository
             return 0;
         }
 
-        $released = $this->query($purpose, $subject, $guard)->delete();
+        // `AccountReleased` is the lock→released transition, the mirror of `AccountLocked` — so it is
+        // announced only where a lock was HELD. Fired for any deleted counter, every successful sign-in
+        // after a typo told an audit log that a locked account had been unlocked. A lock already past
+        // `release_after` ended then, and that expiry announces nothing; deleting its row is no release.
+        //
+        // "Held" is decided BY the deleting statements, never by a read before them: a SELECT then an
+        // unconditional DELETE lifted a lock taken in between with no announcement. The held lock goes
+        // first and is announced; the second statement takes only what is NOT held, so a lock that
+        // arrives between the two is left standing rather than lifted silently.
+        $held = $this->held($this->query($purpose, $subject, $guard))->delete();
+        $cleared = $this->query($purpose, $subject, $guard)
+            ->where(fn ($q) => $q->whereNull('locked_at')->orWhere(fn ($spent) => $this->spent($spent)))
+            ->delete();
 
-        if ($released > 0) {
+        // Only the request that deleted the lock announces it, so a concurrent release is not counted twice.
+        if ($held > 0) {
             event(new AccountReleased($purpose, $subject, $guard));
         }
 
-        return $released;
+        return $held + $cleared;
     }
 
     public function availableIn(string $purpose, string $subject, ?string $guard): ?int
@@ -128,7 +174,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         // single call site happens to check first. A consumer calling the contract directly on an
         // install that never published the lockout migration got a raw SQL error. Checked here
         // rather than through `usable()`, which takes ONE subject and this takes a list.
-        if (! Schema::hasTable((new Lockout)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -140,7 +186,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         }
 
         // Every purpose, but only THIS guard. Two accounts sharing a corporate email share a lockout
-        // subject, so an unguarded sweep let erasing one account clear a held NIST §5.2.2 login lock
+        // subject, so an unguarded sweep let erasing one account clear a held NIST SP 800-63B-4 §3.2.2 login lock
         // on a different, live, possibly privileged one — reachable by anyone controlling any
         // account with that identifier.
         return Lockout::query()->whereIn('subject', $subjects)->where('guard', (string) $guard)->delete();
@@ -152,7 +198,7 @@ class DatabaseLockoutRepository implements LockoutRepository
         // different rows.
         $subjects = array_values(array_filter($subjects, fn (string $s) => $s !== '')); // @pest-mutate-ignore: UnwrapArrayValues
 
-        if ($subjects === [] || ! Schema::hasTable((new Lockout)->getTable())) {
+        if ($subjects === [] || ! $this->published()) {
             return [];
         }
 
@@ -171,7 +217,7 @@ class DatabaseLockoutRepository implements LockoutRepository
 
     public function prune(int $staleAfterDays): int
     {
-        if (! Schema::hasTable((new Lockout)->getTable())) {
+        if (! $this->published()) {
             return 0;
         }
 
@@ -189,7 +235,44 @@ class DatabaseLockoutRepository implements LockoutRepository
     }
 
     /**
-     * Fetch the row for update, creating it if absent.
+     * Create the counter row, if absent, BEFORE the counting transaction opens.
+     *
+     * Inside it, a first failure ran `SELECT … FOR UPDATE` on an absent row and then INSERTed. Under
+     * MySQL REPEATABLE READ that locking read takes a GAP lock, and concurrent first failures for one
+     * subject each held the gap while waiting to insert into it — InnoDB killed all but one with 1213
+     * (deadlock): a 500 on `/auth/login`, and an uncounted guess, for exactly the burst the counter
+     * exists to meter. Measured with eight simultaneous wrong passwords against a fresh account: seven
+     * deadlocks. Inserted here, in autocommit, no lock outlives the statement, and the transaction's
+     * locking read then finds the row and serialises on it. `insertOrIgnore` (`ON CONFLICT DO NOTHING`
+     * on PostgreSQL), so a concurrent insert is no error — and on PostgreSQL, no aborted transaction.
+     */
+    private function ensureRow(string $purpose, string $subject, ?string $guard): void
+    {
+        if ($this->query($purpose, $subject, $guard)->exists()) {
+            return;
+        }
+
+        $now = Carbon::now();
+
+        $model = new Lockout;
+
+        // Past Eloquent, so the model's own ULID (lowercased by `HasUlids`) and timestamps are spelled out.
+        $model->newQuery()->insertOrIgnore([
+            'id' => $model->newUniqueId(),
+            'purpose' => $purpose,
+            'subject' => $subject,
+            'guard' => (string) $guard,
+            // The column defaults to 0 as well; stated so the row reads as written.
+            'attempts' => 0, // @pest-mutate-ignore: RemoveArrayItem
+            'created_at' => $now,
+            // The counting save() that follows stamps it again on every path; stated for a whole row.
+            'updated_at' => $now, // @pest-mutate-ignore: RemoveArrayItem
+        ]);
+    }
+
+    /**
+     * Fetch the row for update, creating it if absent — which, after `ensureRow()`, means only that a
+     * success released it in between.
      *
      * The insert is racy by nature — two first-failures for one subject arrive together — and the
      * unique index is what makes that safe: the loser catches the violation and re-reads the winner's
@@ -220,6 +303,14 @@ class DatabaseLockoutRepository implements LockoutRepository
         }
     }
 
+    /** On the model's own connection and table name; not memoized, so a later migration is seen. */
+    private function published(): bool
+    {
+        $model = new Lockout;
+
+        return Schema::connection($model->getConnectionName())->hasTable($model->getTable());
+    }
+
     /**
      * Whether this subject can be counted at all.
      *
@@ -233,7 +324,7 @@ class DatabaseLockoutRepository implements LockoutRepository
      */
     private function usable(string $subject): bool
     {
-        return $subject !== '' && Schema::hasTable((new Lockout)->getTable());
+        return $subject !== '' && $this->published();
     }
 
     private function find(string $purpose, string $subject, ?string $guard): ?Lockout
@@ -247,6 +338,44 @@ class DatabaseLockoutRepository implements LockoutRepository
         // '' rather than null — see the migration: a null in a unique index doesn't dedupe.
         return Lockout::query()
             ->where('purpose', $purpose)->where('subject', $subject)->where('guard', (string) $guard);
+    }
+
+    /**
+     * @param  Builder<covariant \Lukk\Models\Lockout>  $query
+     * @return Builder<covariant \Lukk\Models\Lockout>
+     */
+    private function held(Builder $query): Builder
+    {
+        return $query->whereNotNull('locked_at')->when(
+            $this->releaseAfter > 0,
+            fn ($q) => $q->where('locked_at', '>=', $this->lapsedBefore()),
+        );
+    }
+
+    /**
+     * A lock `release_after` has already lifted — the complement of `held()` among locked rows. Never
+     * matches with `release_after` at 0, where only a release ends a lock.
+     *
+     * @param  Builder<covariant \Lukk\Models\Lockout>  $query
+     */
+    private function spent(Builder $query): void
+    {
+        $this->releaseAfter > 0
+            ? $query->whereNotNull('locked_at')->where('locked_at', '<', $this->lapsedBefore())
+            : $query->whereRaw('1 = 0');
+    }
+
+    /**
+     * Locks set before this instant have auto-released (`expired()`, as a bound for a WHERE clause).
+     *
+     * Rounded UP to the second. The bound is bound as `Y-m-d H:i:s`, dropping the fraction `expired()`
+     * compares with, so between L+R and L+R+1 the release still took the lock for held — and announced it
+     * — while `locked()` already called it lifted. `locked_at` is stored to the whole second, so
+     * `locked_at >= ceil(now − R)` is exactly `expired()`'s "not yet past L+R".
+     */
+    private function lapsedBefore(): Carbon
+    {
+        return Carbon::now()->subSeconds($this->releaseAfter)->ceilSecond();
     }
 
     private function expired(Lockout $row): bool

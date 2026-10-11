@@ -12,6 +12,7 @@ use Lukk\Refresh\DatabaseRefreshTokenRepository;
 use Lukk\Support\Abilities;
 use Lukk\Support\TokenContext;
 use Lukk\Tests\ConcurrencyTestCase;
+use Lukk\Tests\Fixtures\ObservedRefreshToken;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 
@@ -93,7 +94,7 @@ it('never leaves a live token behind when a revoke races the rotation', function
             parent::__construct(null);
         }
 
-        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null): void
+        public function persist(int|string $userId, string $familyId, ?string $previousId, string $tokenHash, int $expiresAt, ?string $scope = null, ?string $amr = null): void
         {
             parent::persist($userId, $familyId, $previousId, $tokenHash, $expiresAt, $scope);
 
@@ -393,3 +394,51 @@ it('never leaves a live token behind when a logout-all lands after rotation chec
     expect(DB::table('refresh_tokens')->where('family_id', $familyId)->count())->toBe(2)
         ->and(DB::table('refresh_tokens')->where('family_id', $familyId)->whereNull('revoked_at')->count())->toBe(0);
 });
+
+it('mints a sibling for a re-consumption inside grace, and counts the family\'s live tokens right', function (string $engine) {
+    // The grace window exists for exactly this: two tabs refreshing with one token. countLiveTokens
+    // compared the datetime `expires_at` with an integer — PostgreSQL refused the query (a 500, after
+    // which the client's retry past grace revoked the whole family), MySQL counted nothing (so the
+    // fork signal could never fire), sqlite counted expired rows.
+    $user = User::factory()->create();
+    $pair = $user->startSession();
+    $first = app(RotateRefreshToken::class)($pair->refreshToken);
+    $sibling = app(RotateRefreshToken::class)($pair->refreshToken);
+
+    expect($sibling->refreshToken)->not->toBe($first->refreshToken)
+        ->and(app(RefreshTokenRepository::class)->countLiveTokens(
+            (string) DB::table('refresh_tokens')->value('family_id'),
+        ))->toBe(2);
+})->with([[fn () => ConcurrencyTestCase::engine()]]);
+
+it('survives a refresh-token model observer that poisons its own transaction', function (string $engine) {
+    // The model-event twin of the abilities case above. `persist()` writes the successor inside the
+    // rotate transaction; with `save()` an observer on a `useRefreshTokenModel` subclass ran there, and an
+    // ordinary swallowed query error left PostgreSQL's transaction aborted — so COMMIT became ROLLBACK,
+    // rotation returned a pair whose row was never written, and the client was signed out on its NEXT
+    // refresh. `saveQuietly()` runs no listener at all.
+    if ($engine !== 'pgsql') {
+        test()->markTestSkipped('25P02 is PostgreSQL-specific');
+    }
+
+    ObservedRefreshToken::$onEvent = function () {
+        try {
+            DB::select('SELECT * FROM a_table_that_does_not_exist');
+        } catch (Throwable) {
+            // Swallowed, as an auditing observer guarding a flaky store would.
+        }
+    };
+    Lukk\Lukk::useRefreshTokenModel(ObservedRefreshToken::class);
+
+    try {
+        $pair = User::factory()->create()->startSession();
+        $before = DB::table('refresh_tokens')->count();
+        $rotated = app(RotateRefreshToken::class)($pair->refreshToken);
+
+        expect(DB::table('refresh_tokens')->count())->toBe($before + 1)
+            ->and(app(RotateRefreshToken::class)($rotated->refreshToken)->accessToken)->toBeString();
+    } finally {
+        ObservedRefreshToken::$onEvent = null;
+        Lukk\Lukk::$refreshTokenModel = null;
+    }
+})->with([[fn () => ConcurrencyTestCase::engine()]]);

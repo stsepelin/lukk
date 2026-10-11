@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Closure;
 use Illuminate\Auth\Passwords\PasswordBroker;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\CanResetPassword;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Support\Facades\Schema;
+use Lukk\Actions\Concerns\ReadsPasswordBroker;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
@@ -50,6 +52,8 @@ use Lukk\Lukk;
  */
 class DeleteAccount
 {
+    use ReadsPasswordBroker;
+
     public function __construct(
         private readonly RefreshTokenRepository $tokens,
         private readonly RevokeAllSessions $revokeAllSessions,
@@ -77,7 +81,11 @@ class DeleteAccount
 
         ($this->revokeAllSessions)($userId);
 
-        $this->tokens->transaction(function () use ($user, $userId, $identifier): void {
+        // Every connection the erasure writes to, nested so a shared one becomes a savepoint: the token
+        // store's (which may be a `useRefreshTokenModel` connection of its own), and outside it the
+        // default one (passkeys, lockouts) and the broker's. Opening only the token store's left the
+        // others in autocommit, so a disposal that threw kept the user and lost their credentials.
+        $this->acrossConnections(fn () => $this->tokens->transaction(function () use ($user, $userId, $identifier): void {
             event(new AccountDeleting($user, $this->guard));
 
             $this->tokens->deleteForUser($userId);
@@ -85,36 +93,35 @@ class DeleteAccount
             // Guarded on the TABLE, not on the feature flag. A feature switched off after use leaves
             // its rows behind, and those rows are still personal data — a passkey carries a
             // human-chosen device name and a last-used timestamp. An install that never published
-            // the migration has no table, and that is the only case worth skipping.
-            if ($this->tableExists('passkeys')) {
-                $this->passkeys->deleteForUser($userId);
-            }
+            // the migration has no table — which the database store answers itself, so a store
+            // that is not that table (a rebound repository) is erased too.
+            $this->passkeys->deleteForUser($userId);
 
             // All THREE key spaces a single account occupies. The raw identifier is never one of
             // them — `LoginRateLimiter::lockoutSubject()` prefixes `id:` for a resolvable account
             // and `idn:` for one that resolves to nothing — so an earlier sweep keyed on the raw
             // value matched no real row at all, and only looked correct because its test hand-wrote
             // a subject that bypassed the derivation. `prune()` never removes a held lock at any
-            // age, so anything missed here is permanent.
-            if ($this->tableExists('lukk_lockouts')) {
-                $this->lockouts->forget([
-                    // id:<userId> — login. (The identifier argument is unused when a user is passed.)
-                    LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
-                    (string) $userId,                                         // <userId>      — confirm / two-factor
-                    $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:<normalized>
-                ], $this->guard);
-            }
+            // age, so anything missed here is permanent. An unpublished table is the database
+            // store's to answer, so a rebound store is erased too.
+            $this->lockouts->forget([
+                // id:<userId> — login. (The identifier argument is unused when a user is passed.)
+                LoginRateLimiter::lockoutSubject($user, ''), // @pest-mutate-ignore: EmptyStringToNotEmpty
+                (string) $userId,                                         // <userId>      — confirm / two-factor
+                $identifier === null ? '' : LoginRateLimiter::lockoutSubject(null, $identifier), // idn:sha256:<digest>
+                $identifier === null ? '' : LoginRateLimiter::legacyLockoutSubject($identifier), // idn:<normalized>, written before 0.7
+            ], $this->guard);
 
             // The password broker's own table. Laravel does not garbage-collect it by default
             // (`deleteExpired` is not scheduled), so a pending reset row keeps a plaintext email
             // address of someone who asked to be forgotten for as long as the table lives.
-            // Guarded on the TABLE, not on `features.password_reset` — the same rule as the passkey
-            // and lockout sweeps three lines up, and it was the one sweep that broke it. Switching
+            // Guarded on the TABLE, not on `features.password_reset` — the rule the passkey and
+            // lockout stores apply to themselves, and it was the one sweep that broke it. Switching
             // the feature off does not delete the rows it already wrote, and this row is the single
             // artifact holding a PLAINTEXT email address of someone who asked to be forgotten. An
             // install that never ran the broker's migration has no table, and that is the only case
             // worth skipping.
-            if ($user instanceof CanResetPassword && $this->tableExists($this->passwordResetTable())) {
+            if ($user instanceof CanResetPassword && $this->resetTableExists()) {
                 /** @var PasswordBroker $broker */
                 $broker = Password::broker($this->passwordBroker);
                 $broker->deleteToken($user);
@@ -124,45 +131,28 @@ class DeleteAccount
             // An app that anonymizes instead of deleting must clear them itself — the callback is
             // the only thing that knows the row survives, so it is the only thing that can.
             $this->disposeOf($user);
-        });
+        }));
 
         event(new AccountDeleted($userId, $identifier, $this->guard));
     }
 
     /**
-     * Deliberately NOT memoized.
+     * Run `$callback` inside a transaction on the broker's connection and the default one. The same
+     * connection named twice nests as a savepoint.
      *
-     * A static cache looked free — schema state, on a rare path — but it is answered once per
-     * PROCESS: a worker that started before a migration keeps saying "no such table" and silently
-     * skips erasing those rows, which is the one failure mode this method exists to prevent. It also
-     * leaks between tests in a shared process. Two cheap queries on an irreversible operation is not
-     * a cost worth that.
+     * @param  Closure(): void  $callback
      */
-    private function tableExists(string $table): bool
+    private function acrossConnections(Closure $callback): void
     {
-        return Schema::hasTable($table);
-    }
+        $broker = $this->brokerConnection();
 
-    /**
-     * The table the configured broker actually writes to.
-     *
-     * Not hardcoded `password_reset_tokens`: a broker may name its own (`lukk.password_reset.broker`
-     * pointing at one with `'table' => 'lukk_password_resets'` is exactly the setup the sibling
-     * regression test uses), and guarding on the wrong name would skip a sweep that had work to do.
-     */
-    private function passwordResetTable(): string
-    {
-        // The casts only state types: a broker name only reaches a config key, where null and '' read
-        // the same, and a table name from config is a string.
-        $broker = $this->passwordBroker ?? (string) config('auth.defaults.passwords'); // @pest-mutate-ignore: RemoveStringCast
-
-        return (string) (config("auth.passwords.{$broker}.table") ?? 'password_reset_tokens'); // @pest-mutate-ignore: RemoveStringCast
+        DB::connection($broker)->transaction(fn () => DB::connection()->transaction($callback));
     }
 
     /**
      * Run the disposal inside a transaction on the USER's own connection.
      *
-     * The surrounding transaction belongs to lukk's connection. When the provider model lives on a
+     * The surrounding transactions cover lukk's own connections. When the provider model lives on a
      * different one — identities in a shared directory database, application tables local — the
      * disposal ran with no transaction at all: it committed the moment it executed, so a rollback
      * afterwards restored the refresh tokens, passkeys, lockouts and reset row around a user that
