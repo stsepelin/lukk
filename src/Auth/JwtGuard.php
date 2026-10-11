@@ -7,13 +7,12 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
-use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
+use Lukk\Support\SubjectColumn;
 use Lukk\Support\VerifiedToken;
 
 /**
@@ -55,11 +54,11 @@ class JwtGuard
             return null;
         }
 
-        if (! $this->couldBeAKey($claims->sub)) {
+        if (! $this->couldName($claims->sub)) {
             return null;
         }
 
-        $user = $this->retrieve($claims->sub);
+        $user = $this->users->retrieveById($claims->sub);
 
         if ($user === null) {
             return null;
@@ -85,116 +84,33 @@ class JwtGuard
     }
 
     /**
-     * Whether `sub` could be the primary key of this guard's user model at all.
+     * Whether `sub` could name a user at all, decided BEFORE the lookup.
      *
-     * lukk mints `sub` from a real key, but a co-issuer sharing the secret (the verify-only topology) can
-     * put anything there, and PostgreSQL types the lookup's parameter against the column: `"admin"` or a
-     * value past bigint against an integer key is SQLSTATE 22P02/22003 — a 500 on every authenticated
-     * route for that token, where a `sub` naming no user is a 401. Refused before the query instead.
-     * Only for an Eloquent provider whose model looks the subject up by an auto-incrementing integer
-     * primary key — the one shape whose column type lukk can know. `retrieveById()` queries
-     * `getAuthIdentifierName()`, not the primary key, so an integer key says nothing when the identifier
-     * is another column (a public UUID); and `$keyType` defaults to `'int'`, so on a model that only
-     * switched `$incrementing` off it is a leftover rather than a statement about a string column.
-     * Anything else is the provider's to answer.
+     * lukk mints `sub` from a real identifier, but a co-issuer sharing the secret (the verify-only topology)
+     * can put anything there.
+     *
+     * - A NUL is refused for every provider: pdo_pgsql passes a bound string as a C string, so
+     *   `alice\0x` looked up `alice`.
+     * - For an Eloquent provider, the subject must be a value the identifier COLUMN's type can hold
+     *   (`SubjectColumn`, from the schema): otherwise PostgreSQL refuses the parameter with 22P02/22003, a
+     *   500 where a subject naming no user is a 401. Deciding it here, rather than reading a failed lookup
+     *   afterwards, runs no failing statement — nothing to abort in a caller's transaction — and leaves a
+     *   failure the APPLICATION causes (a scope with a mistyped binding, a mistyped `$with` relation) the
+     *   reported 500 it is. Interpreting the exception instead was tried four ways, and each one hid an
+     *   outage as a 401 or brought the 500 back for some other model shape.
+     * - Any other provider gets the subject as before: there is no column lukk could read.
      */
-    private function couldBeAKey(mixed $sub): bool
+    private function couldName(mixed $sub): bool
     {
+        if (is_string($sub) && str_contains($sub, "\0")) {
+            return false;
+        }
+
         if (! $this->users instanceof EloquentUserProvider) {
             return true;
         }
 
-        $model = $this->users->createModel();
-
-        if ($model->getAuthIdentifierName() !== $model->getKeyName()
-            || ! $model->getIncrementing()
-            || ! in_array($model->getKeyType(), ['int', 'integer'], true)) {
-            return true;
-        }
-
-        // An int already is one; a string must be a canonical integer within PHP's (= bigint's) range.
-        return is_int($sub) || (is_string($sub) && is_int(filter_var($sub, FILTER_VALIDATE_INT)));
-    }
-
-    /**
-     * The provider's lookup, with a subject the column's TYPE refuses read as no user.
-     *
-     * `couldBeAKey()` settles the one shape lukk can be sure of without a query; it cannot see every
-     * integer column — a non-incrementing Snowflake key that kept `$keyType = 'int'`, an auth identifier
-     * that is another integer column, a 32-bit `increments('id')` handed a subject past int4. PostgreSQL
-     * refuses such a parameter with 22P02 (not a number) or 22003 (out of range), which surfaced as a 500;
-     * it is a subject naming no user, so a 401. MySQL and SQLite coerce instead and simply match nothing.
-     *
-     * On PostgreSQL a failed statement aborts the transaction around it, and its COMMIT then silently
-     * rolls back. Inside an application's transaction the Eloquent lookup therefore runs in a nested
-     * one — a savepoint on the model's connection — so the refusal undoes only itself.
-     */
-    private function retrieve(mixed $sub): ?Authenticatable
-    {
-        $eloquent = $this->users instanceof EloquentUserProvider ? $this->users : null;
-        $connection = $eloquent?->createModel()->getConnection();
-        $savepoint = $connection !== null && $connection->transactionLevel() > 0 ? $connection : null;
-        $savepointed = $savepoint?->getName();
-
-        try {
-            return $savepoint !== null
-                ? $savepoint->transaction(fn () => $this->users->retrieveById($sub))
-                : $this->users->retrieveById($sub);
-        } catch (QueryException $e) {
-            if (! self::refusedTheSubject($e, $sub, $eloquent, $savepointed)) {
-                throw $e;
-            }
-
-            return null;
-        }
-    }
-
-    /**
-     * Whether a failed lookup is the subject's own type refusal, and swallowing it leaves nothing aborted.
-     *
-     * - SQLSTATE 22P02 or 22003, with the subject among the statement's bindings.
-     * - For an Eloquent provider, the failing statement IS the stock lookup of the subject — the very SQL
-     *   `EloquentUserProvider::retrieveById()` issues (see `lookupSql()`), compared exactly. That holds for
-     *   a schema-qualified, aliased or prefixed table, global scopes, soft deletes and a `withQuery()`
-     *   callback, and structurally excludes every other statement: an eager-loaded `$with` relation (a
-     *   `where … in`), a scope's own query, a `retrieved` listener. Those fail for EVERY user, and read as
-     *   "no user" they were a 401 for everybody — an outage nobody was told about. A provider subclass
-     *   whose `retrieveById()` issues different SQL gets its refusal rethrown (the 500, reported) rather
-     *   than guessed at. A provider that is not Eloquent has no lookup to rebuild: the bindings decide.
-     * - It ran in the lookup's own savepoint, or on a connection holding no transaction. A provider that
-     *   looks up on a connection other than its model's is not covered by that savepoint; inside that
-     *   connection's own transaction its refusal is rethrown, never left behind a 401.
-     *
-     * (A method of its own also because PHPStan sees only the savepointed branch as able to throw.)
-     */
-    private static function refusedTheSubject(QueryException $e, mixed $sub, ?EloquentUserProvider $users, ?string $savepointed): bool
-    {
-        if (! in_array($e->errorInfo[0] ?? null, ['22P02', '22003'], true) || ! is_scalar($sub)) {
-            return false;
-        }
-
-        $bound = array_map(fn (mixed $value): ?string => is_scalar($value) ? (string) $value : null, $e->getBindings());
-
-        if (! in_array((string) $sub, $bound, true) || ($users !== null && $e->getSql() !== self::lookupSql($users, $sub))) {
-            return false;
-        }
-
-        return $e->getConnectionName() === $savepointed
-            || DB::connection($e->getConnectionName())->transactionLevel() === 0;
-    }
-
-    /**
-     * The SQL the stock `EloquentUserProvider::retrieveById()` runs for this subject: `newModelQuery()`
-     * (the model's query with its global scopes, then the provider's `withQuery()` callback), the
-     * identifier constraint, and the `limit 1` that `first()` adds. Built, never run.
-     */
-    private static function lookupSql(EloquentUserProvider $users, mixed $sub): string
-    {
-        $model = $users->createModel();
-        $query = $model->newQuery();
-        with($query, $users->getQueryCallback());
-
-        return $query->where($model->getAuthIdentifierName(), $sub)->limit(1)->toSql();
+        return (is_int($sub) || is_string($sub)) && SubjectColumn::admits($this->users->createModel(), $sub);
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool

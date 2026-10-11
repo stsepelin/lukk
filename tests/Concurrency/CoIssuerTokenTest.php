@@ -5,12 +5,14 @@ declare(strict_types=1);
 use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Lukk\Auth\JwtGuard;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Contracts\TokenVerifier;
@@ -19,6 +21,7 @@ use Lukk\Tests\ConcurrencyTestCase;
 use Lukk\Tests\Fixtures\EagerThingsUser;
 use Lukk\Tests\Fixtures\IntKeyUser;
 use Lukk\Tests\Fixtures\LegacyIdUser;
+use Lukk\Tests\Fixtures\ReferringUser;
 use Lukk\Tests\Fixtures\SnowflakeUser;
 use Lukk\Tests\Fixtures\User;
 
@@ -90,11 +93,11 @@ it('still resolves a numeric subject on an integer key', function () {
 });
 
 /*
- * The key-type check is a fast path, not the whole answer: lukk cannot know every integer column. A model
- * whose key is not incrementing but is still an integer (Snowflake ids), one whose auth identifier is
- * another integer column, and the stock 32-bit `increments('id')` with a subject past int4 all reached
- * PostgreSQL with a value its parameter type refuses — 22P02/22003, a 500 — where a `sub` naming no user
- * is a 401.
+ * A model's declarations do not say what the identifier column holds: a model whose key is not
+ * incrementing but is still an integer (Snowflake ids), one whose auth identifier is another integer column,
+ * and the stock 32-bit `increments('id')` with a subject past int4 all reached PostgreSQL with a value its
+ * parameter type refuses — 22P02/22003, a 500 — where a `sub` naming no user is a 401. The guard reads the
+ * column's type from the schema instead, and refuses such a subject before any lookup.
  */
 dataset('integer columns lukk cannot see', [
     'a non-incrementing bigint key (Snowflake)' => [
@@ -178,40 +181,9 @@ it('reports a refusal in another statement of the lookup — an eager-loaded rel
         ->toThrow(QueryException::class, '22P02');
 });
 
-it('does not swallow a refusal on a connection its savepoint did not cover', function () {
-    if (ConcurrencyTestCase::engine() !== 'pgsql') {
-        test()->markTestSkipped('MySQL coerces the value instead of refusing it, so no statement fails');
-    }
-
-    // A provider may look up on a connection other than its model's. The savepoint is taken on the
-    // MODEL's connection; a refusal on the other one, inside that one's own transaction, leaves it aborted
-    // — so it is reported, never answered as no user.
-    config(['database.connections.other' => ConcurrencyTestCase::config(ConcurrencyTestCase::engine())]);
-    Schema::create('snowflake_users', fn (Blueprint $t) => $t->unsignedBigInteger('id')->primary());
-    $provider = new class(app('hash'), SnowflakeUser::class) extends EloquentUserProvider
-    {
-        public function retrieveById($identifier)
-        {
-            return SnowflakeUser::on('other')->where('id', $identifier)->first();
-        }
-    };
-
-    DB::transaction(function () use ($provider) {
-        DB::connection('other')->beginTransaction();
-
-        try {
-            expect(fn () => coIssuerGuard($provider, 'admin'))->toThrow(QueryException::class);
-        } finally {
-            DB::connection('other')->rollBack();
-        }
-    });
-});
-
 /*
- * Whether a refusal is the lookup OF THE SUBJECT is decided by the statement itself: the SQL the stock
- * provider issues for it, however the model names its table. A text match on `from "<table>"` missed a
- * schema-qualified table (Laravel prefixes the LAST part: `"public"."app_snow_s"`) and an aliased one —
- * back to a 500 — and took a same-table eager load binding the subject for the lookup — a 401 for everyone.
+ * The column is found however the model names its table: schema-qualified (Laravel prefixes the LAST part:
+ * `"public"."app_snow_s"`), aliased, on a prefixed connection.
  */
 dataset('table spellings', [
     'schema-qualified' => ['public.snow_s', null, 'snow_s'],
@@ -238,8 +210,10 @@ it('answers a refused subject as no user however the model spells its table', fu
         }
     };
     $model::$spelling = $table;
+    DB::table($physical)->insert(['id' => 5]);
 
-    expect(coIssuerGuard($model::class, 'admin'))->toBeNull();
+    expect(coIssuerGuard($model::class, 'admin'))->toBeNull()
+        ->and(coIssuerGuard($model::class, '5')?->getKey())->toBe(5);
 })->with('table spellings');
 
 it('reports a same-table eager load that binds the subject, rather than reading it as no user', function () {
@@ -275,6 +249,133 @@ it('reports a same-table eager load that binds the subject, rather than reading 
     DB::table('managed_users')->insert(['handle' => 'alice']);
 
     expect(fn () => coIssuerGuard($model::class, 'alice'))->toThrow(QueryException::class, '22P02');
+});
+
+it('refuses a subject that is no UUID for a uuid identifier, and resolves one that is', function () {
+    Schema::create('uuid_users', fn (Blueprint $t) => $t->uuid('id')->primary());
+    $model = new class extends SnowflakeUser
+    {
+        protected $table = 'uuid_users';
+
+        protected $keyType = 'string';
+    };
+    DB::table('uuid_users')->insert(['id' => $uuid = (string) Str::uuid()]);
+
+    expect(coIssuerGuard($model::class, 'admin'))->toBeNull()
+        ->and(coIssuerGuard($model::class, $uuid)?->getKey())->toBe($uuid)
+        ->and(coIssuerGuard($model::class, strtoupper($uuid))?->getKey())->toBe($uuid);
+});
+
+/*
+ * A self-relation in the lookup (a `withCount`/`whereHas` scope, a `withQuery()` callback) gets a
+ * `laravel_reserved_N` alias from a process-wide counter, so no rebuilt SQL ever matched the failing
+ * statement: those installs were back to a 500. Decided before the lookup, it no longer matters.
+ */
+dataset('self-relations in the lookup', [
+    'a withCount scope' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends ReferringUser
+    {
+        protected static function booted(): void
+        {
+            self::addGlobalScope('referrals', fn ($query) => $query->withCount('referrals'));
+        }
+    }))],
+    'a whereHas scope' => [fn () => new EloquentUserProvider(app('hash'), get_class(new class extends ReferringUser
+    {
+        protected static function booted(): void
+        {
+            self::addGlobalScope('referrals', fn ($query) => $query->whereHas('referrals'));
+        }
+    }))],
+    'a withQuery() callback' => [fn () => (new EloquentUserProvider(app('hash'), ReferringUser::class))
+        ->withQuery(fn ($query) => $query->whereHas('referrals'))],
+]);
+
+it('refuses a bad subject and resolves a real one through a self-relation in the lookup', function (Closure $provider) {
+    Schema::create('referring_users', function (Blueprint $t) {
+        $t->unsignedBigInteger('id')->primary();
+        $t->unsignedBigInteger('referrer_id')->nullable();
+    });
+    DB::table('referring_users')->insert([['id' => 1, 'referrer_id' => null], ['id' => 2, 'referrer_id' => 1]]);
+    $users = $provider();
+
+    expect(coIssuerGuard($users, 'admin'))->toBeNull()
+        ->and(coIssuerGuard($users, '1')?->getKey())->toBe(1);
+})->with('self-relations in the lookup');
+
+it('reports a scope whose own binding the column refuses, rather than reading it as no user', function () {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('MySQL coerces the value instead of refusing it, so no statement fails');
+    }
+
+    // A tenant scope comparing a bigint column with 'acme' fails EVERY lookup: a broken application, and
+    // read as "no user" it was a 401 for everybody — an outage nobody was told about. It is the 500.
+    Schema::create('tenant_users', function (Blueprint $t) {
+        $t->unsignedBigInteger('id')->primary();
+        $t->unsignedBigInteger('tenant_id');
+    });
+    DB::table('tenant_users')->insert(['id' => 1, 'tenant_id' => 9]);
+    $model = new class extends SnowflakeUser
+    {
+        protected $table = 'tenant_users';
+
+        protected static function booted(): void
+        {
+            self::addGlobalScope('tenant', fn ($query) => $query->where('tenant_id', 'acme'));
+        }
+    };
+
+    expect(fn () => coIssuerGuard($model::class, '1'))->toThrow(QueryException::class, '22P02');
+});
+
+it('refuses a subject carrying a NUL, which PostgreSQL would have truncated to another account', function () {
+    // pdo_pgsql passes a bound string as a C string: `alice\0x` looked up `alice`.
+    Schema::create('handle_users', function (Blueprint $t) {
+        $t->id();
+        $t->string('handle')->unique();
+    });
+    DB::table('handle_users')->insert(['handle' => 'alice']);
+    $model = new class extends SnowflakeUser
+    {
+        protected $table = 'handle_users';
+
+        public function getAuthIdentifierName(): string
+        {
+            return 'handle';
+        }
+    };
+
+    expect(coIssuerGuard($model::class, 'alice')?->getAuthIdentifier())->toBe('alice')
+        ->and(coIssuerGuard($model::class, "alice\0x"))->toBeNull();
+});
+
+it('leaves the caller\'s transaction usable when reading the column type fails', function () {
+    if (ConcurrencyTestCase::engine() !== 'pgsql') {
+        test()->markTestSkipped('only PostgreSQL aborts a transaction on a failed statement');
+    }
+
+    // The catalog read must never cost the caller its transaction: a failed statement aborts it on
+    // PostgreSQL. Made to fail for real here — a division by zero ON the connection — and then refused.
+    Schema::create('snowflake_users', fn (Blueprint $t) => $t->unsignedBigInteger('id')->primary());
+    DB::table('snowflake_users')->insert(['id' => 7]);
+    DB::connection()->beforeExecuting(function (string $sql, array $bindings, Connection $connection) {
+        if (str_contains($sql, 'pg_attribute') || str_contains($sql, 'information_schema.columns')) {
+            try {
+                $connection->getPdo()->exec('select 1/0');
+            } catch (PDOException) {
+            }
+
+            throw new RuntimeException('catalog unavailable');
+        }
+    });
+
+    $resolved = DB::transaction(function () {
+        DB::table('users')->insert(['email' => 'inside@example.com', 'password' => 'x']);
+        $user = coIssuerGuard(SnowflakeUser::class, '7');
+
+        return [$user?->getKey(), DB::table('users')->where('email', 'inside@example.com')->count()];
+    });
+
+    expect($resolved)->toBe([7, 1]);
 });
 
 function coIssuerFamilyIsLive(string $refreshToken): bool

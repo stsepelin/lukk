@@ -7,6 +7,7 @@ namespace Lukk\Tests;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Lukk\LukkServiceProvider;
+use Lukk\Support\SubjectColumn;
 use Lukk\Tests\Fixtures\User;
 use Orchestra\Testbench\TestCase as Orchestra;
 use PDO;
@@ -91,6 +92,9 @@ class ConcurrencyTestCase extends Orchestra
     protected function setUp(): void
     {
         parent::setUp();
+
+        // The column types are kept per process; every test here rebuilds the schema.
+        SubjectColumn::flush();
 
         if (! self::available(self::engine())) {
             $this->markTestSkipped('engine not reachable — run `docker compose up -d` and set LUKK_TEST_PGSQL/LUKK_TEST_MYSQL');
