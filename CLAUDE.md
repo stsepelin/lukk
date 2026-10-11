@@ -4,6 +4,11 @@ Minimal-dependency, first-party JWT auth package for Laravel 12/13 (`Lukk\` name
 
 User-facing docs live in the separate **[lukk-docs](https://github.com/stsepelin/lukk-docs)** repo (a unified VitePress site covering both this package and the lukk-js client, published to stsepelin.github.io/lukk-docs). Edit docs there — this repo no longer has a `docs/` directory. The `architecture` page has the design rationale, standards mapping, and security checklist; the `customization` page has the recipes.
 
+
+## Reviews — [`REVIEW.md`](./REVIEW.md) is mandatory
+
+Every review applies [`REVIEW.md`](./REVIEW.md), and that includes subagent reviews, `/code-review`, and the code and security reviews run before a commit. A review maps the change to that file's specification table (§4) and cites the clause each finding rests on. It confirms findings by running them, checks that the new tests fail on the parent commit, and never reports a deliberate deviation (§6) as a defect. Paste or reference `REVIEW.md` in every review prompt you give a subagent.
+
 ## Commands
 
 ```bash
