@@ -64,7 +64,8 @@ format characters that only the PHP scan sees. PostgreSQL (`standard_conforming_
 SELECT id, email FROM users WHERE email ~ '[\u0001-\u001F\u007F-\u00A0\u00AD\u034F\u0488-\u0489\u0600-\u0605\u061C\u06DD\u070F\u0890-\u0891\u08E2\u1680\u180E\u1ABE\u2000-\u200B\u200E-\u200F\u2028-\u202F\u205F-\u2064\u2066-\u206F\u20DD-\u20E0\u20E2\u20E4\u3000\uA670-\uA672\uFEFF\uFFF9-\uFFFB\U000110BD\U000110CD\U00013430-\U0001343F\U0001BCA0-\U0001BCA3\U0001D173-\U0001D17A\U000E0001\U000E0020-\U000E007F]';
 ```
 
-MySQL 8.0.4+ (ICU regular expressions):
+MySQL 8.0.4+ (ICU regular expressions; with `NO_BACKSLASH_ESCAPES` in `sql_mode` the doubled backslashes
+reach the regex as written and it fails with error 3697 — run it in a session without that mode, or halve them):
 
 ```sql
 SELECT id, email FROM users WHERE email REGEXP '[\\x{0000}-\\x{001F}\\x{007F}-\\x{00A0}\\x{00AD}\\x{034F}\\x{0488}-\\x{0489}\\x{0600}-\\x{0605}\\x{061C}\\x{06DD}\\x{070F}\\x{0890}-\\x{0891}\\x{08E2}\\x{1680}\\x{180E}\\x{1ABE}\\x{2000}-\\x{200B}\\x{200E}-\\x{200F}\\x{2028}-\\x{202F}\\x{205F}-\\x{2064}\\x{2066}-\\x{206F}\\x{20DD}-\\x{20E0}\\x{20E2}\\x{20E4}\\x{3000}\\x{A670}-\\x{A672}\\x{FEFF}\\x{FFF9}-\\x{FFFB}\\x{110BD}\\x{110CD}\\x{13430}-\\x{1343F}\\x{1BCA0}-\\x{1BCA3}\\x{1D173}-\\x{1D17A}\\x{E0001}\\x{E0020}-\\x{E007F}]';
@@ -122,12 +123,12 @@ the rotation's row lock: read a value already in memory, never query.
   and per-session `amr` / `authenticated_at`.
 - With `Lukk::authenticateUsing()` reading a field other than `lukk.username`, the IP-independent login
   bucket is skipped (it was one bucket for everybody). Point `lukk.username` at your field to keep it.
-- A `lukk-jwt` guard whose Eloquent model is looked up by an auto-incrementing integer primary key (the
-  stock `id`: `getAuthIdentifierName()` is the key name, `$incrementing` is on, `$keyType` is `int`) answers
-  401, without a query, for a `sub` that is not an integer — a co-issuer minting non-numeric subjects
-  against such a guard was a 500 on PostgreSQL. A model whose auth identifier is another column (a public
-  UUID) or whose key is not incrementing (a string key that kept the default `$keyType`) is passed to its
-  provider as before.
+- A `lukk-jwt` guard answers 401, not a PostgreSQL 500, for a `sub` its user column's type refuses
+  (SQLSTATE 22P02 or 22003): `"admin"` against any integer column, or a number past a 32-bit
+  `increments('id')`. A co-issuer minting non-numeric subjects hit this. For the stock auto-incrementing
+  `id` a non-integer `sub` is refused without a query; for any other shape the refused lookup is read as
+  no user. Inside a transaction of yours, an Eloquent provider's lookup runs in a savepoint so the refusal
+  does not abort your transaction; a non-Eloquent provider's refusal there is rethrown, as before.
 - `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;
   `DELETE /auth/sessions` now also denylists the presenting token when it names no family of lukk's.
 

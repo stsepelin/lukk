@@ -7,7 +7,9 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
@@ -57,7 +59,7 @@ class JwtGuard
             return null;
         }
 
-        $user = $this->users->retrieveById($claims->sub);
+        $user = $this->retrieve($claims->sub);
 
         if ($user === null) {
             return null;
@@ -112,6 +114,49 @@ class JwtGuard
 
         // An int already is one; a string must be a canonical integer within PHP's (= bigint's) range.
         return is_int($sub) || (is_string($sub) && is_int(filter_var($sub, FILTER_VALIDATE_INT)));
+    }
+
+    /**
+     * The provider's lookup, with a subject the column's TYPE refuses read as no user.
+     *
+     * `couldBeAKey()` settles the one shape lukk can be sure of without a query; it cannot see every
+     * integer column — a non-incrementing Snowflake key that kept `$keyType = 'int'`, an auth identifier
+     * that is another integer column, a 32-bit `increments('id')` handed a subject past int4. PostgreSQL
+     * refuses such a parameter with 22P02 (not a number) or 22003 (out of range), which surfaced as a 500;
+     * it is a subject naming no user, so a 401. MySQL and SQLite coerce instead and simply match nothing.
+     *
+     * On PostgreSQL a failed statement aborts the transaction around it, and its COMMIT then silently
+     * rolls back. Inside an application's transaction the Eloquent lookup therefore runs in a nested
+     * one — a savepoint — so the refusal undoes only itself. A provider that is not Eloquent names no
+     * connection to take one on: its refusal inside a transaction is rethrown, never swallowed.
+     */
+    private function retrieve(mixed $sub): ?Authenticatable
+    {
+        $connection = $this->users instanceof EloquentUserProvider ? $this->users->createModel()->getConnection() : null;
+        $isolated = $connection !== null && $connection->transactionLevel() > 0;
+
+        try {
+            return $isolated
+                ? $connection->transaction(fn () => $this->users->retrieveById($sub))
+                : $this->users->retrieveById($sub);
+        } catch (QueryException $e) {
+            if (! self::leavesNothingAborted($e, $isolated)) {
+                throw $e;
+            }
+
+            return null;
+        }
+    }
+
+    /**
+     * Whether a failed lookup is a refused subject that can be answered as no user: 22P02/22003, raised in
+     * the lookup's own savepoint or outside any transaction. (A method of its own because PHPStan sees only
+     * the savepointed branch as able to throw; a provider's `retrieveById()` can throw just the same.)
+     */
+    private static function leavesNothingAborted(QueryException $e, bool $isolated): bool
+    {
+        return in_array($e->errorInfo[0] ?? null, ['22P02', '22003'], true)
+            && ($isolated || DB::connection($e->getConnectionName())->transactionLevel() === 0);
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool
