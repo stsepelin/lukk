@@ -81,6 +81,28 @@ it('does not let trailing whitespace split the per-account login bucket', functi
     $this->postJson('/auth/login', ['email' => '  trim@y.com', 'password' => 'bad'])->assertStatus(429);
 });
 
+it('keeps a joiner or keycap respelling on the account bucket it was accepted into', function (string $respelled) {
+    // `Identifier` accepts U+200C/U+200D/U+20E3 (Persian, emoji sequences), so they reach the throttle
+    // instead of a 422. MySQL's collation gives them no weight, so the database may resolve the respelling
+    // to the account: the fold strips them, and the spent bucket answers it too.
+    config(['lukk.rate_limits.login.account_max_attempts' => 2, 'lukk.rate_limits.login.max_attempts' => 100]);
+    User::factory()->create(['email' => 'joiner@y.com']);
+
+    foreach (['10.0.0.1', '10.0.0.2'] as $ip) {
+        app('auth')->forgetGuards();
+        $this->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->postJson('/auth/login', ['email' => 'joiner@y.com', 'password' => 'bad'])->assertStatus(422);
+    }
+
+    app('auth')->forgetGuards();
+    $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.3'])
+        ->postJson('/auth/login', ['email' => $respelled, 'password' => 'bad'])->assertStatus(429);
+})->with([
+    'zero-width joiner' => ["join\u{200D}er@y.com"],
+    'zero-width non-joiner' => ["join\u{200C}er@y.com"],
+    'combining enclosing keycap' => ["joiner\u{20E3}@y.com"],
+]);
+
 beforeEach(function () {
     Lukk::$rateLimitKeyUsing = null;
 });

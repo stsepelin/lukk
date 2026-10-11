@@ -132,6 +132,10 @@ it('folds every spelling the database resolves to one account onto one key', fun
     'combining grapheme joiner' => ["victim\u{034F}@example.com"],
     'variation selector' => ["victim\u{FE0F}@example.com"],
     'enclosing mark' => ["victim\u{20DD}@example.com"],
+    // Accepted by `Identifier` (spelling needs them), so the fold is what keeps them on one bucket.
+    'zero-width joiner' => ["victim\u{200D}@example.com"],
+    'zero-width non-joiner' => ["victim\u{200C}@example.com"],
+    'combining enclosing keycap' => ["victim\u{20E3}@example.com"],
     'combining accent' => ["vi\u{0301}ctim@example.com"],
     'trailing ideographic space' => ["victim@example.com\u{3000}"],
     'leading no-break space' => ["\u{00A0}victim@example.com"],

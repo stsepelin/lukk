@@ -676,6 +676,9 @@ class Lukk
      * token resolving to the row with the same id in the OTHER — a `users` password signing in as the
      * `admins` row sharing its id — with no error anywhere. Refused rather than reconciled: either choice
      * of table silently changes who a working install's tokens resolve to.
+     *
+     * Two provider NAMES over one source (`api_users` and `users`, both Eloquent over `App\Models\User`) are
+     * the same users, so only the sources are compared — see `readSameUsers()`.
      */
     private static function assertDefaultGuardProviderAgrees(string $default): void
     {
@@ -688,7 +691,7 @@ class Lukk
         $resolves = $guard['provider'] ?? config('auth.defaults.provider');
         $signsIn = self::userProviderName($default);
 
-        if ($resolves === null || $resolves === '' || $resolves === $signsIn) {
+        if ($resolves === null || $resolves === '' || $resolves === $signsIn || self::readSameUsers((string) $resolves, $signsIn)) {
             return;
         }
 
@@ -699,6 +702,38 @@ class Lukk
             ."them in against [{$signsIn}] (lukk.user_provider) — a password checked in one would mint a token "
             .'for the account with the same id in the other. Point both at the same provider.'
         );
+    }
+
+    /**
+     * Whether two `auth.providers` entries read the same users: the same driver over the same Eloquent
+     * model, or the same database table on the same connection. A driver lukk does not know is compared
+     * whole — any difference in its config may be a different source. Anything missing (an unconfigured
+     * provider, no driver, no model, no table) is not known to be the same, so the name mismatch stands.
+     */
+    private static function readSameUsers(string $first, string $second): bool
+    {
+        // An entry that is not an array has no `driver`, and so is never the same: `isset` and `??` already
+        // answer that for null or a string, so the casts only state the type for the offsets below.
+        $a = (array) config("auth.providers.{$first}"); // @pest-mutate-ignore: RemoveArrayCast
+        $b = (array) config("auth.providers.{$second}"); // @pest-mutate-ignore: RemoveArrayCast
+
+        if (! isset($a['driver']) || $a['driver'] !== ($b['driver'] ?? null)) {
+            return false;
+        }
+
+        $source = match ($a['driver']) {
+            'eloquent' => 'model',
+            'database' => 'table',
+            default => null,
+        };
+
+        if ($source === null) {
+            return $a === $b;
+        }
+
+        return isset($a[$source])
+            && $a[$source] === ($b[$source] ?? null)
+            && ($source === 'model' || ($a['connection'] ?? null) === ($b['connection'] ?? null));
     }
 
     private static function numericGuardName(string $name): string

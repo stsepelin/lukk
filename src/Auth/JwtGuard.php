@@ -89,12 +89,24 @@ class JwtGuard
      * put anything there, and PostgreSQL types the lookup's parameter against the column: `"admin"` or a
      * value past bigint against an integer key is SQLSTATE 22P02/22003 — a 500 on every authenticated
      * route for that token, where a `sub` naming no user is a 401. Refused before the query instead.
-     * Only for an Eloquent provider whose model declares an integer key — the one shape whose column
-     * type lukk can know; anything else is the provider's to answer.
+     * Only for an Eloquent provider whose model looks the subject up by an auto-incrementing integer
+     * primary key — the one shape whose column type lukk can know. `retrieveById()` queries
+     * `getAuthIdentifierName()`, not the primary key, so an integer key says nothing when the identifier
+     * is another column (a public UUID); and `$keyType` defaults to `'int'`, so on a model that only
+     * switched `$incrementing` off it is a leftover rather than a statement about a string column.
+     * Anything else is the provider's to answer.
      */
     private function couldBeAKey(mixed $sub): bool
     {
-        if (! $this->users instanceof EloquentUserProvider || ! in_array($this->users->createModel()->getKeyType(), ['int', 'integer'], true)) {
+        if (! $this->users instanceof EloquentUserProvider) {
+            return true;
+        }
+
+        $model = $this->users->createModel();
+
+        if ($model->getAuthIdentifierName() !== $model->getKeyName()
+            || ! $model->getIncrementing()
+            || ! in_array($model->getKeyType(), ['int', 'integer'], true)) {
             return true;
         }
 

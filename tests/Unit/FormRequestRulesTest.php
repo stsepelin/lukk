@@ -147,6 +147,13 @@ it('accepts the identifiers people actually have', function (string $identifier)
     'CJK' => ['用户@例子.广告'],
     'a username with an ASCII space' => ['Ada Lovelace'],
     'apostrophe' => ["o'brien@example.ie"],
+    // U+200C/U+200D are format characters (`\p{Cf}`) that spelling needs — RFC 5892 lists them as
+    // CONTEXTJ, valid in an IDN label: Persian writes `می‌خواهم` with a ZWNJ, an emoji ZWJ sequence
+    // joins its parts with a ZWJ, and a keycap emoji ends in U+20E3 (`\p{Me}`). The fold strips all
+    // three, so each still keys the account's bucket (LoginRateLimiterTest).
+    'Persian with a zero-width non-joiner' => ["\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}"],
+    'an emoji ZWJ sequence' => ["dev\u{1F469}\u{200D}\u{1F4BB}"],
+    'a keycap emoji' => ["room1\u{FE0F}\u{20E3}"],
 ]);
 
 it('leaves a missing sign-in field to the credential check, not to validation', function (string $field) {

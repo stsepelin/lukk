@@ -8,6 +8,7 @@ use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Models\RefreshToken;
 use Lukk\Support\SessionAuthentication;
 use Lukk\Tests\Fixtures\ObservedRefreshToken;
+use Lukk\Tests\Fixtures\TenantScopedRefreshToken;
 use Lukk\Tests\Fixtures\User;
 
 uses()->group('refresh');
@@ -176,4 +177,24 @@ it('refuses to report a write that did not happen', function () {
 
     expect(fn () => start()(User::factory()->create()->getKey()))
         ->toThrow(RuntimeException::class, 'lukk could not store a refresh token');
+});
+
+it('leaves a required column to the model as it is built, since no creating listener runs', function () {
+    // A `BelongsToTenant`-style trait filling `tenant_id` from `creating` no longer runs for lukk's quiet
+    // write (and a NOT NULL column then fails the insert). What still runs is the model's construction:
+    // `$attributes` defaults and a trait's `initialize…()` method — the seam UPGRADE.md documents, with no
+    // event dispatched under the rotation lock.
+    Schema::table('refresh_tokens', function ($table) {
+        $table->string('tenant_id')->nullable();
+        $table->string('tenant_from_creating')->nullable();
+    });
+    TenantScopedRefreshToken::$tenant = 'acme';
+    Lukk\Lukk::useRefreshTokenModel(TenantScopedRefreshToken::class);
+
+    $rotated = rotate()(start()(User::factory()->create()->getKey())->refreshToken);
+
+    TenantScopedRefreshToken::$tenant = null;
+    expect(DB::table('refresh_tokens')->pluck('tenant_id')->all())->toBe(['acme', 'acme'])
+        ->and(DB::table('refresh_tokens')->whereNotNull('tenant_from_creating')->exists())->toBeFalse()
+        ->and(app(RefreshTokenRepository::class)->findByHash(issuer()->hash($rotated->refreshToken)))->not->toBeNull();
 });

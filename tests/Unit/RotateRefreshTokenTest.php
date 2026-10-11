@@ -491,7 +491,14 @@ it('says what to do when the pre-read disagrees with the locked read', function 
 
 it('dates auth_time from the stored sign-in, whatever refresh_ttl is configured or missing', function (?int $refreshTtl) {
     // Once derived as `expires_at − refresh_ttl`; now stored with the family (`SessionAuthentication`), so
-    // neither the configured value nor a cached config lacking it moves the sign-in.
+    // neither the configured value nor a cached config lacking it moves the sign-in. Changed BETWEEN the
+    // sign-in and the refresh — the operator lowering `refresh_ttl` on live sessions: with the value
+    // unchanged the old derivation landed on the sign-in too, so only a change tells the two apart.
+    config(['lukk.refresh_ttl' => 7 * 86400]);
+    $signedIn = now()->getTimestamp() - 100;
+    $pair = $this->travel(-100)->seconds(fn () => start()(1));
+    $this->freezeSecond();
+
     $lukk = config('lukk');
     if ($refreshTtl === null) {
         unset($lukk['refresh_ttl']);
@@ -499,9 +506,6 @@ it('dates auth_time from the stored sign-in, whatever refresh_ttl is configured 
         $lukk['refresh_ttl'] = $refreshTtl;
     }
     config(['lukk' => $lukk]);
-    $signedIn = now()->getTimestamp() - 100;
-    $pair = $this->travel(-100)->seconds(fn () => start()(1));
-    $this->freezeSecond();
 
     expect(verifier()->verify(rotate()($pair->refreshToken)->accessToken)->auth_time)->toBe($signedIn);
 })->with(['configured' => [3600], 'default, key missing' => [null]]);

@@ -29,27 +29,60 @@ differs from `lukk.user_provider`.** Boot now throws, naming both. Sign-in check
 `lukk.user_provider` while the guard resolved tokens through the other provider, so a password from one
 table signed in as the row with the same id in the other. Point both at the same provider. Nothing
 changes for the default configuration (`users` on both sides), a guard naming no provider with
-`auth.defaults.provider` unset, or a default guard that is not `lukk-jwt`.
+`auth.defaults.provider` unset, or a default guard that is not `lukk-jwt` — nor for two provider names
+over the same users: the same `model` under the `eloquent` driver, or the same `table` and `connection`
+under `database`. A provider with any other driver boots only if its whole `auth.providers` entry is
+identical to the other's.
 
 ### Identifiers with invisible characters are refused
 
 **Low impact — check if your identifiers can contain them.** Sign-in, registration, forgot- and
 reset-password answer 422 for an identifier carrying a control character (NUL, C0, C1), a format
-character (zero-width space or joiner, soft hyphen, bidi controls), an enclosing mark, U+034F, or
-whitespace other than the ASCII space; registration's `name` refuses NUL. An account whose STORED
-identifier contains one can no longer type it to sign in — find them before upgrading (e.g.
-`WHERE email ~ '[[:cntrl:]]'` on PostgreSQL, or scan in PHP with `Lukk\Support\Identifier::INVISIBLE`).
-Combining marks and accented letters are accepted. The login-throttle fold also changed for identifiers
-containing such characters (or combining marks), so their buckets restart once; a held `idn:` lockout
-row for such an identifier is no longer reached by it.
+character (zero-width space, word joiner, soft hyphen, bidi controls), an enclosing mark, U+034F, or
+whitespace other than the ASCII space; registration's `name` refuses NUL. Combining marks, accented
+letters, U+200C ZERO WIDTH NON-JOINER and U+200D ZERO WIDTH JOINER (Persian spelling, emoji ZWJ
+sequences) and U+20E3 COMBINING ENCLOSING KEYCAP are accepted. An account whose STORED identifier
+contains a refused character can no longer type it to sign in — find them before upgrading. The
+authoritative check is the pattern lukk validates with, run in PHP (swap in your model and
+`lukk.username` column):
+
+```php
+use Illuminate\Support\Facades\DB;
+use Lukk\Support\Identifier;
+
+DB::table('users')->select(['id', 'email'])->lazyById()->each(function ($row) {
+    if (preg_match(Identifier::INVISIBLE, (string) $row->email) === 1) {
+        echo $row->id, PHP_EOL;
+    }
+});
+```
+
+In SQL, these match the same set as PCRE2 10.49's Unicode tables (Unicode 17; checked on PostgreSQL 17 and MySQL 8.4) — a later Unicode version can add
+format characters that only the PHP scan sees. PostgreSQL (`standard_conforming_strings` on, the default):
+
+```sql
+SELECT id, email FROM users WHERE email ~ '[\u0001-\u001F\u007F-\u00A0\u00AD\u034F\u0488-\u0489\u0600-\u0605\u061C\u06DD\u070F\u0890-\u0891\u08E2\u1680\u180E\u1ABE\u2000-\u200B\u200E-\u200F\u2028-\u202F\u205F-\u2064\u2066-\u206F\u20DD-\u20E0\u20E2\u20E4\u3000\uA670-\uA672\uFEFF\uFFF9-\uFFFB\U000110BD\U000110CD\U00013430-\U0001343F\U0001BCA0-\U0001BCA3\U0001D173-\U0001D17A\U000E0001\U000E0020-\U000E007F]';
+```
+
+MySQL 8.0.4+ (ICU regular expressions):
+
+```sql
+SELECT id, email FROM users WHERE email REGEXP '[\\x{0000}-\\x{001F}\\x{007F}-\\x{00A0}\\x{00AD}\\x{034F}\\x{0488}-\\x{0489}\\x{0600}-\\x{0605}\\x{061C}\\x{06DD}\\x{070F}\\x{0890}-\\x{0891}\\x{08E2}\\x{1680}\\x{180E}\\x{1ABE}\\x{2000}-\\x{200B}\\x{200E}-\\x{200F}\\x{2028}-\\x{202F}\\x{205F}-\\x{2064}\\x{2066}-\\x{206F}\\x{20DD}-\\x{20E0}\\x{20E2}\\x{20E4}\\x{3000}\\x{A670}-\\x{A672}\\x{FEFF}\\x{FFF9}-\\x{FFFB}\\x{110BD}\\x{110CD}\\x{13430}-\\x{1343F}\\x{1BCA0}-\\x{1BCA3}\\x{1D173}-\\x{1D17A}\\x{E0001}\\x{E0020}-\\x{E007F}]';
+```
+
+The login-throttle fold also changed for identifiers containing such characters (or combining marks,
+ZWNJ, ZWJ or the keycap), so their buckets restart once; a held `idn:` lockout row for such an identifier
+is no longer reached by it. On PostgreSQL two accounts may differ only by a ZWNJ, ZWJ or keycap (`ab` and
+`a\u{200D}b`); the throttle folds them onto one bucket, as it does accounts differing only in case or
+accents. MySQL's collation already treats them as one value, so `unique` refuses the second.
 
 ### `auth_time` is stored with the session
 
 **Low impact.** The sign-in time now travels in the `refresh_tokens.amr` column, beside `amr`
 (`{"amr":[…],"auth_time":…}`), instead of being re-derived on rotation as `expires_at − refresh_ttl` —
-lowering `refresh_ttl` made old multi-factor sign-ins look recent. A session stored before this carries
-`amr` but no `auth_time` after its next refresh, so a password step-up that leaned on a recent
-multi-factor sign-in asks for a fresh one. **If you implement `RefreshTokenRepository`**, treat the
+lowering `refresh_ttl` made old multi-factor sign-ins look recent. A session stored before this has no
+stored sign-in time, so its tokens carry no `auth_time` after its next refresh, and a password step-up
+that leaned on a recent multi-factor sign-in asks for a fresh one (or a passkey). **If you implement `RefreshTokenRepository`**, treat the
 `$amr` argument of `persist()` as opaque: store it and hand it back on `RefreshTokenRecord::$amr`
 unchanged (the signature is unchanged). One that drops it keeps working, without `amr` or `auth_time`
 after the first refresh.
@@ -71,6 +104,14 @@ silently roll back the rotation. `creating`/`created`/`saving`/`saved` no longer
 lukk stores, and a listener can no longer cancel one. Audit sessions from lukk's events instead
 (`RefreshTokenReused`, `SessionUnclaimed`, and your own login/logout listeners).
 
+**A column you fill from `creating` is no longer filled** — a multi-tenancy `BelongsToTenant` trait
+stamping `tenant_id`, for one; on a `NOT NULL` column every sign-in and refresh then fails. Fill it as the
+model is built instead: an `$attributes` default on your `useRefreshTokenModel` subclass, or the trait's
+`initialize{TraitName}()` method, which Eloquent calls from the constructor without dispatching an event
+(`public function initializeBelongsToTenant(): void { $this->tenant_id ??= tenant()->id; }`). Overriding
+`persist()` in a subclass of `DatabaseRefreshTokenRepository` works too. Either way the code runs under
+the rotation's row lock: read a value already in memory, never query.
+
 ### Smaller changes you might notice
 
 **Low impact.**
@@ -81,8 +122,12 @@ lukk stores, and a listener can no longer cancel one. Audit sessions from lukk's
   and per-session `amr` / `authenticated_at`.
 - With `Lukk::authenticateUsing()` reading a field other than `lukk.username`, the IP-independent login
   bucket is skipped (it was one bucket for everybody). Point `lukk.username` at your field to keep it.
-- A `lukk-jwt` guard over an integer-keyed Eloquent model answers 401, without a query, for a `sub` that is
-  not an integer — a co-issuer minting non-numeric subjects against such a guard was a 500 on PostgreSQL.
+- A `lukk-jwt` guard whose Eloquent model is looked up by an auto-incrementing integer primary key (the
+  stock `id`: `getAuthIdentifierName()` is the key name, `$incrementing` is on, `$keyType` is `int`) answers
+  401, without a query, for a `sub` that is not an integer — a co-issuer minting non-numeric subjects
+  against such a guard was a 500 on PostgreSQL. A model whose auth identifier is another column (a public
+  UUID) or whose key is not incrementing (a string key that kept the default `$keyType`) is passed to its
+  provider as before.
 - `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;
   `DELETE /auth/sessions` now also denylists the presenting token when it names no family of lukk's.
 
@@ -400,9 +445,8 @@ JSON (`{}` for a cookie refresh), as lukk-js does.
 - Even in an `mfa` session, that allowance lasts only `confirm.mfa_max_age` (one day) after the sign-in,
   read from the new `auth_time` claim. Older sessions confirm with a passkey or sign in again.
   An `auth_time` more than `leeway` in the future, or not a timestamp at all, counts as no recent sign-in.
-  `auth_time` is derived as `expires_at − refresh_ttl`, so **lowering `refresh_ttl` pushes older
-  sessions' `auth_time` forward**: after you lower it, those sessions need a fresh multi-factor
-  sign-in (or a passkey) to step up.
+  `auth_time` is the sign-in time stored with the session (see above), so a session stored before
+  this release needs a fresh multi-factor sign-in (or a passkey) to step up.
 - `lukk.username` must be a plain column name (letters, digits, underscores) that does not contain
   `password`. Anything else throws an `InvalidArgumentException` naming the setting, on the first
   request that reads it. A dotted name that only worked because `Lukk::authenticateUsing` never

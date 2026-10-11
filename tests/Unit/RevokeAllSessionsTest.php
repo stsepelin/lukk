@@ -111,8 +111,11 @@ it('keeps a presented token on the denylist for at least a second, however close
         }
     });
 
-    app(RevokeAllSessions::class)(User::factory()->create()->getKey(), (object) ['jti' => 'late', 'exp' => time() - 3600]);
-    app(RevokeAllSessions::class)(User::factory()->create()->getKey(), (object) ['jti' => 'live', 'exp' => (string) (time() + 60)]);
+    // One frozen clock for the claim and the action: `time()` and Carbon's `now()` read the wall clock
+    // separately and could straddle a second under coverage, making the TTL 66.
+    $this->freezeSecond();
+    app(RevokeAllSessions::class)(User::factory()->create()->getKey(), (object) ['jti' => 'late', 'exp' => now()->getTimestamp() - 3600]);
+    app(RevokeAllSessions::class)(User::factory()->create()->getKey(), (object) ['jti' => 'live', 'exp' => (string) (now()->getTimestamp() + 60)]);
 
     expect($ttls)->toBe([1, 60 + Lukk\Lukk::leeway(Lukk\Lukk::guardConfig())]);
 });

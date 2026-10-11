@@ -173,6 +173,12 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
         // behind it and, on PostgreSQL, turning a swallowed failing query into a COMMIT that silently
         // rolled back. And a `creating` listener returning false cancelled the write outright, so rotation
         // handed back a refresh token that was never stored. Audit sessions from lukk's events instead.
+        //
+        // A column the application must fill (a tenant trait's `tenant_id`, stamped from `creating`) is
+        // therefore filled as the model is BUILT, not saved: `$attributes` defaults on the
+        // `useRefreshTokenModel` subclass, or a trait's `initialize{Trait}()` method, which Eloquent runs
+        // in the constructor with no event — or by overriding `persist()` in a subclass of this repository.
+        // All of these still run under the lock, so they read values already in memory: no query.
         if (! $this->query()->newModelInstance()->forceFill($attributes)->saveQuietly()) {
             throw new RuntimeException('lukk could not store a refresh token: the refresh-token model\'s save() reported that nothing was written.');
         }

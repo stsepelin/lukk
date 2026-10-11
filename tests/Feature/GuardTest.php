@@ -5,13 +5,18 @@ declare(strict_types=1);
 use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Lukk\Auth\JwtGuard;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Models\RefreshToken;
+use Lukk\Tests\Fixtures\PublicIdUser;
+use Lukk\Tests\Fixtures\StringKeyUser;
 use Lukk\Tests\Fixtures\User;
 
 beforeEach(function () {
@@ -150,6 +155,48 @@ it('leaves a model whose key is not an integer to its provider', function (strin
 
     expect($resolved === null)->toBe($keyType !== 'string');
 })->with(['string', 'int', 'integer']);
+
+function coSubjectToken(string $sub): string
+{
+    $cfg = Lukk\Lukk::guardConfig();
+
+    return JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => $sub, 'jti' => 'co-'.bin2hex(random_bytes(4)),
+        'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+    ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
+}
+
+it('resolves a UUID auth identifier on a model whose integer primary key is not the identifier', function () {
+    // `retrieveById()` looks up `getAuthIdentifierName()`, and lukk mints `sub` from
+    // `getAuthIdentifier()`: the integer key type says nothing about the column the subject is
+    // compared with. Stock provider, real lookup.
+    Schema::create('public_id_users', function (Blueprint $table) {
+        $table->id();
+        $table->uuid('public_id')->unique();
+    });
+    $user = PublicIdUser::query()->create(['public_id' => $uuid = (string) Str::uuid()]);
+    expect($user->getKeyType())->toBe('int')->and($user->getIncrementing())->toBeTrue();
+
+    $guard = new JwtGuard(verifier(), new EloquentUserProvider(app('hash'), PublicIdUser::class));
+
+    expect($guard(Request::create('/', server: ['HTTP_AUTHORIZATION' => 'Bearer '.coSubjectToken($uuid)]))?->getKey())
+        ->toBe($user->getKey());
+});
+
+it('resolves a string subject on a non-incrementing model that kept the default int key type', function () {
+    // `$incrementing = false` without `$keyType = 'string'` is the common way to write a string key;
+    // Eloquent never casts such a key, so the leftover 'int' is no statement about the column.
+    Schema::create('string_key_users', function (Blueprint $table) {
+        $table->string('id')->primary();
+    });
+    $user = StringKeyUser::query()->create(['id' => 'usr_42']);
+    expect($user->getKeyType())->toBe('int')->and($user->getIncrementing())->toBeFalse();
+
+    $guard = new JwtGuard(verifier(), new EloquentUserProvider(app('hash'), StringKeyUser::class));
+
+    expect($guard(Request::create('/', server: ['HTTP_AUTHORIZATION' => 'Bearer '.coSubjectToken('usr_42')]))?->getKey())
+        ->toBe('usr_42');
+});
 
 it('leaves a provider that is not Eloquent to answer any subject itself', function () {
     // There is no model to ask for a key type, so nothing is refused before the provider's own lookup.

@@ -64,3 +64,28 @@ it('stores no truncated identifier: NUL is refused wherever one is written or lo
     'forgot password' => ['/auth/forgot-password', ['email' => "victim@example.com\0x"]],
     'reset password' => ['/auth/reset-password', ['token' => 't', 'email' => "victim@example.com\0x", 'password' => 'Str0ng-passw0rd!', 'password_confirmation' => 'Str0ng-passw0rd!']],
 ]);
+
+it('lets a joiner or keycap through validation but not past the spent account bucket', function (string $respelled) {
+    // U+200C/U+200D (`\p{Cf}`) and U+20E3 (`\p{Me}`) are accepted — Persian spelling and emoji need them —
+    // so unlike the respellings above they reach the throttle. MySQL's collation may resolve them to the
+    // victim; the fold strips them, so the spent bucket answers 429, never a verified guess.
+    config([
+        'lukk.rate_limits.login.max_attempts' => 500,
+        'lukk.rate_limits.login.ip_max_attempts' => 500,
+        'lukk.rate_limits.login.account_max_attempts' => 3,
+    ]);
+    User::factory()->create(['email' => 'victim@example.com', 'password' => bcrypt('correct')]);
+
+    foreach (range(1, 3) as $ignored) {
+        $this->postJson('/auth/login', ['email' => 'victim@example.com', 'password' => 'wrong'])->assertStatus(422);
+    }
+
+    $response = $this->postJson('/auth/login', ['email' => $respelled, 'password' => 'correct']);
+
+    expect($response->status())->toBe(429)
+        ->and($response->json('access_token'))->toBeNull();
+})->with([
+    'zero-width joiner' => ["vic\u{200D}tim@example.com"],
+    'zero-width non-joiner' => ["vic\u{200C}tim@example.com"],
+    'combining enclosing keycap' => ["victim\u{20E3}@example.com"],
+]);
