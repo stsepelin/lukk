@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
@@ -673,6 +676,36 @@ it('leaves a password-less account a way to step up under preferred', function (
         'ceremony_id' => $start['ceremony_id'],
         'credential' => ['challenge' => $start['options']['challenge'], 'id' => 'cred-only-way', 'sign_count' => 1],
     ])->assertOk()->assertJsonStructure(['confirmation_token']);
+});
+
+it('leaves an account whose stored password nobody can present a way to step up', function (string $placeholder) {
+    // An import or an SSO account often carries a placeholder (`!`, `*`, a non-hash) rather than a
+    // NULL. No password confirms against it, so counting it as a password raised the passkey bar to
+    // AAL2 on an account that cannot reach it: single-factor passkeys refused, the password path
+    // impossible — no enrolling a passkey, no export, no erasure, no step-up at all.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    $user = User::factory()->create();
+    DB::table('users')->where('id', $user->id)->update(['password' => $placeholder]);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-placeholder', 0);
+
+    $this->withToken($access)->postJson('/auth/confirm-password', ['password' => $placeholder])->assertStatus(422);
+    app('auth')->forgetGuards();
+    passkeyStepUp($this, $access, 'cred-placeholder', uv: false)->assertOk()->assertJsonStructure(['confirmation_token']);
+})->with(['!', '*', 'imported-not-a-hash']);
+
+it('still counts an unrecognised stored value as a password where a custom provider may verify it', function () {
+    // Only the stock provider checks with the configured hasher alone. A provider that verifies a
+    // legacy format of its own (a phpass `$P$` import) can confirm that "unknown" value, so the
+    // account still reaches AAL2 and a possession-only passkey stays below its bar.
+    Auth::provider('legacy', fn ($app, array $config) => new class($app['hash'], $config['model']) extends EloquentUserProvider {});
+    config(['auth.providers.users.driver' => 'legacy']);
+    $user = User::factory()->create();
+    DB::table('users')->where('id', $user->id)->update(['password' => '$P$BlegacyPhpassHashValue0123456']);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-legacy', 0);
+
+    passkeyStepUp($this, $access, 'cred-legacy', uv: false)->assertStatus(422);
 });
 
 /*

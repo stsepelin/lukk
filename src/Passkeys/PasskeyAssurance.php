@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Lukk\Passkeys;
 
+use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Hash;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
+use Lukk\Lukk;
 use Lukk\Support\VerifiedPasskey;
 
 /**
@@ -32,12 +35,39 @@ class PasskeyAssurance
     /** Can this account authenticate at AAL2 at all? */
     public function canReachMultiFactor(Authenticatable $user): bool
     {
-        // `(string)` normalises the two "no usable password" states the framework short-circuits on.
-        if ((string) $user->getAuthPassword() !== '') {
+        return $this->hasUsablePassword($user) || $this->hasMultiFactorCredential($user);
+    }
+
+    /**
+     * Whether the stored password is one that could ever be confirmed.
+     *
+     * An import or an SSO account often carries a placeholder (`!`, `*`, a non-hash) rather than a
+     * NULL. Counted as a password, it raised the step-up bar to AAL2 on an account with no way to
+     * reach it — single-factor passkeys refused and the password path impossible, so no step-up at all.
+     *
+     * "Unknown" is judged by the configured hasher (`password_get_info()` for the stock ones), and only
+     * under the STOCK provider, which checks with that hasher alone. A provider of its own may verify a
+     * legacy format (a phpass `$P$` import) the hasher does not recognise; there it still counts, since
+     * the safe error is the stronger bar.
+     */
+    private function hasUsablePassword(Authenticatable $user): bool
+    {
+        // `(string)` normalises the two "no password" states the framework short-circuits on.
+        $stored = (string) $user->getAuthPassword();
+
+        if ($stored === '') {
+            return false;
+        }
+
+        if ((Hash::info($stored)['algoName'] ?? null) !== 'unknown') {
             return true;
         }
 
-        return $this->hasMultiFactorCredential($user);
+        // The current guard's provider — the one `ConfirmPassword` checks against. `get_debug_type`
+        // compares the EXACT class (a subclass may verify its own way) and reads null as not stock.
+        $provider = app('auth')->createUserProvider(Lukk::userProviderName(Lukk::currentGuard()));
+
+        return get_debug_type($provider) !== EloquentUserProvider::class;
     }
 
     /** Whether any of the account's passkeys has shown user verification, so it alone reaches AAL2. */

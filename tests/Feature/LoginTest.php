@@ -583,6 +583,29 @@ it('rehashes a weaker stored password once the user signs in with it', function 
     expect(password_get_info($user->refresh()->password)['options']['cost'])->toBe(5);
 });
 
+it('leaves the hash alone under a provider that checks passwords its own way', function () {
+    // The upgrade writes `Hash::make(<password>)` — what the STOCK provider would check against. A
+    // provider that verifies differently (here a pepper appended before hashing) had its working hash
+    // replaced with an unpeppered one, and every later sign-in of that account failed.
+    Auth::provider('peppered', fn ($app, array $config) => new class($app['hash'], $config['model']) extends EloquentUserProvider
+    {
+        public function validateCredentials(Authenticatable $user, array $credentials)
+        {
+            return Hash::check($credentials['password'].'-pepper', $user->getAuthPassword());
+        }
+    });
+    config(['auth.providers.users.driver' => 'peppered']);
+    $user = User::factory()->create(['password' => password_hash('password-pepper', PASSWORD_BCRYPT, ['cost' => 4])]);
+    $stored = $user->password;
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect($user->refresh()->password)->toBe($stored);
+});
+
 it('leaves the password alone when the application turned rehash-on-login off', function () {
     config(['hashing.rehash_on_login' => false]);
     $user = User::factory()->create(['password' => password_hash('password', PASSWORD_BCRYPT, ['cost' => 4])]);

@@ -175,6 +175,9 @@ it('reads the age from confirm.mfa_max_age', function () {
 it('stamps auth_time at sign-in and carries it through rotation', function () {
     $this->freezeSecond();
     [$signedIn, $pair] = $this->travel(-120)->seconds(fn () => [now()->getTimestamp(), start()(User::factory()->create()->id, ['amr' => ['pwd']])]);
+    // `travel()->seconds($callback)` UNFREEZES the clock on return; without this the second sign-in
+    // below and the `now()` it is compared with could straddle a wall-clock second.
+    $this->freezeSecond();
 
     expect(claims(rotate()($pair->refreshToken)->accessToken)->auth_time)->toBe($signedIn)
         ->and(claims(start()(User::factory()->create()->id)->accessToken)->auth_time)->toBe(now()->getTimestamp());

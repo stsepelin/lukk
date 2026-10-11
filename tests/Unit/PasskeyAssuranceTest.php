@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\EloquentUserProvider;
+use Illuminate\Hashing\BcryptHasher;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Passkeys\DatabasePasskeyRepository;
@@ -89,6 +93,45 @@ describe('the highest level an account can reach', function () {
         $user = User::factory()->create(['password' => '']);
 
         expect(assurance()->canReachMultiFactor($user))->toBeFalse();
+    });
+
+    it('treats a stored value the hasher cannot read as no password', function (string $placeholder) {
+        // An import or SSO placeholder confirms nothing, so it must not raise the bar to a level the
+        // account cannot reach.
+        $user = User::factory()->create();
+        $user->forceFill(['password' => $placeholder]);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeFalse()
+            ->and(assurance()->requiredUserVerification($user))->toBe('preferred');
+    })->with(['!', '*', 'imported-not-a-hash']);
+
+    it('treats an empty or missing password as none even under a provider of its own', function (?string $none) {
+        // A custom provider keeps an unrecognised value counted (it may verify a legacy format); an
+        // empty one is no password under any provider.
+        Auth::provider('custom', fn ($app, array $config) => new class($app['hash'], $config['model']) extends EloquentUserProvider {});
+        config(['auth.providers.users.driver' => 'custom']);
+        $user = User::factory()->create();
+        $user->forceFill(['password' => $none]);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeFalse();
+    })->with(['empty' => [''], 'null' => [null]]);
+
+    it('counts the password when a custom hasher describes it in a shape of its own', function () {
+        // `Hasher::info()` promises an array, not `password_get_info()`'s keys. One without
+        // `algoName` says nothing about the value, so the stronger bar stands.
+        $user = User::factory()->create();
+        Hash::extend('opaque', fn () => new class extends BcryptHasher
+        {
+            public function info($hashedValue): array
+            {
+                return [];
+            }
+        });
+        config(['hashing.driver' => 'opaque']);
+        Hash::forgetDrivers();
+        $user->forceFill(['password' => '!']);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue();
     });
 
     it('lists only the account\'s own credentials for a step-up', function () {

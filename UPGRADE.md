@@ -246,7 +246,10 @@ credentials. Use it instead of `passkeys/login-options` for a step-up (lukk-js d
 A presence-only passkey no longer earns a step-up on an account that has a password or a
 user-verifying passkey: such an account can authenticate more strongly, and a step-up mints the token
 that binds and removes authenticators (NIST SP 800-63B-4 §4.1.2.1). A password-less account whose
-credentials are all presence-only can still step up with one — it has nothing stronger. That
+credentials are all presence-only can still step up with one — it has nothing stronger. A stored
+placeholder no password can match (`!`, `*`, any value the configured hasher reports as `unknown`)
+counts as no password under the stock `EloquentUserProvider`; with a custom provider, which may
+verify a legacy hash format, it still counts as a password. That
 refusal answers **422 on `credential`**, like a failed verification, not 403: on a step-up route 403
 means the token itself may never confirm, and lukk-js abandons the prompt on it.
 

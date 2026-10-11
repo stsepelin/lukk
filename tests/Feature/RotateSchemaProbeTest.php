@@ -153,3 +153,111 @@ it('answers per table as well as per connection, with keys that cannot run toget
     'another table on the same connection' => [RefreshToken::class],
     'a connection whose name runs into the table' => [TestingxConnectionRefreshToken::class],
 ]);
+
+it('answers per database, when a tenancy package switches the database under one connection name', function (bool $firstHasAmr) {
+    // Multi-tenant packages (stancl/tenancy) keep ONE connection name and point it at the tenant's
+    // database per request. Keyed by the name alone, the memo carried one tenant's answer into the
+    // next: "the column exists" made the other tenant's INSERT name a column it lacks (a failed
+    // rotate — on PostgreSQL an aborted transaction), and "it does not" dropped `amr` for a tenant
+    // that has it.
+    $files = [];
+    foreach ([$firstHasAmr, ! $firstHasAmr] as $i => $amr) {
+        $files[$i] = tempnam(sys_get_temp_dir(), 'lukk-tenant-');
+        config(['database.connections.tenant_b' => array_merge(config('database.connections.testing'), ['database' => $files[$i]])]);
+        DB::purge('tenant_b');
+        refreshTokensTable('tenant_b', 'refresh_tokens', amr: $amr);
+    }
+
+    Lukk\Lukk::useRefreshTokenModel(TenantBRefreshToken::class);
+
+    try {
+        foreach ($files as $i => $file) {
+            config(['database.connections.tenant_b.database' => $file]);
+            DB::purge('tenant_b');
+
+            (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat((string) $i, 64), time() + 600, null, '["pwd"]');
+        }
+
+        $stored = [];
+        foreach ($files as $i => $file) {
+            config(['database.connections.tenant_b.database' => $file]);
+            DB::purge('tenant_b');
+            $stored[$i] = DB::connection('tenant_b')->getSchemaBuilder()->hasColumn('refresh_tokens', 'amr')
+                ? DB::connection('tenant_b')->table('refresh_tokens')->value('amr')
+                : 'no column';
+        }
+
+        expect($stored)->toBe($firstHasAmr ? ['["pwd"]', 'no column'] : ['no column', '["pwd"]']);
+    } finally {
+        DB::purge('tenant_b');
+        array_map(unlink(...), $files);
+    }
+})->with([
+    'a tenant with the column, then one without' => [true],
+    'a tenant without the column, then one with' => [false],
+]);
+
+it('answers per table prefix, when a tenancy package switches the prefix under one connection name', function () {
+    // Prefix-per-tenant is the same switch one level down: one connection, one database, and the
+    // tenant's tables told apart only by the prefix the connection currently applies.
+    $file = tempnam(sys_get_temp_dir(), 'lukk-prefix-');
+    $usePrefix = function (string $prefix) use ($file) {
+        config(['database.connections.tenant_b' => array_merge(config('database.connections.testing'), ['database' => $file, 'prefix' => $prefix, 'prefix_indexes' => true])]);
+        DB::purge('tenant_b');
+    };
+    $usePrefix('one_');
+    refreshTokensTable('tenant_b', 'refresh_tokens', amr: true);
+    $usePrefix('two_');
+    refreshTokensTable('tenant_b', 'refresh_tokens', amr: false);
+    Lukk\Lukk::useRefreshTokenModel(TenantBRefreshToken::class);
+
+    try {
+        $usePrefix('one_');
+        (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat('a', 64), time() + 600, null, '["pwd"]');
+        $usePrefix('two_');
+
+        expectNoThrow(fn () => (new DatabaseRefreshTokenRepository)->persist(
+            1, (string) Str::uuid(), null, str_repeat('b', 64), time() + 600, null, '["pwd"]'
+        ));
+    } finally {
+        DB::purge('tenant_b');
+        unlink($file);
+    }
+});
+
+it('asks again when the connection\'s search_path changes under one connection name', function () {
+    // Schema-per-tenant on PostgreSQL switches `search_path`, not the database, and `hasColumn()`
+    // answers for whichever schema that resolves to. sqlite has no schemas to tell apart, so this
+    // pins the part that is engine-independent: a new search_path is a new question.
+    $file = tempnam(sys_get_temp_dir(), 'lukk-path-');
+    $useSearchPath = function (string $path) use ($file) {
+        config(['database.connections.tenant_b' => array_merge(config('database.connections.testing'), ['database' => $file, 'search_path' => $path])]);
+        DB::purge('tenant_b');
+    };
+    $useSearchPath('tenant_one');
+    refreshTokensTable('tenant_b', 'refresh_tokens', amr: true);
+    Lukk\Lukk::useRefreshTokenModel(TenantBRefreshToken::class);
+    $probes = 0;
+    DB::listen(function ($query) use (&$probes) {
+        if (preg_match('/pragma|sqlite_master/i', $query->sql)) {
+            $probes++;
+        }
+    });
+
+    try {
+        (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat('a', 64), time() + 600, null, '["pwd"]');
+        $afterFirst = $probes;
+        (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat('b', 64), time() + 600, null, '["pwd"]');
+        $afterSame = $probes;
+        $useSearchPath('tenant_two');
+        (new DatabaseRefreshTokenRepository)->persist(1, (string) Str::uuid(), null, str_repeat('c', 64), time() + 600, null, '["pwd"]');
+
+        // Asked once, remembered for the same search_path, asked again for a new one.
+        expect($afterFirst)->toBeGreaterThan(0)
+            ->and($afterSame)->toBe($afterFirst)
+            ->and($probes)->toBeGreaterThan($afterSame);
+    } finally {
+        DB::purge('tenant_b');
+        unlink($file);
+    }
+});

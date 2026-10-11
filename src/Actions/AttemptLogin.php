@@ -363,17 +363,26 @@ class AttemptLogin
      * value still being the one checked. Losing that race to a concurrent upgrade of the same password
      * is harmless, and the model adopts the winner's hash so its own session is not taken for a change.
      *
-     * Eloquent users only: another provider gives no conditional write to make, and lukk does not risk
-     * the revert for a cost upgrade.
+     * The STOCK `EloquentUserProvider` only — the exact class, as `assertIdentifierColumnExists()` keys
+     * on it. `Hash::make(<password>)` is the value that provider checks against; a provider of its own
+     * may check something else (a peppered `Hash::check($password.$pepper, …)`), and replacing its
+     * working hash with an unpeppered one failed every later sign-in. Nor is the provider's own
+     * `rehashPasswordIfRequired()` the way out: the stock one, which a subclass inherits, both saves
+     * the stale model (the revert above) and makes the same unpeppered hash. Another provider gives no
+     * conditional write to make, and lukk does not risk either for a cost upgrade.
      */
     private function rehash(Authenticatable $user, #[\SensitiveParameter] string $password): void
     {
         // Only a successful check reaches here, so the password is a string; the cast states it.
         $stored = (string) $user->getAuthPassword(); // @pest-mutate-ignore: RemoveStringCast
 
-        if (! $user instanceof Model || ! Hash::needsRehash($stored)) {
+        if ($this->users::class !== EloquentUserProvider::class || ! Hash::needsRehash($stored)) {
             return;
         }
+
+        // The stock provider only ever hands back its own model, so this states the type rather than
+        // deciding anything (a `Lukk::authenticateUsing` user returns before the rehash is reached).
+        assert($user instanceof Model); // @pest-mutate-ignore: RemoveFunctionCall,InstanceOfToTrue
 
         $column = $user->getAuthPasswordName();
         $upgraded = Hash::make($password);

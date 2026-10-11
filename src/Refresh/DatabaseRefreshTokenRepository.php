@@ -369,7 +369,8 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
      * Answered from a hydrated row wherever one has been read (free, and the rotation path always
      * reads one first), and only otherwise by asking the schema.
      *
-     * Memoized per CONNECTION AND TABLE, on the application instance. Keying it globally answered
+     * Memoized per CONNECTION AND TABLE — and per database, `search_path` and prefix that connection
+     * currently points at — on the application instance. Keying it globally answered
      * for the wrong schema the moment one application served two connections — a migrated tenant and
      * an un-migrated one — and the un-migrated INSERT then failed inside the rotate transaction,
      * which on PostgreSQL aborts it: every later statement errors `25P02` and `COMMIT` silently
@@ -413,7 +414,17 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
     private function rememberAmrSupport(?bool $supported): ?bool
     {
         $model = $this->query()->newModelInstance();
-        $key = 'lukk.schema.amr.'.($model->getConnectionName() ?? 'default').'.'.$model->getTable();
+        $connection = $model->getConnection();
+        // What the connection points at NOW, not only its name: a tenancy package (stancl/tenancy) keeps
+        // one name and switches the database — or, on PostgreSQL, the `search_path` — per tenant, and
+        // a name-keyed answer then crossed tenants. JSON so no two parts can run together.
+        $key = 'lukk.schema.amr.'.json_encode([
+            $connection->getName(),
+            $connection->getDatabaseName(),
+            $connection->getConfig('search_path'),
+            $connection->getTablePrefix(),
+            $model->getTable(),
+        ]);
         $app = app();
 
         if ($supported === null) {
