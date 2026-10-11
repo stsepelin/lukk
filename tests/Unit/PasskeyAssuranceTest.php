@@ -103,7 +103,37 @@ describe('the highest level an account can reach', function () {
 
         expect(assurance()->canReachMultiFactor($user))->toBeFalse()
             ->and(assurance()->requiredUserVerification($user))->toBe('preferred');
-    })->with(['!', '*', 'imported-not-a-hash']);
+    })->with([
+        '!' => ['!'],
+        '*' => ['*'],
+        'not a hash' => ['imported-not-a-hash'],
+        'phpass, which nothing here verifies' => ['$P$BlegacyPhpassHashValue0123456'],
+        'a truncated bcrypt hash' => ['$2y$10$truncated'],
+        'a sha-crypt value of the wrong length' => ['$6$rounds=5000$salt$x'],
+        'a bcrypt-shaped value at the probed cost' => ['$2b$12$tooshort'],
+    ]);
+
+    it('counts a value naming more work than the defaults without running it', function (string $stored) {
+        // `crypt()` honours the cost a value names: `$2b$31$…` takes hours, an extended-DES count up to
+        // 2^24 seconds. Each of these would be REFUSED by the probe, so `true` here proves it never ran.
+        $user = User::factory()->create();
+        $user->forceFill(['password' => $stored]);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue();
+    })->with([
+        'bcrypt cost above 12' => ['$2b$13$tooshort'],
+        'sha-crypt rounds above 5000' => ['$6$rounds=5001$salt$x'],
+        'extended DES' => ['_J9..salt'],
+    ]);
+
+    it('counts an unrecognised value as a password when the guard names no configured provider', function () {
+        // Nothing then says how the password is checked, so nothing proves it absent.
+        config(['lukk.user_provider' => 'nowhere']);
+        $user = User::factory()->create();
+        $user->forceFill(['password' => '!']);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue();
+    });
 
     it('treats an empty or missing password as none even under a provider of its own', function (?string $none) {
         // A custom provider keeps an unrecognised value counted (it may verify a legacy format); an

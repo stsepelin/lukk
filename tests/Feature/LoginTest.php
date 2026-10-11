@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Contracts\Hashing\Hasher;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Hashing\BcryptHasher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -595,6 +596,35 @@ it('leaves the hash alone under a provider that checks passwords its own way', f
         }
     });
     config(['auth.providers.users.driver' => 'peppered']);
+    $user = User::factory()->create(['password' => password_hash('password-pepper', PASSWORD_BCRYPT, ['cost' => 4])]);
+    $stored = $user->password;
+    raiseBcryptCostTo(5);
+
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->assertOk();
+
+    expect($user->refresh()->password)->toBe($stored);
+});
+
+it('leaves the hash alone when the stock provider checks with a hasher of its own', function () {
+    // The exact provider class is not enough: constructed with a peppering hasher, it checks
+    // `<password>-pepper`, and the app hasher's `make(<password>)` replaced a hash it could verify
+    // with one it could not — the next sign-in failed.
+    $peppered = new class(['rounds' => 4]) extends BcryptHasher
+    {
+        public function make($value, array $options = []): string
+        {
+            return parent::make($value.'-pepper', $options);
+        }
+
+        public function check($value, $hashedValue, array $options = []): bool
+        {
+            return parent::check($value.'-pepper', $hashedValue, $options);
+        }
+    };
+    Auth::provider('peppered-hasher', fn ($app, array $config) => new EloquentUserProvider($peppered, $config['model']));
+    config(['auth.providers.users.driver' => 'peppered-hasher']);
     $user = User::factory()->create(['password' => password_hash('password-pepper', PASSWORD_BCRYPT, ['cost' => 4])]);
     $stored = $user->password;
     raiseBcryptCostTo(5);

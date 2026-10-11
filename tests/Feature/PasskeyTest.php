@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Hashing\BcryptHasher;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
 use Illuminate\Validation\ValidationException;
@@ -706,6 +708,67 @@ it('still counts an unrecognised stored value as a password where a custom provi
     storePasskey($user->id, 'cred-legacy', 0);
 
     passkeyStepUp($this, $access, 'cred-legacy', uv: false)->assertStatus(422);
+});
+
+/** A hasher that also accepts an `md5:` legacy value — the shape of an import kept verifiable by its hasher. */
+function legacyMd5Hasher(): BcryptHasher
+{
+    return new class(['rounds' => 4]) extends BcryptHasher
+    {
+        public function check($value, $hashedValue, array $options = []): bool
+        {
+            return hash_equals((string) $hashedValue, 'md5:'.md5($value)) || parent::check($value, $hashedValue, $options);
+        }
+    };
+}
+
+/** An account whose password confirms, and a presence-only passkey on it: the passkey must not meet its bar. */
+function assertWorkingPasswordKeepsTheBar(object $test, User $user, string $stored): void
+{
+    DB::table('users')->where('id', $user->id)->update(['password' => $stored]);
+    $access = $user->startSession()->accessToken;
+    storePasskey($user->id, 'cred-working-password', 0);
+
+    $test->withToken($access)->postJson('/auth/confirm-password', ['password' => 'password'])->assertOk();
+    app('auth')->forgetGuards();
+    passkeyStepUp($test, $access, 'cred-working-password', uv: false)->assertStatus(422);
+}
+
+it('keeps the bar for a legacy crypt hash the hasher accepts with verification off', function (string $stored) {
+    // `hashing.bcrypt.verify = false` is Laravel's documented setting for importing hashes, and
+    // `password_verify()` then accepts anything `crypt()` produces — `$1$`, `$5$`, `$6$`, DES —
+    // while `Hash::info()` calls each of them `unknown`. Read as "no password", a possession-only
+    // passkey met the bar of an account whose password works: AAL2 lowered to AAL1.
+    config(['lukk.passkeys.user_verification' => 'preferred', 'hashing.bcrypt.verify' => false, 'hashing.rehash_on_login' => false]);
+    Hash::forgetDrivers();
+    expect(Hash::info($stored)['algoName'])->toBe('unknown');
+
+    assertWorkingPasswordKeepsTheBar($this, User::factory()->create(), $stored);
+})->with([
+    'md5-crypt' => [crypt('password', '$1$saltsalt$')],
+    'sha256-crypt' => [crypt('password', '$5$saltsalt$')],
+    'sha512-crypt' => [crypt('password', '$6$saltsalt$')],
+    'standard DES' => [crypt('password', 'ab')],
+    'extended DES' => [crypt('password', '_J9..salt')],
+]);
+
+it('keeps the bar when the stock provider checks with a hasher of its own', function () {
+    // The exact class says nothing about the check when it was CONSTRUCTED with another hasher.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    Auth::provider('legacy-hasher', fn ($app, array $config) => new EloquentUserProvider(legacyMd5Hasher(), $config['model']));
+    config(['auth.providers.users.driver' => 'legacy-hasher']);
+
+    assertWorkingPasswordKeepsTheBar($this, User::factory()->create(), 'md5:'.md5('password'));
+});
+
+it('keeps the bar when the default hashing driver is one of the application\'s own', function () {
+    // Nor does the stock provider over the app's hasher, when that hasher is a custom driver.
+    config(['lukk.passkeys.user_verification' => 'preferred']);
+    Hash::extend('legacy-md5', fn () => legacyMd5Hasher());
+    config(['hashing.driver' => 'legacy-md5']);
+    Hash::forgetDrivers();
+
+    assertWorkingPasswordKeepsTheBar($this, User::factory()->create(), 'md5:'.md5('password'));
 });
 
 /*

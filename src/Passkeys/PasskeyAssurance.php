@@ -6,6 +6,9 @@ namespace Lukk\Passkeys;
 
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Hashing\Argon2IdHasher;
+use Illuminate\Hashing\ArgonHasher;
+use Illuminate\Hashing\BcryptHasher;
 use Illuminate\Support\Facades\Hash;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\WebAuthnCeremony;
@@ -45,10 +48,10 @@ class PasskeyAssurance
      * NULL. Counted as a password, it raised the step-up bar to AAL2 on an account with no way to
      * reach it — single-factor passkeys refused and the password path impossible, so no step-up at all.
      *
-     * "Unknown" is judged by the configured hasher (`password_get_info()` for the stock ones), and only
-     * under the STOCK provider, which checks with that hasher alone. A provider of its own may verify a
-     * legacy format (a phpass `$P$` import) the hasher does not recognise; there it still counts, since
-     * the safe error is the stronger bar.
+     * Counting a WORKING password as absent is the worse error — it lowers the account to AAL1 — so a
+     * value is absent only when lukk can prove nothing verifies it: the stock provider, over the
+     * application's own hasher, whose driver is one of the framework's `password_verify()` hashers,
+     * and a value `password_verify()` itself could never accept. Anything else counts.
      */
     private function hasUsablePassword(Authenticatable $user): bool
     {
@@ -63,11 +66,44 @@ class PasskeyAssurance
             return true;
         }
 
-        // The current guard's provider — the one `ConfirmPassword` checks against. `get_debug_type`
-        // compares the EXACT class (a subclass may verify its own way) and reads null as not stock.
+        // The current guard's provider — the one `ConfirmPassword` checks against. The EXACT class: a
+        // subclass may verify its own way. Null (a provider name nothing configures) proves nothing.
         $provider = app('auth')->createUserProvider(Lukk::userProviderName(Lukk::currentGuard()));
 
-        return get_debug_type($provider) !== EloquentUserProvider::class;
+        if (! $provider instanceof EloquentUserProvider
+            || $provider::class !== EloquentUserProvider::class
+            // Constructed with a hasher of its own, the stock class checks however that hasher does.
+            || $provider->getHasher() !== app('hash')
+            || ! in_array(get_debug_type(app('hash')->driver()), [BcryptHasher::class, ArgonHasher::class, Argon2IdHasher::class], true)) {
+            return true;
+        }
+
+        return $this->passwordVerifyCouldAccept($stored);
+    }
+
+    /**
+     * Could `password_verify()` accept SOME password against this value?
+     *
+     * It falls back to `crypt()`, so with `hashing.bcrypt.verify` off — Laravel's documented setting
+     * for importing hashes — a `$1$`, `$5$`, `$6$` or DES value verifies although `Hash::info()` calls it
+     * `unknown`. `crypt()` refuses a value it cannot parse with a `*`-prefixed string, and otherwise
+     * returns a result of the value's own length, which `password_verify()` compares in full.
+     *
+     * `crypt()` honours the work factor a value names, so one naming more than the defaults — a bcrypt
+     * cost above 12, `rounds=` above 5000, any extended-DES count (up to 2^24) — counts without being
+     * run: probing `$2b$31$…` takes hours.
+     */
+    private function passwordVerifyCouldAccept(string $stored): bool
+    {
+        if (str_starts_with($stored, '_')
+            || (preg_match('/^\$2[abxy]?\$(\d+)\$/', $stored, $cost) === 1 && (int) $cost[1] > 12)
+            || (preg_match('/^\$[56]\$rounds=(\d+)\$/', $stored, $rounds) === 1 && (int) $rounds[1] > 5000)) {
+            return true;
+        }
+
+        $probe = crypt('', $stored);
+
+        return ! str_starts_with($probe, '*') && strlen($probe) === strlen($stored);
     }
 
     /** Whether any of the account's passkeys has shown user verification, so it alone reaches AAL2. */

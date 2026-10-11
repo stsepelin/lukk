@@ -247,9 +247,11 @@ A presence-only passkey no longer earns a step-up on an account that has a passw
 user-verifying passkey: such an account can authenticate more strongly, and a step-up mints the token
 that binds and removes authenticators (NIST SP 800-63B-4 §4.1.2.1). A password-less account whose
 credentials are all presence-only can still step up with one — it has nothing stronger. A stored
-placeholder no password can match (`!`, `*`, any value the configured hasher reports as `unknown`)
-counts as no password under the stock `EloquentUserProvider`; with a custom provider, which may
-verify a legacy hash format, it still counts as a password. That
+placeholder no password can match (`!`, `*`, a non-hash) counts as no password only when lukk can
+prove nothing verifies it: the stock `EloquentUserProvider` over the application's own bcrypt/argon
+hasher, and a value `password_verify()` could never accept. A custom provider or hashing driver, a
+provider built with its own hasher, or a legacy `crypt()` hash accepted with `hashing.bcrypt.verify`
+off all keep counting as a password. That
 refusal answers **422 on `credential`**, like a failed verification, not 403: on a step-up route 403
 means the token itself may never confirm, and lukk-js abandons the prompt on it.
 

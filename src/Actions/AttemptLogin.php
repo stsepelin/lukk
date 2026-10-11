@@ -376,7 +376,9 @@ class AttemptLogin
         // Only a successful check reaches here, so the password is a string; the cast states it.
         $stored = (string) $user->getAuthPassword(); // @pest-mutate-ignore: RemoveStringCast
 
-        if ($this->users::class !== EloquentUserProvider::class || ! Hash::needsRehash($stored)) {
+        // The exact class, over the application's own hasher: constructed with a hasher of its own (a
+        // pepper), the stock class checks what that hasher makes, not what `Hash::make()` does.
+        if ($this->users::class !== EloquentUserProvider::class || $this->users->getHasher() !== app('hash') || ! Hash::needsRehash($stored)) {
             return;
         }
 
