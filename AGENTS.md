@@ -4,6 +4,11 @@ Guidance for AI coding assistants. Two audiences: teams **using** lukk in a Lara
 
 Docs: <https://stsepelin.github.io/lukk/> — machine-readable at [`/llms.txt`](https://stsepelin.github.io/lukk/llms.txt) and [`/llms-full.txt`](https://stsepelin.github.io/lukk/llms-full.txt). First-party JS/TS + Nuxt client: [lukk-js](https://stsepelin.github.io/lukk-js/).
 
+
+## Reviews
+
+**Every review of this repository, including pull-request bots, applies [`REVIEW.md`](./REVIEW.md).** Check the change against the specification table in its §4, and cite the clause each finding rests on. Use its severity bar (§2). Don't report its deliberate deviations (§6) as defects.
+
 ## Using lukk in a Laravel app
 
 lukk is minimal-dependency JWT auth for **first-party** apps (you own the client and the API): short-lived HS256 access JWTs + opaque rotating refresh tokens with reuse detection, a concurrency grace window, and a cache-backed denylist. It is intentionally **not** Passport/Sanctum/OAuth — no authorization-code/PKCE ceremony.
