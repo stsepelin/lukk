@@ -7,12 +7,14 @@ namespace Lukk\Auth;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Concerns\HasUlids;
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Lukk\Actions\ClaimSession;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
-use Lukk\Support\SubjectColumn;
 use Lukk\Support\VerifiedToken;
 
 /**
@@ -84,21 +86,25 @@ class JwtGuard
     }
 
     /**
-     * Whether `sub` could name a user at all, decided BEFORE the lookup.
+     * Whether `sub` could name a user at all — refused here only where that is certain without any I/O.
      *
-     * lukk mints `sub` from a real identifier, but a co-issuer sharing the secret (the verify-only topology)
-     * can put anything there.
+     * lukk mints `sub` from a real identifier; a co-issuer sharing the secret (the verify-only topology)
+     * mints its own, and must mint one the identifier column can hold.
      *
      * - A NUL is refused for every provider: pdo_pgsql passes a bound string as a C string, so
      *   `alice\0x` looked up `alice`.
-     * - For an Eloquent provider, the subject must be a value the identifier COLUMN's type can hold
-     *   (`SubjectColumn`, from the schema): otherwise PostgreSQL refuses the parameter with 22P02/22003, a
-     *   500 where a subject naming no user is a 401. Deciding it here, rather than reading a failed lookup
-     *   afterwards, runs no failing statement — nothing to abort in a caller's transaction — and leaves a
-     *   failure the APPLICATION causes (a scope with a mistyped binding, a mistyped `$with` relation) the
-     *   reported 500 it is. Interpreting the exception instead was tried four ways, and each one hid an
-     *   outage as a 401 or brought the 500 back for some other model shape.
-     * - Any other provider gets the subject as before: there is no column lukk could read.
+     * - For an Eloquent provider whose auth identifier IS the model's key, the model itself says what the
+     *   key holds: Laravel's `HasUuids`/`HasUlids` generate a UUID/ULID for it, and an incrementing `int` key
+     *   (the stock `id()`) holds an integer — refused unless canonical and within signed 64 bits, the widest
+     *   integer key there is. On PostgreSQL anything else was SQLSTATE 22P02/22003 on the lookup: a 500
+     *   where a subject naming no user is a 401.
+     * - Everything else goes to the provider unchecked: a Snowflake key that does not increment, an
+     *   identifier that is another column, a 32-bit `increments('id')` handed a value past int4, a domain
+     *   type, a custom provider. A subject its column cannot hold is then the provider's error, reported as
+     *   a 500 — the token was signed by a trusted issuer, so it is that issuer's bug and should surface.
+     *   Reading the schema to decide it cost every request a catalog query on the write connection, and
+     *   interpreting the failed lookup afterwards hid real outages (a broken scope, a mistyped `$with`
+     *   relation) as 401s for everybody.
      */
     private function couldName(mixed $sub): bool
     {
@@ -110,7 +116,31 @@ class JwtGuard
             return true;
         }
 
-        return (is_int($sub) || is_string($sub)) && SubjectColumn::admits($this->users->createModel(), $sub);
+        $model = $this->users->createModel();
+
+        if ($model->getAuthIdentifierName() !== $model->getKeyName()) {
+            return true;
+        }
+
+        $traits = class_uses_recursive($model);
+        // The traits generate only the columns `uniqueIds()` names — the key, unless the model says otherwise.
+        $generated = in_array($model->getKeyName(), $model->uniqueIds(), true);
+
+        if ($generated && in_array(HasUuids::class, $traits, true)) {
+            return Str::isUuid($sub);
+        }
+
+        if ($generated && in_array(HasUlids::class, $traits, true)) {
+            return Str::isUlid($sub);
+        }
+
+        if (! $model->getIncrementing() || ! in_array($model->getKeyType(), ['int', 'integer'], true)) {
+            return true;
+        }
+
+        // An int already is one; a string must be a canonical integer (no sign, padding or space) in range.
+        return is_int($sub)
+            || (is_string($sub) && preg_match('/^(?:0|-?[1-9][0-9]*)\z/', $sub) === 1 && is_int(filter_var($sub, FILTER_VALIDATE_INT)));
     }
 
     private function claimed(string $familyId, ?int $issuedAt): bool

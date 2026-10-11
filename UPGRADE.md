@@ -123,17 +123,16 @@ the rotation's row lock: read a value already in memory, never query.
   and per-session `amr` / `authenticated_at`.
 - With `Lukk::authenticateUsing()` reading a field other than `lukk.username`, the IP-independent login
   bucket is skipped (it was one bucket for everybody). Point `lukk.username` at your field to keep it.
-- A `lukk-jwt` guard over an Eloquent provider answers 401, without a lookup, for a `sub` the user
-  identifier COLUMN cannot hold — read from the schema (`Schema::getColumns()`), once per process per
-  connection, table and column: a non-integer or out-of-range value for an integer column (`"admin"`, or a
-  number past a 32-bit `increments('id')`), a non-UUID for `uuid`, a non-number for `numeric`/`decimal`.
-  On PostgreSQL such a `sub` (a co-issuer's) was SQLSTATE 22P02/22003, a 500. Other column types are not
-  checked, and if the column cannot be read the provider answers, as before. A `sub` containing a NUL byte
-  is refused for every provider (pdo_pgsql truncated `alice\0x` to `alice`). A failure in your own lookup
-  code — a scope with a mistyped binding, a mistyped `$with` relation — is reported as the error it is.
-  Providers that are not Eloquent get every other `sub` unchecked. The read is one catalog query per worker;
-  inside a transaction of yours it runs in a savepoint. A long-running worker (Octane, queues) keeps the
-  column type until it restarts, so restart workers after changing the identifier column's type.
+- **Co-issuers must mint a `sub` the user identifier column can hold.** A `lukk-jwt` guard answers 401,
+  with no query, only where the model itself makes that certain — the auth identifier is the model's key
+  and the key is the stock auto-incrementing integer (`id()`/`bigIncrements`: a canonical integer within
+  signed 64 bits, no sign, padding or spaces), a `HasUuids` UUID or a `HasUlids` ULID. A `sub` containing
+  a NUL byte is refused for every provider (pdo_pgsql truncated `alice\0x` to `alice`). Every other shape
+  goes to the provider unchecked — a non-incrementing (Snowflake) key, an identifier that is another column,
+  a uuid column the model declares nothing about, a domain type, a custom provider — and so does a value
+  past int4 for a legacy 32-bit `increments('id')`: on PostgreSQL a `sub` such a column cannot hold is
+  SQLSTATE 22P02/22003, reported as a 500 (MySQL and SQLite coerce and find no user). That is deliberate:
+  the token is signed by an issuer you trust, so a subject its column cannot hold is that issuer's bug.
 - `DELETE /auth/sessions/others` answers 409 for a token whose `fid` is empty, as for one without `fid`;
   `DELETE /auth/sessions` now also denylists the presenting token when it names no family of lukk's.
 

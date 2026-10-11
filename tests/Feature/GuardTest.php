@@ -6,12 +6,10 @@ use Firebase\JWT\JWT;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
-use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -19,10 +17,11 @@ use Lukk\Auth\JwtGuard;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenVerifier;
 use Lukk\Models\RefreshToken;
-use Lukk\Support\SubjectColumn;
 use Lukk\Tests\Fixtures\PublicIdUser;
 use Lukk\Tests\Fixtures\StringKeyUser;
+use Lukk\Tests\Fixtures\UlidUser;
 use Lukk\Tests\Fixtures\User;
+use Lukk\Tests\Fixtures\UuidUser;
 
 beforeEach(function () {
     Route::middleware('auth:api')->get('/_protected', fn (Request $r) => ['id' => $r->user()->getAuthIdentifier()]);
@@ -104,6 +103,10 @@ it('refuses a subject an integer key could never hold, without asking the databa
     'past the integer range' => ['99999999999999999999'],
     'a fraction' => ['1.5'],
     'zero-padded' => ['01'],
+    'signed' => ['+1'],
+    'spaced' => [' 1'],
+    'a trailing newline' => ["1\n"],
+    'empty' => [''],
 ]);
 
 it('resolves an integer subject, as a string or — from a rebound verifier — as an int', function () {
@@ -124,30 +127,6 @@ it('resolves an integer subject, as a string or — from a rebound verifier — 
         expect($guard(Request::create('/', server: ['HTTP_AUTHORIZATION' => 'Bearer x']))?->getKey())->toBe($user->id);
     }
 });
-
-it('decides by the column, whatever key type the model declares', function (string $keyType) {
-    // `users.id` is an integer column: a model declaring a string key does not make 'admin' a value it can
-    // hold, and the provider is never asked.
-    $guard = new JwtGuard(verifier(), new class(app('hash'), User::class, $keyType) extends EloquentUserProvider
-    {
-        public function __construct($hasher, $model, private string $keyType)
-        {
-            parent::__construct($hasher, $model);
-        }
-
-        public function createModel()
-        {
-            return parent::createModel()->setKeyType($this->keyType);
-        }
-
-        public function retrieveById($identifier)
-        {
-            return new User;
-        }
-    });
-
-    expect($guard(Request::create('/', server: ['HTTP_AUTHORIZATION' => 'Bearer '.coSubjectToken('admin')])))->toBeNull();
-})->with(['string', 'int']);
 
 function coSubjectToken(string $sub): string
 {
@@ -231,151 +210,84 @@ it('refuses a subject that is neither a string nor an integer for an Eloquent pr
     'a boolean' => [true],
 ]);
 
-it('finds the column however the model names its table', function (Closure $model) {
-    $class = $model();
-    $user = $class::query()->create(['email' => 'shape@y.com']);
+/** Counts the lookups the guard ran on the default connection. */
+function lookupsDuring(Closure $call): array
+{
     $lookups = 0;
     DB::listen(function ($query) use (&$lookups) {
-        $lookups += str_contains($query->sql, 'where "id" = ?') ? 1 : 0;
+        $lookups += str_starts_with($query->sql, 'select') ? 1 : 0;
     });
 
-    // Refused from the column's type — no lookup at all — and a real user still resolves.
-    expect(guardFor(new EloquentUserProvider(app('hash'), $class), 'admin'))->toBeNull()
-        ->and($lookups)->toBe(0)
-        ->and(guardFor(new EloquentUserProvider(app('hash'), $class), (string) $user->getKey())?->getKey())->toBe($user->getKey());
+    return [$call(), $lookups];
+}
+
+it('refuses a subject a HasUuids or HasUlids key cannot hold, with no query', function (string $model, string $table, string $bad) {
+    Schema::create($table, fn (Blueprint $t) => $table === 'uuid_users' ? $t->uuid('id')->primary() : $t->ulid('id')->primary());
+    $user = $model::query()->create();
+    $users = new EloquentUserProvider(app('hash'), $model);
+
+    expect(lookupsDuring(fn () => guardFor($users, $bad)))->toBe([null, 0])
+        ->and(lookupsDuring(fn () => guardFor($users, 7)))->toBe([null, 0])
+        ->and(guardFor($users, (string) $user->getKey())?->getKey())->toBe($user->getKey());
 })->with([
-    'schema-qualified' => [fn () => get_class(new class extends User
-    {
-        protected $table = 'main.users';
-    })],
-    'aliased' => [fn () => get_class(new class extends User
-    {
-        protected $table = 'users as u';
-    })],
-    'on a prefixed connection' => [function () {
-        config(['database.connections.prefixed' => ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => 'app_']]);
-        Schema::connection('prefixed')->create('users', function (Blueprint $table) {
+    'HasUuids' => [UuidUser::class, 'uuid_users', 'admin'],
+    'HasUuids, a ULID' => [UuidUser::class, 'uuid_users', '01ARZ3NDEKTSV4RRFFQ69G5FAV'],
+    'HasUlids' => [UlidUser::class, 'ulid_users', 'admin'],
+    'HasUlids, a UUID' => [UlidUser::class, 'ulid_users', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'],
+]);
+
+it('leaves to the provider every shape it cannot be certain of', function (Closure $model, mixed $sub) {
+    // Nothing is refused here: one lookup runs, and whatever the column makes of the subject is the
+    // provider's answer (on PostgreSQL a refused parameter is a reported 500 — CoIssuerTokenTest).
+    expect(lookupsDuring(fn () => guardFor(new EloquentUserProvider(app('hash'), $model()), $sub))[1])->toBe(1);
+})->with([
+    'an identifier that is not the key' => [function () {
+        Schema::create('public_id_users', function (Blueprint $table) {
             $table->id();
-            $table->string('email');
+            $table->uuid('public_id');
         });
 
-        return get_class(new class extends User
-        {
-            protected $connection = 'prefixed';
-        });
-    }],
-]);
+        return PublicIdUser::class;
+    }, 'admin'],
+    'a key that does not increment' => [function () {
+        Schema::create('string_key_users', fn (Blueprint $table) => $table->string('id')->primary());
 
-it('keeps the type of each connection, table and column apart', function () {
-    // Same column name on another table, same table on another connection, another column of the same
-    // table: each is its own type, and a cached one must not answer for another.
-    config(['database.connections.idle' => ['driver' => 'sqlite', 'database' => ':memory:']]);
-    Schema::connection('idle')->create('users', function (Blueprint $table) {
-        $table->string('id')->primary();
-    });
-    Schema::create('handles', function (Blueprint $table) {
-        $table->string('id')->primary();
-    });
-    DB::connection('idle')->table('users')->insert(['id' => 'usr_1']);
-    DB::table('handles')->insert(['id' => 'h_1']);
-    $user = User::factory()->create(['email' => 'apart@y.com']);
-    $byEmail = get_class(new class extends User
+        return StringKeyUser::class;
+    }, 'admin'],
+    'an incrementing key of another type' => [fn () => get_class(new class extends User
     {
-        public function getAuthIdentifierName()
-        {
-            return 'email';
-        }
-    });
-    $otherConnection = get_class(new class extends StringKeyUser
+        protected $keyType = 'string';
+    }), 'admin'],
+    'a uuid trait generating another column' => [fn () => get_class(new class extends UuidUser
     {
-        protected $connection = 'idle';
-
         protected $table = 'users';
-    });
-    $otherTable = get_class(new class extends StringKeyUser
-    {
-        protected $table = 'handles';
-    });
 
-    expect(guardFor(new EloquentUserProvider(app('hash'), User::class), 'admin'))->toBeNull()
-        ->and(guardFor(new EloquentUserProvider(app('hash'), $byEmail), 'apart@y.com')?->getKey())->toBe($user->id)
-        ->and(guardFor(new EloquentUserProvider(app('hash'), $otherConnection), 'usr_1')?->getKey())->toBe('usr_1')
-        ->and(guardFor(new EloquentUserProvider(app('hash'), $otherTable), 'h_1')?->getKey())->toBe('h_1');
-});
-
-it('reads each column once per process, until flushed', function () {
-    $reads = 0;
-    DB::listen(function ($query) use (&$reads) {
-        $reads += str_contains($query->sql, 'pragma_table_xinfo') ? 1 : 0;
-    });
-    $users = new EloquentUserProvider(app('hash'), User::class);
-
-    guardFor($users, 'admin');
-    guardFor($users, 'admin');
-    expect($reads)->toBe(1);
-
-    SubjectColumn::flush();
-    guardFor($users, 'admin');
-    expect($reads)->toBe(2);
-});
-
-it('checks nothing, and leaves the subject to the provider, when the column cannot be read', function (Closure $model) {
-    // Never a 500 because of the check itself: an unreadable catalog, or no column by that name, falls back
-    // to the provider's own answer — here SQLite's, which compares anything with anything.
-    $class = $model();
-    $user = User::factory()->create();
-    $lookups = 0;
-    DB::listen(function ($query) use (&$lookups) {
-        $lookups += str_contains($query->sql, 'from "users"') ? 1 : 0;
-    });
-
-    expect(guardFor(new EloquentUserProvider(app('hash'), $class), 'admin'))->toBeNull()
-        ->and($lookups)->toBe(1)
-        ->and(guardFor(new EloquentUserProvider(app('hash'), $class), (string) $user->id))->not->toBeNull();
-})->with([
-    'the catalog read fails' => [function () {
-        DB::connection()->beforeExecuting(function (string $sql) {
-            if (str_contains($sql, 'pragma_table_xinfo')) {
-                throw new RuntimeException('catalog unavailable');
-            }
-        });
-
-        return User::class;
-    }],
-    'no column by that name' => [fn () => get_class(new class extends User
-    {
-        public function getAuthIdentifierName()
+        public function uniqueIds()
         {
-            return 'ID';
+            return ['public_id'];
         }
-    })],
+    }), '5'],
+    'a ulid trait generating another column' => [fn () => get_class(new class extends UlidUser
+    {
+        protected $table = 'users';
+
+        public function uniqueIds()
+        {
+            return ['public_id'];
+        }
+    }), '5'],
+    'a negative integer on the stock key' => [fn () => User::class, '-5'],
+    'an int on the stock key' => [fn () => User::class, 5],
+    'zero on the stock key' => [fn () => User::class, '0'],
 ]);
 
-it('reads the column in a savepoint inside a transaction, and in none outside one', function () {
-    // On PostgreSQL a failed catalog read would abort a caller's transaction (CoIssuerTokenTest pins it);
-    // outside one, a transaction of its own would cost a BEGIN and COMMIT for nothing.
-    config(['database.connections.idle' => ['driver' => 'sqlite', 'database' => ':memory:']]);
-    Schema::connection('idle')->create('users', function (Blueprint $table) {
-        $table->id();
-        $table->string('email');
-    });
+it('treats an `integer` key type as the int it is', function () {
     $model = get_class(new class extends User
     {
-        protected $connection = 'idle';
-    });
-    $began = 0;
-    Event::listen(TransactionBeginning::class, function () use (&$began) {
-        $began++;
+        protected $keyType = 'integer';
     });
 
-    guardFor(new EloquentUserProvider(app('hash'), $model), 'admin');
-    expect($began)->toBe(0);
-
-    SubjectColumn::flush();
-    DB::connection('idle')->beginTransaction();
-    guardFor(new EloquentUserProvider(app('hash'), $model), 'admin');
-    DB::connection('idle')->rollBack();
-    expect($began)->toBe(2);
+    expect(lookupsDuring(fn () => guardFor(new EloquentUserProvider(app('hash'), $model), 'admin')))->toBe([null, 0]);
 });
 
 it('does not interpret a failing lookup: the provider\'s error is reported', function () {

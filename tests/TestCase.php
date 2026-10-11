@@ -9,7 +9,6 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use Lukk\Lukk;
 use Lukk\LukkServiceProvider;
-use Lukk\Support\SubjectColumn;
 use Lukk\Tests\Fixtures\User;
 use Orchestra\Testbench\TestCase as Orchestra;
 
@@ -38,7 +37,6 @@ class TestCase extends Orchestra
         Lukk::$runsScheduledPruning = true;
         Fixtures\ObservedRefreshToken::$onEvent = null;
         Fixtures\TenantScopedRefreshToken::$tenant = null;
-        SubjectColumn::flush();
 
         parent::tearDown();
     }
