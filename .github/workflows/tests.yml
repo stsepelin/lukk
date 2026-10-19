@@ -18,6 +18,7 @@ jobs:
         with:
           php-version: '8.4'
           coverage: none
+          ini-values: zend.assertions=1
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
@@ -50,6 +51,7 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: mbstring, sqlite3, pdo_sqlite
           coverage: none
+          ini-values: zend.assertions=1
 
       - name: Install dependencies
         run: |
@@ -109,6 +111,7 @@ jobs:
           # real side-by-side requests where the code under test is PHP, not one SQL statement.
           extensions: mbstring, sqlite3, pdo_sqlite, pdo_pgsql, pgsql, pdo_mysql, mysqli, pcntl, posix
           coverage: none
+          ini-values: zend.assertions=1
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
@@ -147,6 +150,7 @@ jobs:
           php-version: '8.4'
           extensions: mbstring, sqlite3, pdo_sqlite
           coverage: pcov
+          ini-values: zend.assertions=1
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
@@ -167,6 +171,7 @@ jobs:
           php-version: '8.4'
           extensions: mbstring, sqlite3, pdo_sqlite
           coverage: none
+          ini-values: zend.assertions=1
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-interaction --no-progress
