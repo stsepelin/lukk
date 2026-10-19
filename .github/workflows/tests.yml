@@ -75,7 +75,7 @@ jobs:
     # which reproduces on PostgreSQL (READ COMMITTED) and not on MySQL.
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: lukk
           POSTGRES_PASSWORD: lukk
@@ -85,7 +85,7 @@ jobs:
           --health-cmd "pg_isready -U lukk" --health-interval 2s
           --health-timeout 3s --health-retries 30
       mysql:
-        image: mysql:8.4
+        image: mysql:9.7
         env:
           MYSQL_ROOT_PASSWORD: lukk
           MYSQL_DATABASE: lukk

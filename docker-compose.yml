@@ -5,7 +5,7 @@
 #   LUKK_PG=1 LUKK_MYSQL=1 vendor/bin/pest --group=concurrency
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: lukk
       POSTGRES_PASSWORD: lukk
@@ -20,7 +20,7 @@ services:
       retries: 30
 
   mysql:
-    image: mysql:8.4
+    image: mysql:9.7
     environment:
       MYSQL_ROOT_PASSWORD: lukk
       MYSQL_DATABASE: lukk

@@ -26,13 +26,13 @@
         "illuminate/support": "^12.0|^13.0"
     },
     "require-dev": {
-        "laravel/pint": "^1.18",
+        "laravel/pint": "^1.32",
         "orchestra/testbench": "^10.0|^11.0",
-        "pestphp/pest": "^4.0",
-        "pragmarx/google2fa": "^9.0",
-        "web-auth/webauthn-lib": "^5.0",
+        "pestphp/pest": "^4.7|^5.3",
+        "pragmarx/google2fa": "^9.1",
+        "web-auth/webauthn-lib": "^5.3",
         "pronin/webauthn-emulator": "^1.2.2",
-        "larastan/larastan": "^3.10"
+        "larastan/larastan": "^3.13"
     },
     "suggest": {
         "pragmarx/google2fa": "Required for the two-factor (TOTP) feature — enable features.two_factor.",
