@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-19
+
 ### Added
 
 - **`Events\RecoveryCodeUsed`**, dispatched once a recovery code is spent (`$user`, `$remaining`). NIST SP 800-63B-4 §4.2 asks that the subscriber be notified of an account recovery, and a recovery code is that — for the owner who lost their authenticator, or for whoever found the printed list. lukk sends no mail: listen for it, tell the user through another channel, and prompt a new set (at `$remaining === 0` the next lost authenticator has no way back). It carries the user as an identifier when queued, like the other user events, and fires whether or not the sign-in then completes, since the code is gone either way.
@@ -536,7 +538,8 @@ Commands:
 - `lukk:keygen` Artisan command to generate an RS256/ES256 signing keypair (prints the PEMs and the env to set).
 - `lukk:prune` command for expired/revoked tokens, scheduled daily by default (opt out via `Lukk::disableScheduling()`).
 
-[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/stsepelin/lukk/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/stsepelin/lukk/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/stsepelin/lukk/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/stsepelin/lukk/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/stsepelin/lukk/compare/v0.3.0...v0.4.0

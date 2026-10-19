@@ -20,7 +20,7 @@ but the default is safe.
 
 ---
 
-## Upgrading to 0.7.0 from 0.6.x (unreleased)
+## Upgrading to 0.7.0 from 0.6.x
 
 ### The default guard must use `lukk.user_provider`
 
