@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\RegisterRequest;
+use Lukk\Support\NormalizedPasswordPolicy;
 use Lukk\Tests\Fixtures\Admin;
 use Lukk\Tests\Fixtures\User;
 
@@ -43,7 +43,7 @@ it('applies each default rule on its own', function (string $field, array $overr
     'password confirmed' => ['password', ['password_confirmation' => 'other-password-123'], 'Confirmed'],
     'password bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
     // The NUL-byte and type checks live in `after()`, for every rule set; BcryptLengthTest pins them.
-    'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
+    'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], NormalizedPasswordPolicy::class],
 ]);
 
 it('applies each rule to a username identifier too', function (array $overrides, string $rule) {

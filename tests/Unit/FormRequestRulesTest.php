@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\ChangePasswordRequest;
 use Lukk\Http\Requests\ConfirmPasswordRequest;
 use Lukk\Http\Requests\ForgotPasswordRequest;
@@ -10,6 +9,7 @@ use Lukk\Http\Requests\LoginRequest;
 use Lukk\Http\Requests\PasskeyAssertionRequest;
 use Lukk\Http\Requests\PasskeyRegistrationRequest;
 use Lukk\Http\Requests\TwoFactorChallengeRequest;
+use Lukk\Support\NormalizedPasswordPolicy;
 
 // Each rule pinned on its own (see `failedRulesFor`). A null field that should be allowed is pinned
 // by failing NOTHING, which is what `nullable` buys: without it, `string` rejects the null.
@@ -31,7 +31,7 @@ it('applies each change-password rule on its own', function (string $field, arra
     'new differs from current' => ['password', ['current_password' => 'new-password-123'], 'Different'],
     'new bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
     'new without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
-    'new meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
+    'new meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], NormalizedPasswordPolicy::class],
 ]);
 
 it('applies each step-up confirm-password rule on its own', function (string $field, array $data, string $rule) {

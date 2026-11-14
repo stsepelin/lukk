@@ -7,6 +7,7 @@ use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 use Lukk\Support\HashablePassword;
 use Lukk\Tests\Fixtures\User;
 
@@ -77,6 +78,52 @@ it('stores a reset password normalized', function () {
     ])->assertOk();
 
     expect(Hash::check(COMPOSED, storedHash($user)))->toBeTrue();
+});
+
+it('holds a new password to the policy as it will be stored, not as it was typed', function (Closure $submit) {
+    // Four `e`, each followed by a combining accent: eight characters as typed, four once composed. Judged
+    // as typed it passed the eight-character minimum and was stored — and signed in with — as four.
+    $shrinks = str_repeat("e\u{0301}", 4);
+    expect(mb_strlen($shrinks))->toBe(8)->and(mb_strlen(HashablePassword::normalize($shrinks)))->toBe(4);
+
+    $submit()($shrinks)->assertStatus(422)->assertJsonValidationErrorFor('password');
+    // The same accents on eight letters are eight characters either way: accepted.
+    $submit()(str_repeat("e\u{0301}", 8))->assertSuccessful();
+})->with([
+    'registration' => [fn () => fn (string $password) => test()->postJson('/auth/register', [
+        'name' => 'Ada', 'email' => 'policy@example.test', 'password' => $password, 'password_confirmation' => $password,
+    ])],
+    'reset' => [fn () => function (string $password) {
+        $user = User::query()->firstOrCreate(['email' => 'reset-policy@example.test'], ['name' => 'Ada', 'password' => Hash::make('old-password-1')]);
+
+        return test()->postJson('/auth/reset-password', [
+            'email' => $user->email, 'token' => Password::broker()->createToken($user),
+            'password' => $password, 'password_confirmation' => $password,
+        ]);
+    }],
+    'change' => [fn () => function (string $password) {
+        $user = User::query()->firstOrCreate(['email' => 'change-policy@example.test'], ['name' => 'Ada', 'password' => Hash::make('old-password-1')]);
+        app('auth')->forgetGuards();
+
+        return test()->withToken($user->startSession()->accessToken)->postJson('/auth/password', [
+            'current_password' => 'old-password-1', 'password' => $password, 'password_confirmation' => $password,
+        ]);
+    }],
+]);
+
+it('says what the application\'s own policy says, about the attribute it was asked about', function () {
+    PasswordRule::defaults(fn () => PasswordRule::min(12));
+    $user = User::factory()->create(['password' => Hash::make('old-password-1')]);
+
+    try {
+        $response = $this->withToken($user->startSession()->accessToken)->postJson('/auth/password', [
+            'current_password' => 'old-password-1', 'password' => 'ten-chars!', 'password_confirmation' => 'ten-chars!',
+        ])->assertStatus(422);
+    } finally {
+        PasswordRule::$defaultCallback = null;
+    }
+
+    expect($response->json('errors.password'))->toBe(['The password field must be at least 12 characters.']);
 });
 
 it('checks the current password under either spelling, and stores the new one normalized', function () {

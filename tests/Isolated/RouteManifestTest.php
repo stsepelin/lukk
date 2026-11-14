@@ -25,7 +25,7 @@ uses(MultiGuardTestCase::class)->group('multi-guard');
 /** @return array<string, list<string>> */
 function mountedRoutes(): array
 {
-    return collect(app('router')->getRoutes())
+    return lukkRoutes()
         ->mapWithKeys(fn ($route) => [
             implode('|', array_diff($route->methods(), ['HEAD'])).' '.$route->uri() => $route->gatherMiddleware(),
         ])

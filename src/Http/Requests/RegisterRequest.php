@@ -11,6 +11,7 @@ use Illuminate\Validation\Validator;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
 use Lukk\Support\Identifier;
+use Lukk\Support\NormalizedPasswordPolicy;
 
 /**
  * Registration input. Defaults to the stock Laravel shape: `name`, the unique identifier column
@@ -58,7 +59,7 @@ class RegisterRequest extends FormRequest
                 : ['required', 'string', 'max:255', 'regex:/^/u', Identifier::rule(), Rule::unique($this->userModel(), $field)],
             // max:255 bounds verifier input on this unauthenticated endpoint (ASVS V2.1).
             // The type and NUL-byte checks are `after()`'s, which runs for every rule set, this one included.
-            'password' => ['required', 'confirmed', 'max:255', HashablePassword::rule(), Password::defaults()],
+            'password' => ['required', 'confirmed', 'max:255', HashablePassword::rule(), new NormalizedPasswordPolicy],
         ];
     }
 

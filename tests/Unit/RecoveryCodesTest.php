@@ -163,7 +163,12 @@ it('reports a confirmed factor removed only when there was a secret and it was c
     $user = User::factory()->create();
     $user->forceFill(['two_factor_secret' => $secret, 'two_factor_confirmed_at' => $confirmed ? now() : null])->save();
 
-    expect(app(DisableTwoFactor::class)($user))->toBe($removed);
+    $ran = 0;
+    expect(app(DisableTwoFactor::class)($user, function () use (&$ran) {
+        $ran++;
+    }))->toBe($removed);
+    // The hook the controller ends the other sessions in: once, and only for a confirmed factor.
+    expect($ran)->toBe($removed ? 1 : 0);
 })->with([
     'confirmed' => ['encrypted', true, true],
     'pending' => ['encrypted', false, false],

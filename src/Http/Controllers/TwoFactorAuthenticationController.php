@@ -44,9 +44,9 @@ class TwoFactorAuthenticationController
 
         // Only when a confirmed factor was removed: a no-op disable, or backing out of an enrolment that
         // was never confirmed, signs nobody out.
-        if (($this->disable)($user)) {
-            $this->endOtherSessions($request, $user);
-        }
+        // Run by the action itself, before it announces the removal: a listener that throws there must
+        // not leave the other devices signed in.
+        ($this->disable)($user, fn () => $this->endOtherSessions($request, $user));
 
         return response()->noContent();
     }

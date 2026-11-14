@@ -1056,6 +1056,21 @@ it('signs nobody out when there was no second factor to turn off', function () {
     $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertOk();
 });
 
+it('ends the other sessions even when a TwoFactorAuthenticationDisabled listener throws', function () {
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $other = $user->startSession();
+    $current = start()($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp', 'mfa']]);
+    Event::listen(TwoFactorAuthenticationDisabled::class, fn () => throw new RuntimeException('mail is down'));
+
+    $this->withToken($current->accessToken)->withHeaders(confirmedHeaders($current->accessToken))
+        ->deleteJson('/auth/two-factor')->assertStatus(500);
+
+    expect($user->refresh()->two_factor_secret)->toBeNull();
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
+});
+
 it('signs nobody out when an enrolment is backed out of before it was confirmed', function () {
     // The secret is pending: no sign-in was ever challenged with it and no session carries `mfa` for it.
     // Ending the other devices' sessions for closing the QR screen is a logout nobody asked for.

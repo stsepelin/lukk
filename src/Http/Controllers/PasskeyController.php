@@ -64,8 +64,10 @@ class PasskeyController
 
         // And only when a credential was actually removed — it may have gone since the line above.
         if ($owned && $this->passkeys->delete($user->getAuthIdentifier(), $credentialId)) {
-            event(new PasskeyDeleted($user, $credentialId));
+            // The sweep first: a listener that throws (a removal notice that cannot be sent) must not leave
+            // the removed device signed in — and a retry could not finish it, the credential being gone.
             $this->endOtherSessions($request, $user);
+            event(new PasskeyDeleted($user, $credentialId));
         }
 
         return response()->noContent();

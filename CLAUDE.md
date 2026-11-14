@@ -15,7 +15,7 @@ Every review applies [`REVIEW.md`](./REVIEW.md), and that includes subagent revi
 composer install
 vendor/bin/pest                                   # full suite (Testbench, sqlite :memory:, array cache)
 XDEBUG_MODE=coverage vendor/bin/pest --coverage   # coverage
-composer test:mutation                            # Pest's own mutation testing (minutes, not seconds)
+composer test:mutation                            # Pest's own mutation testing (minutes, not seconds): patches the plugin, then run-mutation.sh
 php .github/scripts/patch-pest-mutate.php         # ALWAYS before a mutation run, on every OS: unpatched, the plugin scores mutants whose tests never ran as killed
 .github/scripts/run-mutation.sh --everything --path=src/Lukk.php   # what CI runs: --min=99, and a TIMEOUT fails the run
 vendor/bin/pint                                   # lint (Laravel preset, pint.json)

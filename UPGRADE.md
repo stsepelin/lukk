@@ -63,7 +63,9 @@ two-factor enrolment that was never confirmed signs nobody out. Code that calls
 `Actions\DisableTwoFactor` or the passkey repository directly revokes nothing.
 
 `Actions\DisableTwoFactor::__invoke()` now returns `bool` (whether a confirmed factor was removed) where
-it returned `void`. A subclass that overrides it with `: void` is a fatal error — declare `: bool` and
+it returned `void`, and takes an optional second argument — a callback run once a confirmed factor has
+been removed, before the event. A subclass that overrides it must match:
+`__invoke(Authenticatable $user, ?Closure $removed = null): bool`, call `$removed` at that point and
 return the parent's answer.
 
 ### A password change no longer fires the user model's `saving` and `updating` events

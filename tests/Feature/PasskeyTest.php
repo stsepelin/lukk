@@ -377,6 +377,23 @@ it('ends the account\'s other sessions when a passkey is removed, and keeps this
     $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
 });
 
+it('ends the other sessions even when a PasskeyDeleted listener throws', function () {
+    // The removal notice could not be sent. The passkey is gone all the same, so the sweep must already
+    // have run: a retry cannot finish it — there is nothing left to remove.
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-1', 0);
+    $other = $user->startSession();
+    $current = $user->startSession();
+    Event::listen(PasskeyDeleted::class, fn () => throw new RuntimeException('mail is down'));
+
+    $this->withToken($current->accessToken)->withHeaders(confirmedHeaders($current->accessToken))
+        ->deleteJson('/auth/passkeys/cred-1')->assertStatus(500);
+
+    expect(Passkey::query()->find('cred-1'))->toBeNull();
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
+});
+
 it('rejects registering an already-registered credential', function () {
     $user = User::factory()->create();
     $access = $user->startSession()->accessToken;

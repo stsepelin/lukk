@@ -10,7 +10,7 @@ use Lukk\Tests\RoutesOffTestCase;
 uses(RoutesOffTestCase::class);
 
 it('mounts no route when lukk.routes is off', function () {
-    expect(collect(app('router')->getRoutes())->map(fn ($route) => $route->uri())->all())->toBe([]);
+    expect(lukkRoutes()->map(fn ($route) => $route->uri())->all())->toBe([]);
 });
 
 it('leaves the notification links alone when it does not own the routes they would point at', function () {
