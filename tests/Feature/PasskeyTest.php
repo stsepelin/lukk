@@ -21,6 +21,7 @@ use Lukk\Contracts\PasskeyRepository;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Contracts\WebAuthnCeremony;
 use Lukk\Events\PasskeyCloneDetected;
+use Lukk\Events\PasskeyDeleted;
 use Lukk\Models\Lockout;
 use Lukk\Models\Passkey;
 use Lukk\Models\RefreshToken;
@@ -291,6 +292,106 @@ it('lists and deletes the user’s passkeys', function () {
     $this->withToken($access)->withHeaders(confirmedHeaders($access))->deleteJson('/auth/passkeys/cred-1')->assertNoContent();
 
     expect(app(PasskeyRepository::class)->findByCredentialId('cred-1'))->toBeNull();
+});
+
+it('deletes only a credential id spelled exactly as it is stored', function (string $spelling) {
+    // The database's equality is looser than the id: MySQL's default collation folds case and pads
+    // trailing spaces, and pdo_pgsql cuts a bound string at a NUL. Each of those deleted `AbCdEf`, and
+    // `PasskeyDeleted` — the out-of-band "an authenticator was removed" notice — named an id that was
+    // never registered. sqlite compares exactly, so the engine's looseness is played by a repository
+    // whose `delete()` says yes to anything.
+    Event::fake([PasskeyDeleted::class]);
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+
+    $loose = Mockery::mock(PasskeyRepository::class);
+    $loose->shouldReceive('credentialIdsFor')->with($user->id)->andReturn(['AbCdEf']);
+    $loose->shouldReceive('delete')->andReturn(true);
+    $this->app->instance(PasskeyRepository::class, $loose);
+
+    $this->withToken($access)->withHeaders($headers)->deleteJson('/auth/passkeys/'.rawurlencode($spelling))->assertNoContent();
+
+    $loose->shouldNotHaveReceived('delete');
+    Event::assertNotDispatched(PasskeyDeleted::class);
+
+    $this->withToken($access)->withHeaders($headers)->deleteJson('/auth/passkeys/AbCdEf')->assertNoContent();
+
+    $loose->shouldHaveReceived('delete')->once()->with($user->id, 'AbCdEf');
+    Event::assertDispatched(PasskeyDeleted::class, fn (PasskeyDeleted $e) => $e->credentialId === 'AbCdEf');
+})->with([
+    'another case' => ['ABCDEF'],
+    'a trailing space' => ['AbCdEf '],
+    'a NUL and a tail' => ["AbCdEf\0tail"],
+]);
+
+it('stores only well-formed transport hints, and only a handful', function () {
+    // The client's own description of its authenticator, unsigned under `none` attestation. It went to
+    // the database as it arrived — nested arrays, numbers, a megabyte of entries.
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+    $challenge = $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json('challenge');
+
+    $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys', ['credential' => [
+        'challenge' => $challenge, 'id' => 'cred-transports',
+        'transports' => [
+            'usb', ['x' => ['y']], 7, 'usb', 'NFC!', 'Internal', '-ble', '', str_repeat('a', 33), str_repeat('b', 32),
+            'smart-card', 'hybrid', 'internal', 'nfc', 'ble', 'cable2', 'one-too-many',
+        ],
+    ]])->assertNoContent();
+
+    expect(Passkey::query()->find('cred-transports')->transports)
+        ->toBe(['usb', str_repeat('b', 32), 'smart-card', 'hybrid', 'internal', 'nfc', 'ble', 'cable2']);
+});
+
+it('stores transport hints as a list when the client sends an object', function () {
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+    $challenge = $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json('challenge');
+
+    $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys', ['credential' => [
+        'challenge' => $challenge, 'id' => 'cred-keyed', 'transports' => ['a' => 'usb', 'b' => 'nfc', 3 => 'ble'],
+    ]])->assertNoContent();
+
+    expect(Passkey::query()->find('cred-keyed')->transports)->toBe(['usb', 'nfc', 'ble']);
+});
+
+it('ends the account\'s other sessions when a passkey is removed, and keeps this one', function () {
+    // Removing a passkey is what a user does about a device they no longer hold or trust; the sessions
+    // that device signed in stayed alive.
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-1', 0);
+    $other = $user->startSession();
+    $current = $user->startSession();
+    $headers = confirmedHeaders($current->accessToken);
+
+    // Removing nothing signs nobody out.
+    $this->withToken($current->accessToken)->withHeaders($headers)->deleteJson('/auth/passkeys/not-mine')->assertNoContent();
+    expect(RefreshToken::query()->whereNull('revoked_at')->count())->toBe(2);
+
+    $this->withToken($current->accessToken)->withHeaders($headers)->deleteJson('/auth/passkeys/cred-1')->assertNoContent();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
+});
+
+it('ends the other sessions even when a PasskeyDeleted listener throws', function () {
+    // The removal notice could not be sent. The passkey is gone all the same, so the sweep must already
+    // have run: a retry cannot finish it — there is nothing left to remove.
+    $user = User::factory()->create();
+    storePasskey($user->id, 'cred-1', 0);
+    $other = $user->startSession();
+    $current = $user->startSession();
+    Event::listen(PasskeyDeleted::class, fn () => throw new RuntimeException('mail is down'));
+
+    $this->withToken($current->accessToken)->withHeaders(confirmedHeaders($current->accessToken))
+        ->deleteJson('/auth/passkeys/cred-1')->assertStatus(500);
+
+    expect(Passkey::query()->find('cred-1'))->toBeNull();
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
 });
 
 it('rejects registering an already-registered credential', function () {

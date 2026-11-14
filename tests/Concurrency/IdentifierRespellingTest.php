@@ -28,6 +28,13 @@ dataset('respellings', [
     'combining grapheme joiner (ignorable)' => ["victim\u{034F}@example.com"],
     'trailing ideographic space (PAD SPACE)' => ["victim@example.com\u{3000}"],
     'combining mark (accent-insensitive)' => ["vi\u{0301}ctim@example.com"],
+    // Spellings the fold itself keys APART while `utf8mb4_unicode_ci` weighs them as the plain letters:
+    // no fold short of the collation's own weight table closes these, so the lookup refuses any spelling
+    // that does not fold to the stored one (`AttemptLogin::spelledAsStored()`).
+    'modifier letter the fold upper-cases (ᴵ → I)' => ["v\u{1D35}ctim@example.com"],
+    'letterlike symbol the fold upper-cases (ℂ → C)' => ["vi\u{2102}tim@example.com"],
+    'combining Latin letter the fold strips (U+0365 for i)' => ["v\u{0365}ctim@example.com"],
+    'ignorable sign the fold transliterates (U+0903 → H)' => ["victim\u{0903}@example.com"],
 ]);
 
 it('gives a respelled identifier no guesses past the account cap', function (string $respelled) {

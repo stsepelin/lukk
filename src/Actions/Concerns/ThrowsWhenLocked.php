@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Actions\Concerns;
 
 use Illuminate\Validation\ValidationException;
+use Lukk\Exceptions\RetryableValidationException;
 
 /**
  * The one place the "this account is locked" response is defined.
@@ -30,11 +31,16 @@ trait ThrowsWhenLocked
         // Every caller reaches here through a non-null `$lockouts`; the `?->` only states that it may be.
         $seconds = $this->lockouts?->availableIn($purpose, $subject, $this->lockoutGuard()); // @pest-mutate-ignore: RemoveNullSafeOperator
 
-        throw ValidationException::withMessages([
-            $field => [$seconds === null
-                ? __('This account is locked. Contact support to restore access.')
-                // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
-                : __('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
-        ])->status(423);
+        // With no automatic release there is nothing to wait for, so no `Retry-After` either.
+        if ($seconds === null) {
+            throw ValidationException::withMessages([
+                $field => [__('This account is locked. Contact support to restore access.')],
+            ])->status(423);
+        }
+
+        throw RetryableValidationException::withMessages([
+            // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
+            $field => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
+        ])->retryAfter($seconds)->status(423);
     }
 }

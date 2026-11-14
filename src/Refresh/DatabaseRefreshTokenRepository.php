@@ -12,6 +12,7 @@ use Illuminate\Support\Str;
 use Lukk\Contracts\RefreshTokenRepository;
 use Lukk\Lukk;
 use Lukk\Support\RefreshTokenRecord;
+use Lukk\Support\RepeatedHour;
 use RuntimeException;
 
 /**
@@ -110,7 +111,9 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
             id: $row->id,
             userId: $row->user_id,
             familyId: $row->family_id,
-            rotatedAt: $row->rotated_at?->getTimestamp(),
+            // Not the bare timestamp: in the hour a clock change repeats, the stored string names two
+            // instants, and the grace window is decided on this one (`RepeatedHour`).
+            rotatedAt: $row->rotated_at === null ? null : RepeatedHour::resolve($row->rotated_at, now()->getTimestamp()),
             revokedAt: $row->revoked_at?->getTimestamp(),
             expiresAt: $row->expires_at->getTimestamp(),
             scope: $row->scope ?? null,
@@ -311,9 +314,10 @@ class DatabaseRefreshTokenRepository implements RefreshTokenRepository
 
     public function pruneExpired(): int
     {
-        // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one still
-        // resolves to `reuse` (fires the reuse event + family cascade) instead of a generic `unknown`
-        // reject — they self-delete once they expire. Guard-agnostic: prunes every guard's expired rows.
+        // Only prune past `expires_at`. Keep revoked-but-unexpired rows so a replay of one is still
+        // recognised (`RotationOutcome::dead()`, answered `revoked`; the family's cascade and its event
+        // ran when it was revoked) instead of a generic `unknown` reject — they self-delete once they
+        // expire. Guard-agnostic: prunes every guard's expired rows.
         //
         // Nothing to prune where the publish-only migration never ran: the sweep is scheduled on every
         // install, a verify-only resource server included, and there it threw every day. Asked on the

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Illuminate\Auth\DatabaseUserProvider;
 use Illuminate\Auth\EloquentUserProvider;
 use Illuminate\Auth\Events\Lockout;
 use Illuminate\Contracts\Auth\Authenticatable;
@@ -18,6 +19,7 @@ use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Exceptions\RetryableValidationException;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
 use RuntimeException;
@@ -202,11 +204,7 @@ class AttemptLogin
             // failure limiter, since that counts `ValidationException` and not `ValueError`.
             // `LoginRequest` now rejects NUL outright; this is the belt to that braces, and it also
             // covers a rebound hasher with its own opinions about what it will not hash.
-            try {
-                Hash::make($credentials['password']);
-            } catch (\Throwable) {
-                // Nothing to report: the work was the only point, and the failure below is the answer.
-            }
+            $this->derive($credentials['password']);
 
             $this->fail();
         }
@@ -217,18 +215,19 @@ class AttemptLogin
         // where an unknown identifier gets a 422, which is the same single-request account oracle the
         // NUL byte opened on the branch above, on the neighbouring line. A stored hash the active
         // driver cannot read is not a credential anyone can present, so it fails closed.
-        try {
-            $valid = $this->users->validateCredentials($user, $credentials);
-        } catch (\Throwable) {
-            $valid = false;
-        }
+        //
+        // Checked under each SPELLING of the password — as typed, then Unicode-normalized when that
+        // differs (`HashablePassword::spellings()`) — and `derive()` pays one derivation per spelling on
+        // the unknown-identifier path, so the count stays equal for a real account and for none.
+        $verified = HashablePassword::verified($this->users, $user, $credentials);
+        $valid = $verified !== null;
 
         // bcrypt reads 72 bytes, so against a bcrypt row a longer password is verified only in part:
         // every string sharing the prefix says yes. NIST SP 800-63B-4 §3.1.1.2 requires verifying the
         // ENTIRE password. lukk no longer stores one this long, but releases before 0.7 did, so its
         // owner is told to reset rather than that it is wrong. Decided AFTER the check, so the
         // derivation is still paid; counted as a failure like any other refusal.
-        if ($valid && HashablePassword::verifiesOnlyInPart($user, $credentials['password'])) {
+        if ($valid && HashablePassword::verifiesOnlyInPart($user, $verified)) {
             throw HashablePassword::mustReset($this->field());
         }
 
@@ -246,11 +245,7 @@ class AttemptLogin
             // phishing a passkey or a reset link out of. `needsRehash` says yes for both, so the same
             // line covers them; a separate branch for them used to sit above and is no longer needed.
             if ($this->storedHashIsWeak($user)) {
-                try {
-                    Hash::make($credentials['password']);
-                } catch (\Throwable) {
-                    // As above: the work is the point; the failure below is the answer.
-                }
+                $this->derive($credentials['password']);
             }
 
             $this->fail();
@@ -261,7 +256,7 @@ class AttemptLogin
         // being both weaker and distinguishable. Off when the application turned it off.
         if (config('hashing.rehash_on_login', true)) {
             try {
-                $this->rehash($user, $credentials['password']);
+                $this->rehash($user, $verified);
             } catch (\Throwable $e) {
                 // A failed upgrade must not fail a correct sign-in; the next one tries again.
                 report($e);
@@ -269,6 +264,23 @@ class AttemptLogin
         }
 
         return $user;
+    }
+
+    /**
+     * Pay what checking this password against a stored hash at the configured cost would have paid: one
+     * key derivation per spelling it is checked under. The work is the only point.
+     *
+     * It must never THROW on attacker-controlled input, whatever the hasher is — see the caller.
+     */
+    private function derive(#[\SensitiveParameter] string $password): void
+    {
+        foreach (HashablePassword::spellings($password) as $spelling) {
+            try {
+                Hash::make($spelling);
+            } catch (\Throwable) {
+                // Nothing to report: the failure the caller throws next is the answer.
+            }
+        }
     }
 
     /** Would the hasher rehash this stored value — weaker than configured, or not one it can read? */
@@ -296,9 +308,9 @@ class AttemptLogin
         // The `(int)` is type hygiene, not behaviour: `ceil()` is always integral, and the value's
         // only consumer is a translation replacement, where `(string) 32.0` and `(string) 32` are
         // the same characters.
-        throw ValidationException::withMessages([
+        throw RetryableValidationException::withMessages([
             $this->field() => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
-        ])->status(429);
+        ])->retryAfter($seconds)->status(429);
     }
 
     private function fail(): never
@@ -435,7 +447,49 @@ class AttemptLogin
             return null;
         }
 
-        return $this->users->retrieveByCredentials($this->credentials($request));
+        $credentials = $this->credentials($request);
+        $candidate = $this->users->retrieveByCredentials($credentials);
+
+        return $candidate !== null && $this->spelledAsStored($candidate, $credentials[$this->field()]) ? $candidate : null;
+    }
+
+    /**
+     * Does the identifier as TYPED fold to the same throttle key as the one the row STORES?
+     *
+     * The throttle and the lockout key on the identifier's fold (`LoginRateLimiter::normalize()`), which is
+     * only a cap while every spelling the database resolves to an account folds to that account's key. The
+     * fold was widened spelling by spelling to stay as coarse as the engine's equality, and cannot get
+     * there: measured against `utf8mb4_unicode_ci`, 184 code points still compare equal to an ASCII
+     * character while folding apart from it (`ᴵ` folds to an upper-case `I`, `ℂ` to `C`, U+0365 is a
+     * combining `i` the fold strips) and 24 more are ignored by the collation and kept by the fold; a
+     * numeric identifier column equates `123456abc` with `123456`. Each such spelling was a fresh bucket
+     * AND a verified guess — with the right password it signed in past a spent account bucket.
+     *
+     * So the rule is enforced where it can be decided exactly: a row the lookup returned under a spelling
+     * that does not fold to its own stored identifier is no candidate at all. The attempt then takes the
+     * unknown-identifier path — the same lookup, one derivation, the same 422, the fold's counter only —
+     * so a respelled account answers exactly as no account does, and its `id:` lockout counter can no
+     * longer be reached (and locked, an existence oracle) through a spelling of someone else's choosing.
+     *
+     * What it cannot refuse: the spelling the row stores, or any the fold already equates with it — case,
+     * accents, width, trailing space. Only the stock providers, by exact class: a subclass, or
+     * `authenticateUsing`, may resolve a virtual identifier (a formatted phone number) that was never
+     * meant to equal the column. A stored value that is not text is not judged.
+     */
+    private function spelledAsStored(Authenticatable $candidate, string $typed): bool
+    {
+        if (Lukk::$authenticateUsing !== null || ! in_array($this->users::class, [EloquentUserProvider::class, DatabaseUserProvider::class], true)) {
+            return true;
+        }
+
+        // Property access reaches an Eloquent attribute and a GenericUser's alike.
+        $stored = $candidate->{$this->field()} ?? null;
+
+        if (! is_scalar($stored) && ! $stored instanceof \Stringable) {
+            return true;
+        }
+
+        return LoginRateLimiter::normalize((string) $stored) === LoginRateLimiter::normalize($typed);
     }
 
     /** @return array<string, string> the identifier under `lukk.username`, and the password */

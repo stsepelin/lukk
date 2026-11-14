@@ -156,3 +156,22 @@ it('takes no lock for a code that matches nothing', function () {
     expect($user->useRecoveryCode('wrong-guess'))->toBeFalse()
         ->and($opened)->toBe(0);
 });
+
+it('reports a confirmed factor removed only when there was a secret and it was confirmed', function (?string $secret, bool $confirmed, bool $removed) {
+    // What the controller ends the account's other sessions on. A confirmation with no secret behind it
+    // is not a factor (`hasEnabledTwoFactor()`), and a secret never confirmed was never used to sign in.
+    $user = User::factory()->create();
+    $user->forceFill(['two_factor_secret' => $secret, 'two_factor_confirmed_at' => $confirmed ? now() : null])->save();
+
+    $ran = 0;
+    expect(app(DisableTwoFactor::class)($user, function () use (&$ran) {
+        $ran++;
+    }))->toBe($removed);
+    // The hook the controller ends the other sessions in: once, and only for a confirmed factor.
+    expect($ran)->toBe($removed ? 1 : 0);
+})->with([
+    'confirmed' => ['encrypted', true, true],
+    'pending' => ['encrypted', false, false],
+    'a confirmation with no secret' => [null, true, false],
+    'nothing' => [null, false, false],
+]);

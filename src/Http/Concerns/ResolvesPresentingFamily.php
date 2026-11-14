@@ -5,9 +5,8 @@ declare(strict_types=1);
 namespace Lukk\Http\Concerns;
 
 use Illuminate\Http\Request;
-use Lukk\Contracts\Denylist;
+use Lukk\Contracts\TokenVerifier;
 use Lukk\Lukk;
-use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
 
 /**
  * The refresh-token family of the access token making THIS request.
@@ -36,7 +35,9 @@ trait ResolvesPresentingFamily
 
         // `getDefaultDriver()` is declared to return a string; the cast states it.
         $guard = (string) app('auth')->getDefaultDriver(); // @pest-mutate-ignore: RemoveStringCast
-        $claims = (new FirebaseTokenVerifier(Lukk::guardConfig($guard), app(Denylist::class)))->verify($bearer);
+        // The bound verifier, pinned to the guard that authenticated — the same one the guard itself uses,
+        // so a rebound `TokenVerifier` decides both or neither.
+        $claims = Lukk::onGuard($guard, fn () => app(TokenVerifier::class))->verify($bearer);
         $family = $claims === null ? null : (string) ($claims->fid ?? '');
 
         return $family === '' ? null : $family;

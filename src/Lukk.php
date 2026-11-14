@@ -244,7 +244,7 @@ class Lukk
     {
         $flag = self::guardConfig($guard)['features']['two_factor'] ?? null;
 
-        return $flag === null || $flag === '' || (bool) $flag;
+        return $flag === null || $flag === '' || $flag;
     }
 
     /**
@@ -412,8 +412,21 @@ class Lukk
             return $lukk;
         }
 
-        $merged = LukkServiceProvider::mergeConfig($lukk, (array) ($lukk['guards'][$name] ?? []));
+        $guard = (array) ($lukk['guards'][$name] ?? []);
+        $merged = LukkServiceProvider::mergeConfig($lukk, $guard);
         unset($merged['guards']);
+
+        // A guard that declares its own verification keys owns the WHOLE set. `keys.public` is a map
+        // (kid => key), so the deep merge backfilled the default guard's kids into it: a token signed
+        // with the default guard's private key — carrying this guard's `iss`/`aud` — verified here, and
+        // this guard's JWKS published a key that is not its own. Per-guard keys exist so that one
+        // guard's key says nothing on another (RFC 8725 §3.8). A guard declaring no `public` still
+        // inherits, or nothing it mints would verify.
+        $own = $guard['keys']['public'] ?? null;
+
+        if (is_array($own)) {
+            $merged['keys']['public'] = $own;
+        }
 
         return $merged;
     }

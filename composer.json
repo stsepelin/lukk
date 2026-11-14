@@ -58,7 +58,11 @@
     "scripts": {
         "test": "pest",
         "test:coverage": "XDEBUG_MODE=coverage pest --coverage",
-        "test:mutation": "XDEBUG_MODE=coverage pest --mutate --parallel --covered-only --everything"
+        "test:mutation": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php .github/scripts/patch-pest-mutate.php @no_additional_args",
+            ".github/scripts/run-mutation.sh --everything"
+        ]
     },
     "minimum-stability": "stable",
     "prefer-stable": true,

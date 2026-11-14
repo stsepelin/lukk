@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Routing\Route;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Testing\PendingCommand;
 use Lukk\Actions\RevokeAllSessions;
@@ -205,4 +207,19 @@ function failedRulesFor(array $rules, array $data, string $field): array
 function mfaSession(Authenticatable $user): string
 {
     return start()($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp', 'mfa']])->accessToken;
+}
+
+/**
+ * The routes lukk mounted: those served by one of its own controllers.
+ *
+ * Not every route in the application — the framework adds its own (Laravel 12 mounts `storage/{path}`
+ * for the local disk), and a test about what lukk registers must not start failing when it does.
+ *
+ * @return Collection<int, Route>
+ */
+function lukkRoutes(): Collection
+{
+    return collect(app('router')->getRoutes()->getRoutes())
+        ->filter(fn (Route $route) => str_starts_with(ltrim($route->getActionName(), '\\'), 'Lukk\\'))
+        ->values();
 }

@@ -75,6 +75,41 @@ it('registers and logs in through the real web-auth ceremony (end-to-end crypto)
     $this->postJson('/auth/passkeys/login', ['ceremony_id' => $start['ceremony_id'], 'credential' => $assertion])->assertOk();
 });
 
+it('refuses a ceremony the client reports as running in a cross-origin frame', function () {
+    // WebAuthn L3 §7.1 step 10 / §7.2 step 13. The library checks `topOrigin` only when it is present,
+    // so `crossOrigin: true` on its own enrolled, signed in and stepped up.
+    $authenticator = new UserVerifyingAuthenticator(new InMemoryRepository);
+    $embedded = ['crossOrigin' => true];
+
+    $user = User::factory()->create();
+    $access = $user->startSession()->accessToken;
+    $headers = confirmedHeaders($access);
+    $options = fn () => $this->withToken($access)->withHeaders($headers)->postJson('/auth/passkeys/registration-options')->assertOk()->json();
+
+    $this->withToken($access)->withHeaders($headers)
+        ->postJson('/auth/passkeys', ['credential' => toBase64Url((new UserVerifyingAuthenticator(new InMemoryRepository))->getAttestation($options(), 'https://localhost', $embedded))])
+        ->assertStatus(422);
+    $this->withToken($access)->getJson('/auth/passkeys')->assertOk()->assertJsonCount(0, 'passkeys');
+
+    // Enrolled top-level, then asserted from a frame. `crossOrigin: false` is what a browser sends for a
+    // top-level ceremony, and stays accepted.
+    $this->withToken($access)->withHeaders($headers)
+        ->postJson('/auth/passkeys', ['credential' => toBase64Url($authenticator->getAttestation($options(), 'https://localhost', ['crossOrigin' => false]))])
+        ->assertNoContent();
+
+    $login = function (array $extra) use ($authenticator) {
+        $start = $this->postJson('/auth/passkeys/login-options')->assertOk()->json();
+
+        return $this->postJson('/auth/passkeys/login', [
+            'ceremony_id' => $start['ceremony_id'],
+            'credential' => toBase64Url($authenticator->getAssertion('localhost', null, $start['options']['challenge'], 'https://localhost', $extra)),
+        ]);
+    };
+
+    $login($embedded)->assertStatus(422);
+    $login(['crossOrigin' => false])->assertOk();
+});
+
 it('rejects a presence-only assertion when user verification is required', function () {
     config(['lukk.passkeys.user_verification' => 'required']);
     $authenticator = new Authenticator(new InMemoryRepository);

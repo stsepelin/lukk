@@ -21,6 +21,8 @@ class JwksController
     {
         $jwks = (new KeyRing(Lukk::guardConfig()))->jwks();
 
-        return response()->json($jwks)->setPublic()->setMaxAge(3600);
+        // RFC 7517 §8.5.1 registers `application/jwk-set+json` for a JWK Set; it is still JSON to any client
+        // that parses the body, and says what the document is to one that dispatches on the type.
+        return response()->json($jwks)->header('Content-Type', 'application/jwk-set+json')->setPublic()->setMaxAge(3600);
     }
 }

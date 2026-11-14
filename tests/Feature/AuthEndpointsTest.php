@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Schema;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
 use Lukk\Events\RefreshTokenReused;
+use Lukk\Http\Middleware\ForceJsonRequest;
 use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Tests\Fixtures\User;
@@ -227,6 +228,17 @@ it('answers a 401 with the WWW-Authenticate challenge RFC 6750 §3 requires', fu
 
         expect($header)->toContain('error="invalid_token"');
     }
+});
+
+it('does not call a valid access token invalid when the refresh token is what failed', function () {
+    // RFC 6750 §3.1: `invalid_token` describes the access token presented. `/auth/refresh` takes no
+    // bearer; a client that sends one anyway alongside a dead refresh token was told the bearer was
+    // "expired, revoked, or otherwise invalid" — and a generic OAuth client then discards a good token.
+    $access = User::factory()->create()->startSession()->accessToken;
+
+    $this->withToken($access)->postJson('/auth/refresh', ['refresh_token' => 'not-a-refresh-token'])
+        ->assertUnauthorized()
+        ->assertHeader('WWW-Authenticate', 'Bearer');
 });
 
 it('refuses, rather than answering 204, for a bearer that names no session', function (array $fid) {
@@ -555,4 +567,15 @@ it('logs a Lukk::actingAs user out everywhere, with no token presented', functio
     $this->deleteJson('/auth/sessions')->assertSuccessful();
 
     expect(RefreshToken::whereNull('revoked_at')->count())->toBe(0);
+});
+
+it('adds the bearer challenge to a 401 only, and never replaces one already there', function () {
+    // RFC 6750 §3 puts the challenge on a 401. On a 200 it is noise; over an existing header it would
+    // overwrite the scheme a host application's own guard had named.
+    expect($this->getJson('/auth/jwks')->assertOk()->headers->has('WWW-Authenticate'))->toBeFalse();
+
+    app('router')->get('/auth/teapot', fn () => response()->json([], 401, ['WWW-Authenticate' => 'Basic realm="host"']))
+        ->middleware(ForceJsonRequest::class);
+
+    $this->getJson('/auth/teapot')->assertUnauthorized()->assertHeader('WWW-Authenticate', 'Basic realm="host"');
 });

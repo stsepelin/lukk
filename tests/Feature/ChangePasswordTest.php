@@ -3,12 +3,24 @@
 declare(strict_types=1);
 
 use Firebase\JWT\JWT;
+use Illuminate\Auth\EloquentUserProvider;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Hashing\Hasher;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Hashing\AbstractHasher;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use Lukk\Actions\ChangePassword;
+use Lukk\Actions\RevokeAllSessions;
+use Lukk\Actions\RevokeOtherSessions;
+use Lukk\Contracts\LockoutRepository;
 use Lukk\Events\PasswordChanged;
 use Lukk\Models\Lockout;
 use Lukk\Models\RefreshToken;
@@ -371,4 +383,259 @@ it('writes the new password to the column the model names', function () {
     ])->assertSuccessful();
 
     expect(Hash::check('brand-new-pass-1', (string) DB::table('users')->where('id', $user->id)->value('passwd')))->toBeTrue();
+});
+
+/**
+ * `ChangePassword`, with something happening to the row between the check of the current password and
+ * the write of the new one — the moment a concurrent request's commit lands.
+ */
+function changeWithInterleaving(User $user, Closure $meanwhile, ?LockoutRepository $lockouts = null): void
+{
+    $provider = new class(app('hash'), User::class) extends EloquentUserProvider
+    {
+        public ?Closure $meanwhile = null;
+
+        public function validateCredentials(Authenticatable $user, #[SensitiveParameter] array $credentials): bool
+        {
+            // A provider may read more of the user than its password (a tenant, a status column): the
+            // re-check hands it the whole account, with only the hash replaced by the one now stored.
+            $valid = parent::validateCredentials($user, $credentials) && $user->getAuthIdentifier() !== null && $user->email !== null;
+
+            if ($this->meanwhile !== null) {
+                [$meanwhile, $this->meanwhile] = [$this->meanwhile, null];
+                $meanwhile();
+            }
+
+            return $valid;
+        }
+    };
+    $provider->meanwhile = $meanwhile;
+
+    (new ChangePassword($provider, app(RevokeOtherSessions::class), app(RevokeAllSessions::class), $lockouts, 'api'))($user, 'password', 'attacker-chosen-1', null);
+}
+
+it('does not write over a recovery reset that committed after the current password was checked', function () {
+    // Someone holds the OLD password and a live token; the owner resets. The change had verified `password`
+    // against the hash loaded when its request began, then wrote unconditionally — over the owner's new one.
+    $user = User::factory()->create();
+    $recovered = Hash::make('owner-recovered-1');
+
+    expect(fn () => changeWithInterleaving($user, fn () => DB::table('users')->where('id', $user->id)->update(['password' => $recovered])))
+        ->toThrow(fn (ValidationException $e) => expect($e->errors())->toHaveKey('current_password'));
+
+    expect(DB::table('users')->where('id', $user->id)->value('password'))->toBe($recovered)
+        ->and(DB::transactionLevel())->toBe(1);
+});
+
+it('still changes the password when a concurrent sign-in only rehashed the same one', function () {
+    // The hash moved, the password did not: refusing here would fail a legitimate change at random.
+    $user = User::factory()->create();
+
+    changeWithInterleaving($user, fn () => DB::table('users')->where('id', $user->id)->update(['password' => Hash::make('password', ['rounds' => 5])]));
+
+    expect(Hash::check('attacker-chosen-1', DB::table('users')->where('id', $user->id)->value('password')))->toBeTrue();
+});
+
+it('refuses a change for an account deleted meanwhile, rather than recreating anything', function () {
+    $user = User::factory()->create();
+
+    expect(fn () => changeWithInterleaving($user, fn () => DB::table('users')->where('id', $user->id)->delete()))
+        ->toThrow(ValidationException::class);
+
+    expect(DB::table('users')->count())->toBe(0);
+});
+
+it('counts a change refused because the password moved under it as a wrong guess', function () {
+    // The second check of the current password is a check like the first: one that fails has to reach
+    // the lockout, or the holder of an old password gets a free guess every time the owner resets.
+    config(['lukk.features.lockout' => true, 'lukk.lockout.max_attempts' => 1]);
+    $user = User::factory()->create();
+
+    expect(fn () => changeWithInterleaving(
+        $user,
+        fn () => DB::table('users')->where('id', $user->id)->update(['password' => Hash::make('owner-recovered-1')]),
+        app(LockoutRepository::class),
+    ))->toThrow(ValidationException::class);
+
+    expect(Lockout::where('purpose', 'confirm')->where('subject', (string) $user->getKey())->whereNotNull('locked_at')->exists())->toBeTrue();
+});
+
+it('tells the user model\'s observers once the password is stored, outside any transaction of its own', function () {
+    // The write is a conditional query, so Eloquent fires nothing by itself. An audit observer on the
+    // user model still has to hear of a password change — and must not run inside a transaction lukk
+    // holds: on PostgreSQL an observer that swallowed a failed query aborted it, `COMMIT` became
+    // `ROLLBACK`, and the change answered "password-changed" having stored nothing.
+    $user = User::factory()->create();
+    $level = DB::transactionLevel();
+    $seen = [];
+    $note = function (string $event) use (&$seen) {
+        return function (User $changed) use (&$seen, $event) {
+            $seen[] = [
+                $event, $changed->wasChanged('password'), DB::transactionLevel(),
+                Hash::check('attacker-chosen-1', (string) DB::table('users')->where('id', $changed->id)->value('password')),
+            ];
+        };
+    };
+    User::updating($note('updating'));
+    User::updated($note('updated'));
+    User::saved($note('saved'));
+
+    changeWithInterleaving($user, fn () => null);
+
+    expect($seen)->toBe([['updated', true, $level, true], ['saved', true, $level, true]])
+        ->and($user->isDirty())->toBeFalse()
+        ->and(Hash::check('attacker-chosen-1', $user->password))->toBeTrue();
+});
+
+class PasswordAudited
+{
+    public function __construct(public User $user) {}
+}
+
+class AuditedUser extends User
+{
+    protected $table = 'users';
+
+    protected $dispatchesEvents = ['updated' => PasswordAudited::class];
+}
+
+it('fires the event class a model maps to `updated`, as a save would', function () {
+    Event::fake([PasswordAudited::class]);
+    $user = AuditedUser::query()->findOrFail(User::factory()->create()->getKey());
+
+    changeWithInterleaving($user, fn () => null);
+
+    Event::assertDispatched(PasswordAudited::class, fn (PasswordAudited $event) => $event->user->is($user) && $event->user->wasChanged('password'));
+});
+
+it('takes the password as written when the row already holds the very hash it was writing', function () {
+    // MySQL reports rows CHANGED, not rows matched: an UPDATE that sets the value it found answers 0,
+    // exactly as one that matched nothing does. With a hasher that derives the same hash twice — no
+    // salt, as some legacy and test hashers have none — retrying that write would never end. Reproduced
+    // here by another request storing the same new password first.
+    Hash::extend('unsalted', fn () => new class extends AbstractHasher implements Hasher
+    {
+        public function make(#[SensitiveParameter] $value, array $options = []): string
+        {
+            return 'unsalted:'.hash('sha256', (string) $value);
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            return hash_equals((string) $hashedValue, $this->make($value));
+        }
+
+        public function needsRehash($hashedValue, array $options = []): bool
+        {
+            return false;
+        }
+    });
+    config(['hashing.driver' => 'unsalted']);
+    $user = User::factory()->create(['password' => Hash::make('password')]);
+
+    changeWithInterleaving($user, fn () => DB::table('users')->where('id', $user->id)->update(['password' => Hash::make('attacker-chosen-1')]));
+
+    expect(DB::table('users')->where('id', $user->id)->value('password'))->toBe(Hash::make('attacker-chosen-1'));
+});
+
+it('changes the password for a model with no event dispatcher', function () {
+    // `Model::unsetEventDispatcher()` — a console command or a seeder that switched model events off.
+    $user = User::factory()->create();
+    $dispatcher = User::getEventDispatcher();
+    User::unsetEventDispatcher();
+
+    try {
+        changeWithInterleaving($user, fn () => null);
+    } finally {
+        User::setEventDispatcher($dispatcher);
+    }
+
+    expect(Hash::check('attacker-chosen-1', (string) DB::table('users')->where('id', $user->id)->value('password')))->toBeTrue();
+});
+
+function changeTo(string $access, string $password = 'new-password-1')
+{
+    return test()->withToken($access)->postJson('/auth/password', [
+        'current_password' => 'password', 'password' => $password, 'password_confirmation' => $password,
+    ]);
+}
+
+it('drops a reset link requested before the change', function () {
+    // A reset token outlives the password it was requested for. Whoever asked for one could let the owner
+    // change the password and then undo that with the older link.
+    [$user, $pair] = signedIn();
+    $token = Password::broker()->createToken($user);
+
+    changeTo($pair->accessToken)->assertOk();
+
+    expect(DB::table('password_reset_tokens')->where('email', $user->email)->exists())->toBeFalse();
+    $this->postJson('/auth/reset-password', [
+        'email' => $user->email, 'token' => $token, 'password' => 'undo-the-change-1', 'password_confirmation' => 'undo-the-change-1',
+    ])->assertStatus(422);
+});
+
+it('drops it from the broker lukk is configured with', function () {
+    Schema::create('other_resets', function (Blueprint $table) {
+        $table->string('email')->primary();
+        $table->string('token');
+        $table->timestamp('created_at')->nullable();
+    });
+    config(['auth.passwords.other' => ['provider' => 'users', 'table' => 'other_resets', 'expire' => 60, 'throttle' => 0], 'lukk.password_reset.broker' => 'other']);
+    [$user, $pair] = signedIn();
+    Password::broker('other')->createToken($user);
+    Password::broker()->createToken($user);
+
+    changeTo($pair->accessToken)->assertOk();
+
+    // The configured broker's row is gone; the default broker's is not lukk's to touch.
+    expect(DB::table('other_resets')->count())->toBe(0)
+        ->and(DB::table('password_reset_tokens')->count())->toBe(1);
+});
+
+it('changes the password where the reset table was never published', function () {
+    Schema::drop('password_reset_tokens');
+    [$user, $pair] = signedIn();
+    Exceptions::fake();
+
+    changeTo($pair->accessToken)->assertOk();
+
+    // Not attempted and swallowed: with no table there is nothing to ask the broker for.
+    Exceptions::assertNothingReported();
+
+    expect(Hash::check('new-password-1', $user->fresh()->password))->toBeTrue();
+});
+
+it('reports, and does not fail the change on, a broker that cannot delete', function () {
+    // The password is already written: a 500 here would tell the user it failed when it had not.
+    [$user, $pair] = signedIn();
+    Exceptions::fake();
+    Password::shouldReceive('broker')->andThrow(new RuntimeException('broker down'));
+
+    changeTo($pair->accessToken)->assertOk();
+
+    Exceptions::assertReported(fn (RuntimeException $e) => $e->getMessage() === 'broker down');
+    expect(Hash::check('new-password-1', $user->fresh()->password))->toBeTrue();
+});
+
+/** An account model that takes no part in password resets. */
+class AccountWithoutResets extends Model implements Authenticatable
+{
+    use Illuminate\Auth\Authenticatable;
+
+    public $timestamps = false;
+
+    protected $table = 'users';
+
+    protected $guarded = [];
+}
+
+it('asks the broker nothing for a model that cannot reset its password', function () {
+    // `deleteToken()` takes a `CanResetPassword`; a model that is not one has no reset rows to drop.
+    $user = AccountWithoutResets::query()->find(User::factory()->create()->id);
+    Exceptions::fake();
+
+    (new ChangePassword(new EloquentUserProvider(app('hash'), AccountWithoutResets::class), app(RevokeOtherSessions::class), app(RevokeAllSessions::class)))($user, 'password', 'new-password-1', null);
+
+    Exceptions::assertNothingReported();
+    expect(Hash::check('new-password-1', $user->fresh()->password))->toBeTrue();
 });

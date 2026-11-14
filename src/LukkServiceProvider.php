@@ -374,7 +374,8 @@ class LukkServiceProvider extends ServiceProvider
             $app->make(RevokeSession::class), $app->make(TokenIssuer::class)));
         $this->app->bind(ChangePassword::class, fn ($app) => new ChangePassword(
             $this->userProviderFor(Lukk::currentGuard()), $app->make(RevokeOtherSessions::class),
-            $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard()));
+            $app->make(RevokeAllSessions::class), $this->lockouts($app), Lukk::currentGuard(),
+            $this->config()['password_reset']['broker'] ?? null));
         $this->app->bind(ConfirmPassword::class, fn ($app) => new ConfirmPassword(
             $this->userProviderFor(Lukk::currentGuard()), $this->lockouts($app), Lukk::currentGuard()));
         $this->app->bind(SendPasswordResetLink::class, fn () => new SendPasswordResetLink(
@@ -454,10 +455,14 @@ class LukkServiceProvider extends ServiceProvider
             $provider = $app->make('auth')->createUserProvider($config['provider'] ?? null);
 
             // Verify with THIS guard's own crypto identity (its secret/keys + audience allowlist),
-            // resolved by the guard name — never the shared/current-guard verifier. A token minted
-            // for another guard fails the audience (and signature, if keys differ) check and returns
-            // null before any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
-            $verifier = new FirebaseTokenVerifier(Lukk::guardConfig($name), $app->make(Denylist::class));
+            // resolved by the guard name — never the ambient guard's. A token minted for another
+            // guard fails the audience (and signature, if keys differ) check and returns null before
+            // any user is resolved (reject-before-resolve, per RFC 8725 §3.9).
+            //
+            // Through the CONTRACT, pinned to this guard: building `FirebaseTokenVerifier` here meant a
+            // rebound `TokenVerifier` — the documented seam for changing how tokens are validated —
+            // decided logout and nothing else, while every `auth:{guard}` request skipped it.
+            $verifier = Lukk::onGuard($name, fn () => $app->make(TokenVerifier::class));
             // The claim window is resolved here, once per guard build, so a request on an install that
             // leaves `claim_seconds` off pays an integer compare and nothing else.
             $guard = new JwtGuard($verifier, $provider, $name, UnclaimedSessions::window(Lukk::guardConfig($name)));
@@ -625,7 +630,8 @@ class LukkServiceProvider extends ServiceProvider
      */
     private function unclaimedSessions(Application $app): ?UnclaimedSessions
     {
-        return UnclaimedSessions::window(Lukk::guardConfig()) > 0 ? $app->make(UnclaimedSessions::class) : null;
+        // `window()` answers 0 or at least 60, so `> 1` is the same test.
+        return UnclaimedSessions::window(Lukk::guardConfig()) > 0 ? $app->make(UnclaimedSessions::class) : null; // @pest-mutate-ignore: IncrementInteger
     }
 
     /** The lockout store, or null when `features.lockout` is off — the actions no-op on null. */
@@ -656,7 +662,8 @@ class LukkServiceProvider extends ServiceProvider
      */
     protected function mergeConfigDeep(string $path, string $key): void
     {
-        if ($this->app instanceof CachesConfiguration && $this->app->configurationIsCached()) {
+        // The application always is one; the check only narrows the type for the call.
+        if ($this->app instanceof CachesConfiguration && $this->app->configurationIsCached()) { // @pest-mutate-ignore: InstanceOfToTrue
             return;
         }
 
@@ -698,7 +705,7 @@ class LukkServiceProvider extends ServiceProvider
         // so nothing backfills it. Without the default this returns null into an `array` return type —
         // a TypeError thrown from `boot()`, which takes the entire application down rather than just
         // the auth routes. `Lukk::guardConfig()` is null-safe for the same reason.
-        return (array) ($this->app->make('config')->get('lukk') ?? []);
+        return (array) ($this->app->make('config')->get('lukk') ?? []); // @pest-mutate-ignore: RemoveArrayCast
     }
 
     private function appName(): string

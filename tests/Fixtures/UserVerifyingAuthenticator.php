@@ -29,7 +29,9 @@ class UserVerifyingAuthenticator extends Authenticator
             'type' => 'webauthn.get',
             'challenge' => $challenge,
             'origin' => $origin ?? 'https://'.$credential->getRpId(),
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            // The emulator merges `$extra` into the client data on attestation and drops it here; a browser
+            // reports `crossOrigin` / `topOrigin` on both.
+        ] + $extra, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
         $clientDataHash = hash('sha256', $clientDataJson, true);
 
         // UP (0x01), plus UV (0x04) when this authenticator verified the user.

@@ -6,8 +6,21 @@
     colors="true"
 >
     <testsuites>
+        <!-- Listed in this order on purpose, and it is not cosmetic. A mutation run executes each mutant's
+             covering tests in suite order and stops at the first failure. The lines every test boots
+             through (the service provider, the `Lukk` hub, the route manifest) are covered by nearly the
+             whole suite, and the tests written to pin them live in Isolated (the multi-guard and per-guard
+             cases: 106 tests, 3.5 s in one process) and Unit (764 tests, 19 s) - which sorted LAST
+             alphabetically, behind 1,113 Feature tests and their 39 s. Each such mutant ran most of the
+             suite before the test that kills it, and 518 of them ran out of the plugin's time budget
+             (2026-11-13). Smallest and most pointed first. A new
+             directory under tests/ must be added here, or its tests do not run at all:
+             tests/Unit/TestSuiteLayoutTest.php fails if one is missing. -->
         <testsuite name="Lukk Test Suite">
-            <directory>tests</directory>
+            <directory>tests/Isolated</directory>
+            <directory>tests/Unit</directory>
+            <directory>tests/Feature</directory>
+            <directory>tests/Concurrency</directory>
         </testsuite>
     </testsuites>
     <!-- Scope coverage to the package source so a never-loaded class is reported

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Http\Controllers\Concerns;
 
 use Illuminate\Http\Request;
+use Lukk\Lukk;
 use Lukk\Support\FormProofRequest;
 use Lukk\Support\RefreshCookie;
 
@@ -42,7 +43,10 @@ trait ReadsLogoutCredentials
             $tokens[] = $body;
         }
 
-        $cookie = $request->cookie(RefreshCookie::name());
+        // Only in cookie mode, as `/refresh` reads it (`ReadsPresentedRefreshToken`). In body mode lukk
+        // never set this cookie and `LogoutResponse` never clears it, so honouring one there ended a
+        // session on the word of a cookie the request then left in place.
+        $cookie = (Lukk::guardConfig()['cookie_mode'] ?? false) ? $request->cookie(RefreshCookie::name()) : null;
         $cookieUsable = is_string($cookie) && $cookie !== ''
             && FormProofRequest::check($request);
 

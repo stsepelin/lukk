@@ -20,6 +20,70 @@ but the default is safe.
 
 ---
 
+## Upgrading to the next release from 0.7.x
+
+### Sign-in refuses a respelled identifier
+
+**Low impact.** A row the database returns under a spelling that does not fold to its stored identifier is
+treated as no account (see the CHANGELOG entry for why: each such spelling was a fresh throttle bucket and
+a verified guess). The stored spelling, and any that differs only in case, accents, width or trailing
+space, signs in as before. What stops working: a leading zero or a decimal point on a numeric identifier
+column (`05550100` for `5550100`), and on MySQL a look-alike letter the collation equates. If your
+application resolves identifiers its own way — a formatted phone number, a tenant-qualified name — do it in
+`Lukk::authenticateUsing()` or a provider subclass, neither of which is judged.
+
+### An extra guard's `keys.public` is no longer merged with the default guard's
+
+**Medium impact — multi-guard with asymmetric keys.** A guard that declares `keys.public` now verifies with
+exactly those keys. If an extra guard relied on the default guard's public keys being merged in — its
+`active` kid is listed only under the default block — list that key in the guard's own `public` map, or
+remove the guard's `public` entry to inherit the whole default set.
+
+### Passwords are normalized before hashing
+
+**Low impact.** New passwords are hashed in Unicode NFKC, and a presented password is checked as typed and
+then normalized. No stored hash stops verifying and nothing needs migrating. Two things to know: a
+`Lukk::registerUsing()` hook that hashes the password itself should hash
+`Lukk\Support\HashablePassword::normalize($password)`; and an application that verifies lukk's users'
+passwords outside lukk (its own `Hash::check`) should try both spellings the same way
+(`HashablePassword::spellings()`), or a password set after this release under a decomposed spelling will
+not match there.
+
+### The JWK Set's content type changed
+
+**Low impact.** `GET {path}/jwks` answers `application/jwk-set+json`. Only a consumer that requires the
+header to equal `application/json` exactly is affected.
+
+### Removing a passkey or two-factor signs out the account's other sessions
+
+**Low impact.** After `DELETE /auth/passkeys/{id}` or `DELETE /auth/two-factor` removes something, every
+session except the one that made the request is revoked — the same sweep a password change does. Tell
+users in your UI if "you will be signed out on your other devices" is news to them. Cancelling a
+two-factor enrolment that was never confirmed signs nobody out. Code that calls
+`Actions\DisableTwoFactor` or the passkey repository directly revokes nothing.
+
+`Actions\DisableTwoFactor::__invoke()` now returns `bool` (whether a confirmed factor was removed) where
+it returned `void`, and takes an optional second argument — a callback run once a confirmed factor has
+been removed, before the event. A subclass that overrides it must match:
+`__invoke(Authenticatable $user, ?Closure $removed = null): bool`, call `$removed` at that point and
+return the parent's answer.
+
+### A password change no longer fires the user model's `saving` and `updating` events
+
+**Low impact.** `POST /auth/password` writes with one conditional `UPDATE` instead of `save()`, so a
+reset that commits mid-request is never written over. `updated` and `saved` are still dispatched, after
+the write, and `wasChanged('password')` is true in them. `saving` and `updating` are not: an observer
+that relied on them to veto or rewrite a password change should listen for `Events\PasswordChanged`, or
+validate before calling the endpoint.
+
+### Cross-origin passkey ceremonies are refused
+
+**Low impact.** A registration or assertion whose client data carries `crossOrigin: true` is a 422. Only an
+application that embeds its passkey ceremony in a cross-origin iframe is affected, and that already failed
+for every client that reports `topOrigin`.
+
+---
+
 ## Upgrading to 0.7.0 from 0.6.x
 
 ### The default guard must use `lukk.user_provider`

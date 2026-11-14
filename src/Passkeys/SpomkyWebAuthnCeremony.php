@@ -131,6 +131,8 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 throw new PasskeyVerificationFailed('Not an attestation response.');
             }
 
+            $this->refuseEmbedded($authenticatorResponse);
+
             // `authenticatorSelection` is what `CheckUserVerification` reads (WebAuthn L3 §7.1 step 17).
             // Omitted, it defaults to null and the check returns early — so with the default
             // `user_verification: required` a presence-only authenticator ENROLLED successfully and
@@ -216,6 +218,8 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
                 throw new PasskeyVerificationFailed('Not an assertion response.');
             }
 
+            $this->refuseEmbedded($authenticatorResponse);
+
             $options = PublicKeyCredentialRequestOptions::create(
                 challenge: $this->decode($challenge),
                 rpId: $this->config['rp_id'],
@@ -240,6 +244,23 @@ class SpomkyWebAuthnCeremony implements WebAuthnCeremony
             userVerified: $userVerified,
             multiFactor: $userVerified && $wasUvInitialized,
         );
+    }
+
+    /**
+     * Refuse a ceremony the client says ran in a frame that is not same-origin with its ancestors.
+     *
+     * WebAuthn L3 §7.1 step 10 and §7.2 step 13: "If `C.crossOrigin` is present and set to true, verify
+     * that the Relying Party expects" an embedded ceremony. lukk has no embedded mode, and the library
+     * only looks when `topOrigin` is ALSO present: `crossOrigin: true` with no `topOrigin` signed in,
+     * enrolled a credential and earned a step-up confirmation, while the same ceremony declaring its
+     * `topOrigin` — even the allowed origin — was refused. A page that frames the app with
+     * `allow="publickey-credentials-get"` is the UI-redress case the flag exists to expose.
+     */
+    private function refuseEmbedded(AuthenticatorAttestationResponse|AuthenticatorAssertionResponse $response): void
+    {
+        if ($response->clientDataJSON->crossOrigin) {
+            throw new PasskeyVerificationFailed('The passkey ceremony ran in a cross-origin frame.');
+        }
     }
 
     /**

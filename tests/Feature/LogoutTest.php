@@ -952,7 +952,12 @@ it('treats a token expiring this very second as live, exactly as rotation does',
     Event::assertDispatched(RefreshTokenReused::class, fn ($e) => $e->familyId === $fid && $e->reason === 'reuse');
 });
 
-/** A co-issued access token — no family, so logout has only its `jti` to kill it by. */
+/**
+ * A co-issued access token — no family, so logout has only its `jti` to kill it by.
+ *
+ * Pass an `$exp` built on `now()`, never `time()`: this file freezes the second, and the wall clock can
+ * already be one ahead of it — the entry then outlives the travel that expects it gone (a nightly flake).
+ */
 function coIssued(string $jti, int|float $exp): string
 {
     $cfg = Lukk::guardConfig();
@@ -968,7 +973,7 @@ it('keeps the denylist entry for the whole window the verifier would still accep
     // verifier goes on accepting the token: one expired by less than `leeway` is still a credential,
     // and an entry sized on `exp` alone would hand those last seconds back to whoever holds it.
     config(['lukk.leeway' => 20]);
-    $token = coIssued('inside-leeway', time() + 600);
+    $token = coIssued('inside-leeway', now()->getTimestamp() + 600);
 
     $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
 
@@ -988,7 +993,7 @@ it('uses the verifier\'s own default leeway when the key is missing from a cache
     // The fallback here has to be the one `FirebaseTokenVerifier` falls back to, or the entry and the
     // acceptance window stop lining up — short by a second and the token verifies again.
     config(['lukk.leeway' => null]);
-    $token = coIssued('default-leeway', time() + 600);
+    $token = coIssued('default-leeway', now()->getTimestamp() + 600);
 
     $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
 
@@ -1006,7 +1011,7 @@ it('still denies a token with less than a whole second left', function () {
     // token would go on verifying for the fraction of a second it has left — the one moment a client
     // logging out is most likely to be holding it.
     config(['lukk.leeway' => 0]);
-    $token = coIssued('last-fraction', time() + 600.5);
+    $token = coIssued('last-fraction', now()->getTimestamp() + 600.5);
 
     $this->travel(600)->seconds();   // whole seconds remaining: zero. The real clock says half of one.
 
@@ -1026,7 +1031,7 @@ it('takes a fractional exp and a fractional leeway without failing the request',
     // TTL is an `int`, so either fraction reaching it uncast ends the request in a TypeError — and the
     // token the client just logged out with survives.
     config(['lukk.leeway' => 5.5]);
-    $token = coIssued('fractional', time() + 600.5);
+    $token = coIssued('fractional', now()->getTimestamp() + 600.5);
 
     $this->withToken($token)->postJson('/auth/logout')->assertNoContent();
 

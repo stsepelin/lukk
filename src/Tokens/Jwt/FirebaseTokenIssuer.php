@@ -43,7 +43,7 @@ class FirebaseTokenIssuer implements TokenIssuer
             // Defaulted, like every `lukk` read: a missing `access_ttl` makes this `$now + null` —
             // `exp === iat`, so every token the guard mints is already expired when it is handed
             // out, and the account is locked out of its own API while login keeps answering 200.
-            'exp' => $now + ($this->config['access_ttl'] ?? 900),
+            'exp' => $now + $this->accessTtl(),
         ];
 
         // Standard claims always win. `$claims` arrives already ordered by the calling Action —
@@ -105,7 +105,23 @@ class FirebaseTokenIssuer implements TokenIssuer
 
         // Same default as `exp` above — unguarded this serialises as `"expires_in": null`, and a
         // client scheduling its refresh off it never refreshes.
-        return ['token' => $token, 'jti' => $jti, 'expires_in' => $this->config['access_ttl'] ?? 900];
+        return ['token' => $token, 'jti' => $jti, 'expires_in' => $this->accessTtl()];
+    }
+
+    /**
+     * `access_ttl` in whole seconds, read the way `UnclaimedSessions::window()` reads it.
+     *
+     * An integer whatever the config holds: a per-guard `env('…_ACCESS_TTL', 300)` is a STRING once the
+     * variable is set, and `expires_in` reaches `TokenPair`'s `int` parameter under `strict_types`. That was
+     * a 500 on every sign-in — and on a running install a `TypeError` thrown AFTER the rotation committed,
+     * so the client's retry past grace read as reuse and revoked the family. Something that is no number
+     * at all takes the default rather than `(int) 'abc' === 0`, which would mint tokens already expired.
+     */
+    private function accessTtl(): int
+    {
+        $ttl = $this->config['access_ttl'] ?? null;
+
+        return is_numeric($ttl) ? (int) $ttl : 900;
     }
 
     /**

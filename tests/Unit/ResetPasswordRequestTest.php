@@ -2,8 +2,8 @@
 
 declare(strict_types=1);
 
-use Illuminate\Validation\Rules\Password;
 use Lukk\Http\Requests\ResetPasswordRequest;
+use Lukk\Support\NormalizedPasswordPolicy;
 
 it('applies each reset rule on its own', function (string $field, array $overrides, string $rule) {
     $data = array_merge([
@@ -27,5 +27,5 @@ it('applies each reset rule on its own', function (string $field, array $overrid
     'password confirmed' => ['password', ['password_confirmation' => 'other-password-123'], 'Confirmed'],
     'password bounded' => ['password', ['password' => str_repeat('a', 256), 'password_confirmation' => str_repeat('a', 256)], 'Max'],
     'password without a NUL byte' => ['password', ['password' => "new-pass\0word-123", 'password_confirmation' => "new-pass\0word-123"], 'NotRegex'],
-    'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], Password::class],
+    'password meets the defaults' => ['password', ['password' => 'short', 'password_confirmation' => 'short'], NormalizedPasswordPolicy::class],
 ]);

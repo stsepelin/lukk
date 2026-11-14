@@ -96,12 +96,14 @@ class PasskeyAssurance
     private function passwordVerifyCouldAccept(string $stored): bool
     {
         if (str_starts_with($stored, '_')
-            || (preg_match('/^\$2[abxy]?\$(\d+)\$/', $stored, $cost) === 1 && (int) $cost[1] > 12)
-            || (preg_match('/^\$[56]\$rounds=(\d+)\$/', $stored, $rounds) === 1 && (int) $rounds[1] > 5000)) {
+            // (The casts state the type: PHP compares a string of digits with an int numerically either way.)
+            || (preg_match('/^\$2[abxy]?\$(\d+)\$/', $stored, $cost) === 1 && (int) $cost[1] > 12) // @pest-mutate-ignore: RemoveIntegerCast
+            || (preg_match('/^\$[56]\$rounds=(\d+)\$/', $stored, $rounds) === 1 && (int) $rounds[1] > 5000)) { // @pest-mutate-ignore: RemoveIntegerCast
             return true;
         }
 
-        $probe = crypt('', $stored);
+        // Which password is probed decides nothing: `crypt()` answers in the value's own format, or `*0`/`*1`.
+        $probe = crypt('', $stored); // @pest-mutate-ignore: EmptyStringToNotEmpty
 
         return ! str_starts_with($probe, '*') && strlen($probe) === strlen($stored);
     }

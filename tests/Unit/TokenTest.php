@@ -7,8 +7,10 @@ use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Lukk;
+use Lukk\Support\TokenContext;
 use Lukk\Tokens\Jwt\FirebaseTokenIssuer;
 use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
+use Lukk\Tokens\Jwt\KeyRing;
 
 afterEach(function () {
     Lukk::$tokenClaimsUsing = null;
@@ -314,6 +316,29 @@ it('mints a full-lifetime access token when access_ttl is unusable', function (C
     'absent (a config cached before the key existed)' => [fn () => config()->set('lukk', Arr::except(config('lukk'), ['access_ttl']))],
 ]);
 
+it('mints an integer lifetime whatever shape access_ttl arrives in', function (mixed $ttl, int $expected) {
+    // `env('LUKK_ADMIN_ACCESS_TTL', 300)` in a per-guard block is a string once the variable is set. It
+    // reached `TokenPair`'s `int $expiresIn` uncast: a TypeError on every sign-in, and on a refresh one
+    // thrown after the rotation had committed — the retry past grace then read as reuse.
+    config()->set('lukk.access_ttl', $ttl);
+
+    $access = app(TokenIssuer::class)->accessToken(ctx(1, 'fam'));
+    $claims = claims($access['token']);
+
+    expect($access['expires_in'])->toBe($expected)
+        ->and((int) $claims->exp - (int) $claims->iat)->toBe($expected);
+
+    // The whole path, not just the issuer: the pair is built and the rotation still answers.
+    $pair = start()(1);
+    expect($pair->expiresIn)->toBe($expected)
+        ->and(rotate()($pair->refreshToken)->expiresIn)->toBe($expected);
+})->with([
+    'a numeric string (uncast env)' => ['300', 300],
+    'a fractional string' => ['300.5', 300],
+    'a float' => [300.0, 300],
+    'not a number at all' => ['abc', 900],
+]);
+
 /** Mint a token with exactly these claims, signed by this guard's key. */
 function signedClaims(array $claims): string
 {
@@ -445,4 +470,40 @@ it('refuses an audience that is a JSON object, whose values would otherwise pass
 
     expect(verifier()->verify(signedClaims(['aud' => (object) ['x' => $audience]])))->toBeNull()
         ->and(verifier()->verify(signedClaims(['aud' => [$audience]])))->not->toBeNull();
+});
+
+it('stamps nbf at the moment of issue', function () {
+    // RFC 7519 §4.1.5. A verifier that requires the claim — a gateway, a co-verifying service — refuses
+    // a token without one, and nothing inside lukk would have noticed it missing.
+    $this->freezeSecond();
+
+    $claims = claims(issuer()->accessToken(new TokenContext(guard: 'api', userId: 1, familyId: 'fam'))['token']);
+
+    expect($claims->nbf)->toBe($claims->iat)->toBe(now()->getTimestamp());
+});
+
+it('stamps a single audience as a string, ignoring empty entries wherever they sit', function () {
+    // RFC 7519 §4.1.3: one audience MAY be a bare string. An empty entry — `env()` of an unset variable
+    // in a list — is not an audience, and left in it made the claim a two-element array naming ''.
+    $issuer = new FirebaseTokenIssuer(['audience' => ['', 'https://only.example']] + Lukk::guardConfig());
+
+    // Read straight from the payload: the suite's verifier expects the configured audience.
+    [, $payload] = explode('.', $issuer->accessToken(new TokenContext(guard: 'api', userId: 1, familyId: 'fam'))['token']);
+
+    expect(json_decode(base64_decode(strtr($payload, '-_', '+/')), true)['aud'])->toBe('https://only.example');
+});
+
+it('mints a refresh secret of 256 random bits', function () {
+    // 64 hex characters. RFC 9700 §4.14.2 asks for a token an attacker cannot guess; this is the size
+    // every stored hash and every bound on the request field assumes.
+    expect(issuer()->newRefreshSecret())->toMatch('/\A[0-9a-f]{64}\z/')
+        ->and(issuer()->newRefreshSecret())->not->toBe(issuer()->newRefreshSecret());
+});
+
+it('hands firebase an empty key when no secret is configured, so it refuses to sign', function () {
+    // Never a placeholder: any non-empty fallback long enough would sign tokens with a key that is
+    // public knowledge.
+    $config = ['secret' => null] + Lukk::guardConfig();
+
+    expect((new KeyRing($config))->signingKey())->toBe(['key' => '', 'kid' => null]);
 });

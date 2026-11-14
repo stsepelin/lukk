@@ -34,13 +34,16 @@ class LongestAccessTtl
         }
 
         $cache = cache()->store($store);
-        $cache->put(self::key($guard, $ttl), true, $ttl);
+        // The marker's presence is what is read (`has()`), never its value.
+        $cache->put(self::key($guard, $ttl), true, $ttl); // @pest-mutate-ignore: TrueToFalse
 
         if (in_array($ttl, self::index($cache, $guard), true)) {
             return;
         }
 
-        $add = fn () => $cache->forever(self::indexKey($guard), array_values(array_unique([...self::index($cache, $guard), $ttl])));
+        // Re-read, because a concurrent mint may have added this lifetime since the check above — the only
+        // case in which `array_unique` removes anything, and so the only one `array_values` renumbers.
+        $add = fn () => $cache->forever(self::indexKey($guard), array_values(array_unique([...self::index($cache, $guard), $ttl]))); // @pest-mutate-ignore: UnwrapArrayUnique,UnwrapArrayValues
         $lockable = $cache->getStore();
 
         if (! $lockable instanceof LockProvider) {
@@ -78,8 +81,9 @@ class LongestAccessTtl
     {
         $index = $cache->get(self::indexKey($guard), []);
 
-        // Integers only: a store that hands values back as strings (Redis) or a hand-edited entry.
-        return is_array($index) ? array_values(array_map('intval', array_filter($index, 'is_numeric'))) : [];
+        // Integers only: a store that hands values back as strings (Redis) or a hand-edited entry. Both
+        // callers read the values and never the keys, so `array_values` only keeps the declared type.
+        return is_array($index) ? array_values(array_map('intval', array_filter($index, 'is_numeric'))) : []; // @pest-mutate-ignore: UnwrapArrayValues
     }
 
     private static function key(string $guard, int $ttl): string
