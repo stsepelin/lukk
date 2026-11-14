@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Lukk\Models\RefreshToken;
 use Lukk\Support\RefreshCookie;
 use Lukk\Tests\Fixtures\User;
 
@@ -120,4 +121,29 @@ it('reads no refresh cookie on a cached config without cookie_mode, which is bod
     $victim = User::factory()->create()->startSession()->refreshToken;
 
     $this->withHeaders($crossSiteForm)->withUnencryptedCookie(RefreshCookie::name(), $victim)->post('/auth/refresh')->assertUnauthorized();
+});
+
+it('ends a session on the refresh cookie in cookie mode only', function (bool $cookieMode, int $live) {
+    // Body mode never sets this cookie and never clears it, so a logout honouring one there ended a
+    // session on the word of a cookie it then left in place. `/refresh` already reads it in cookie mode only.
+    config(['lukk.cookie_mode' => $cookieMode]);
+    $pair = User::factory()->create()->startSession();
+
+    // A JSON request: the cookie would be usable as far as forgeability goes.
+    $this->withCredentials()->withUnencryptedCookie(RefreshCookie::name(), $pair->refreshToken)
+        ->postJson('/auth/logout')->assertNoContent();
+
+    expect(RefreshToken::query()->whereNull('revoked_at')->count())->toBe($live);
+})->with(['cookie mode' => [true, 0], 'body mode' => [false, 1]]);
+
+it('reads no logout cookie on a cached config without cookie_mode', function () {
+    $lukk = config('lukk');
+    unset($lukk['cookie_mode']);
+    config(['lukk' => $lukk]);
+    $pair = User::factory()->create()->startSession();
+
+    $this->withCredentials()->withUnencryptedCookie(RefreshCookie::name(), $pair->refreshToken)
+        ->postJson('/auth/logout')->assertNoContent();
+
+    expect(RefreshToken::query()->whereNull('revoked_at')->count())->toBe(1);
 });

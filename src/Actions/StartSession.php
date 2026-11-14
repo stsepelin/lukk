@@ -134,7 +134,8 @@ class StartSession
         // Advisory, and after the row exists: a cache error here answered 500 for a session that was
         // already live — a refresh row nobody received. Reported; the sign-in stands.
         try {
-            LongestAccessTtl::record((int) $access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null);
+            // `TokenIssuer::accessToken()` declares `expires_in` an int; the cast states it.
+            LongestAccessTtl::record((int) $access['expires_in'], $this->guard, $this->config['denylist_store'] ?? null); // @pest-mutate-ignore: RemoveIntegerCast
         } catch (Throwable $e) {
             report($e);
         }

@@ -65,21 +65,16 @@ class ConfirmPassword
 
     private function verify(Authenticatable $user, #[\SensitiveParameter] string $password): void
     {
-        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
-        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
-        // can present — fail closed with the ordinary answer, not a 500.
-        try {
-            $valid = $this->users->validateCredentials($user, ['password' => $password]);
-        } catch (\Throwable) {
-            $valid = false;
-        }
+        // Under each spelling of it (as typed, then normalized), each check failing closed if the stored
+        // hash is one the active hasher refuses; see `HashablePassword::verified()`.
+        $verified = HashablePassword::verified($this->users, $user, ['password' => $password]);
 
-        if (! $valid) {
+        if ($verified === null) {
             throw ValidationException::withMessages(['password' => [__('The provided password is incorrect.')]]);
         }
 
         // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
-        if (HashablePassword::verifiesOnlyInPart($user, $password)) {
+        if (HashablePassword::verifiesOnlyInPart($user, $verified)) {
             throw HashablePassword::mustReset('password');
         }
     }

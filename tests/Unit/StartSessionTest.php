@@ -41,3 +41,15 @@ it('keeps the unclaimed marker thirty days when refresh_ttl is unset', function 
     $this->travel(1)->seconds();
     expect($unclaimed->issuedAt($family))->toBeNull();
 });
+
+it('lets the refresh token live for refresh_ttl, and thirty days when it is unset', function (array $config, int $seconds) {
+    $this->freezeSecond();
+
+    startMarked($config);
+
+    expect(RefreshToken::query()->sole()->expires_at->getTimestamp())->toBe(now()->getTimestamp() + $seconds);
+})->with([
+    'configured, as env hands it over' => [['refresh_ttl' => '100'], 100],
+    'a number spelled with a fraction or an exponent' => [['refresh_ttl' => '1e2'], 100],
+    'unset' => [[], 2592000],
+]);

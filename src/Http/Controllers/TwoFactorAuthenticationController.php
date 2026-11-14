@@ -12,6 +12,7 @@ use Lukk\Actions\DisableTwoFactor;
 use Lukk\Actions\EnableTwoFactor;
 use Lukk\Contracts\TwoFactorAuthenticatable;
 use Lukk\Http\Concerns\PreventsCaching;
+use Lukk\Http\Controllers\Concerns\EndsOtherSessions;
 use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
 
 /**
@@ -20,6 +21,7 @@ use Lukk\Http\Controllers\Concerns\ResolvesAuthenticatedUser;
  */
 class TwoFactorAuthenticationController
 {
+    use EndsOtherSessions;
     use PreventsCaching;
     use ResolvesAuthenticatedUser;
 
@@ -38,7 +40,13 @@ class TwoFactorAuthenticationController
 
     public function destroy(Request $request): Response
     {
-        ($this->disable)($this->authenticated($request));
+        $user = $this->authenticated($request);
+
+        // Only when a confirmed factor was removed: a no-op disable, or backing out of an enrolment that
+        // was never confirmed, signs nobody out.
+        if (($this->disable)($user)) {
+            $this->endOtherSessions($request, $user);
+        }
 
         return response()->noContent();
     }

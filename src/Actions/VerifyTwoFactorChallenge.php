@@ -11,6 +11,7 @@ use Lukk\Actions\Concerns\CountsLockoutAttempts;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\ChallengeToken;
 use Lukk\Contracts\LockoutRepository;
+use Lukk\Exceptions\RetryableValidationException;
 use Lukk\Lukk;
 
 /**
@@ -78,9 +79,9 @@ class VerifyTwoFactorChallenge
             $seconds = $this->limiter->availableIn($key);
 
             // The cast only tidies the type: the translator stringifies replacements, and `2.0` is "2".
-            throw ValidationException::withMessages([
+            throw RetryableValidationException::withMessages([
                 'code' => [__('auth.throttle', ['seconds' => $seconds, 'minutes' => (int) ceil($seconds / 60)])], // @pest-mutate-ignore: RemoveIntegerCast
-            ])->status(429);
+            ])->retryAfter($seconds)->status(429);
         }
 
         // Reserved before the code is checked, like the login and confirm paths: counting after

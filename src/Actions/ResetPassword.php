@@ -14,6 +14,7 @@ use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
 use Lukk\Contracts\PasskeyRepository;
 use Lukk\Events\PasskeyDeleted;
+use Lukk\Support\HashablePassword;
 
 /**
  * Reset a password via Laravel's password broker (single-use, hashed, expiring token). On
@@ -73,7 +74,7 @@ class ResetPassword
     {
         return Password::broker($this->config['password_reset']['broker'] ?? null)->reset($credentials, function ($user, string $password): void {
             // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
-            $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
+            $user->forceFill([$user->getAuthPasswordName() => Hash::make(HashablePassword::normalize($password))])->save();
 
             // The only self-service way out of a lock. A reset proves control of the address —
             // strictly stronger evidence than the password itself — so leaving the account locked

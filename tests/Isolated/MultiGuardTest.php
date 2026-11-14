@@ -2,14 +2,18 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Route;
 use Lukk\Actions\RevokeAllSessions;
 use Lukk\Contracts\Denylist;
+use Lukk\Lukk;
 use Lukk\Models\RefreshToken;
 use Lukk\Tests\Fixtures\Admin;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\MultiGuardTestCase;
+use Lukk\Tokens\Jwt\FirebaseTokenVerifier;
 
 // Two isolated guards (users + admins) with distinct crypto identities; see MultiGuardTestCase.
 uses(MultiGuardTestCase::class)->group('multi-guard');
@@ -110,6 +114,47 @@ it('serves each guard its own JWKS (per-guard signing keys)', function () {
     expect($adminKeys)->toHaveCount(1)
         ->and($adminKeys[0]['kid'])->toBe('admin-key')
         ->and($usersKeys)->toBe([]);
+});
+
+it('does not verify an extra guard\'s tokens with the default guard\'s key', function () {
+    // Both guards asymmetric, each with its own keypair. `keys.public` is a map, so the per-guard block
+    // was deep-merged INTO the default one: the admin guard verified with — and published — both keys.
+    $users = rsaKeypair();
+    $admin = rsaKeypair();
+    config([
+        'lukk.algorithm' => 'RS256',
+        'lukk.keys' => ['active' => 'users-key', 'private' => $users['private'], 'passphrase' => null, 'public' => ['users-key' => $users['public']]],
+        'lukk.guards.admin.keys' => ['active' => 'admin-key', 'private' => $admin['private'], 'public' => ['admin-key' => $admin['public']]],
+    ]);
+
+    expect(array_keys(Lukk::guardConfig('admin')['keys']['public']))->toBe(['admin-key'])
+        ->and(array_column($this->getJson('/admin/auth/jwks')->assertOk()->json('keys'), 'kid'))->toBe(['admin-key'])
+        ->and(array_column($this->getJson('/auth/jwks')->assertOk()->json('keys'), 'kid'))->toBe(['users-key']);
+
+    // The forgery the merge admitted: the admin guard's `iss` and `aud`, the USERS guard's signature.
+    $cfg = Lukk::guardConfig('admin');
+    $claims = ['iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => '1', 'jti' => 'forged', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600];
+    $forged = JWT::encode($claims, $users['private'], 'RS256', 'users-key', ['typ' => 'at+jwt']);
+    $genuine = JWT::encode(['jti' => 'genuine'] + $claims, $admin['private'], 'RS256', 'admin-key', ['typ' => 'at+jwt']);
+    $verifier = new FirebaseTokenVerifier($cfg, app(Denylist::class));
+
+    expect($verifier->verify($forged))->toBeNull()
+        ->and($verifier->verify($genuine))->not->toBeNull();
+});
+
+it('lets an extra guard that declares no public keys inherit the default set', function () {
+    // The other half: replacing the set for a guard that only overrides, say, its audience would leave
+    // every token it mints unverifiable.
+    $users = rsaKeypair();
+    config([
+        'lukk.algorithm' => 'RS256',
+        'lukk.keys' => ['active' => 'users-key', 'private' => $users['private'], 'passphrase' => null, 'public' => ['users-key' => $users['public']]],
+    ]);
+
+    expect(array_keys(Lukk::guardConfig('admin')['keys']['public']))->toBe(['users-key']);
+
+    $pair = Admin::factory()->create()->startSession();
+    expect((new FirebaseTokenVerifier(Lukk::guardConfig('admin'), app(Denylist::class)))->verify($pair->accessToken))->not->toBeNull();
 });
 
 it('revokes only the target guard\'s families on logout-all, despite colliding ids', function () {
@@ -432,3 +477,23 @@ it('reads the confirmation header a guard configures on that guard\'s routes', f
     $this->withToken($access)->withHeaders(['X-Admin-Confirmation' => $confirmation])
         ->deleteJson('/_test/admin-sensitive')->assertOk();
 });
+
+it('guards the extra guard\'s cookie-setting routes against a cross-site form too', function (string $route) {
+    // `RefuseForgeableCookieGrant` is attached per route, and the extra guards' routes are a second copy
+    // of the list: dropped there, login CSRF was closed on `/auth/*` and open on `/admin/auth/*`.
+    config(['lukk.guards.admin.cookie_mode' => true]);
+
+    $this->withHeaders(['Sec-Fetch-Site' => 'cross-site', 'Content-Type' => 'application/x-www-form-urlencoded'])
+        ->post($route, [])->assertStatus(415);
+})->with(['/admin/auth/login', '/admin/auth/refresh']);
+
+it('attaches the extra guard\'s own throttles to its login and refresh routes', function (string $uri, string $throttle) {
+    // The limiters themselves are pinned in LimiterConfigTest; this is that the routes actually carry
+    // them. The limits are read at boot, so hammering a route here would only ever meet the defaults.
+    $route = app('router')->getRoutes()->match(Request::create($uri, 'POST'));
+
+    expect($route->gatherMiddleware())->toContain($throttle);
+})->with([
+    ['/admin/auth/login', 'throttle:lukk-admin-login'],
+    ['/admin/auth/refresh', 'throttle:lukk-admin-refresh'],
+]);

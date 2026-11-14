@@ -286,3 +286,28 @@ it('refuses a default guard naming no provider when Laravel\'s default provider 
     expect(fn () => Lukk::assertGuardsIsolated())
         ->toThrow(RuntimeException::class, 'resolves its users from the [admins] provider (auth.defaults.provider)');
 });
+
+it('resolves the default guard to the top-level block as it is, other guards included', function () {
+    config(['lukk.guards.admin' => ['access_ttl' => 60]]);
+
+    expect(Lukk::guardConfig())->toBe(config('lukk'))
+        ->and(Lukk::guardConfig())->toHaveKey('guards')
+        ->and(Lukk::guardConfig('admin'))->not->toHaveKey('guards');
+});
+
+it('lists no driver guards when auth.guards is not a list of guards', function (mixed $guards) {
+    config(['auth.guards' => $guards]);
+
+    expect(Lukk::driverGuardNames())->toBe([]);
+})->with([
+    'null' => [null],
+    'a string' => ['lukk-jwt'],
+    'false' => [false],
+]);
+
+it('names a provider that is not a string in the refusal, rather than failing on its type', function () {
+    config(['auth.guards.api' => ['driver' => 'lukk-jwt', 'provider' => 123], 'lukk.user_provider' => 'users']);
+
+    expect(fn () => Lukk::assertGuardsIsolated())
+        ->toThrow(RuntimeException::class, 'resolves its users from the [123] provider (auth.guards.api.provider)');
+});

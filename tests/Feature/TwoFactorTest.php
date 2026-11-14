@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Encryption\DecryptException;
@@ -10,6 +11,8 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\ChallengeTwoFactor;
 use Lukk\Actions\ConfirmPasswordUnchanged;
@@ -20,6 +23,9 @@ use Lukk\Contracts\Denylist;
 use Lukk\Contracts\TwoFactorProvider;
 use Lukk\Events\RecoveryCodesGenerated;
 use Lukk\Events\TwoFactorAuthenticationConfirmed;
+use Lukk\Events\TwoFactorAuthenticationDisabled;
+use Lukk\Http\Controllers\TwoFactorAuthenticationController;
+use Lukk\Lukk;
 use Lukk\Models\Lockout;
 use Lukk\Tests\Fixtures\PermissiveTotpProvider;
 use Lukk\Tests\Fixtures\UndecryptableTwoFactorUser;
@@ -227,6 +233,24 @@ it('locks out the challenge after too many wrong codes (account-keyed)', functio
 
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => '000000'])
         ->assertStatus(429);
+});
+
+it('names the wait in a Retry-After header when the two-factor challenge throttle refuses', function () {
+    $this->freezeSecond();
+    config(['lukk.rate_limits.two_factor.max_attempts' => 1, 'lukk.rate_limits.two_factor.decay_seconds' => 45]);
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $challenge = $this->postJson('/auth/login', ['email' => $user->email, 'password' => 'password'])->json('challenge_token');
+
+    // From two addresses, so the per-IP route throttle (which sends its own header) is not what answers:
+    // the account-keyed limiter inside the action is.
+    $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.1'])
+        ->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => '000000'])->assertStatus(422);
+    $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.2'])
+        ->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => '000000'])
+        ->assertStatus(429)
+        ->assertHeader('Retry-After', '45')
+        ->assertJsonValidationErrorFor('code');
 });
 
 it('honors the configured two-factor challenge rate limit', function () {
@@ -1004,4 +1028,71 @@ it('announces nothing for a TOTP sign-in or a recovery code that does not match'
     $this->postJson('/auth/two-factor-challenge', ['challenge_token' => $challenge, 'code' => currentOtp($secret)])->assertOk();
 
     Event::assertNotDispatched('Lukk\Events\RecoveryCodeUsed');
+});
+
+it('ends the account\'s other sessions when two-factor is turned off, and keeps this one', function () {
+    // The sessions on other devices were signed in while the account had a second factor, some carrying
+    // `mfa` earned with the authenticator that is now gone.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $other = $user->startSession();
+    // A multi-factor session: removing a factor has to meet the account's own level.
+    $current = start()($user->getAuthIdentifier(), ['amr' => ['pwd', 'otp', 'mfa']]);
+    $headers = confirmedHeaders($current->accessToken);
+
+    $this->withToken($current->accessToken)->withHeaders($headers)->deleteJson('/auth/two-factor')->assertNoContent();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertUnauthorized();
+    $this->postJson('/auth/refresh', ['refresh_token' => $current->refreshToken])->assertOk();
+});
+
+it('signs nobody out when there was no second factor to turn off', function () {
+    $user = User::factory()->create();
+    $other = $user->startSession();
+    $current = $user->startSession();
+
+    $this->withToken($current->accessToken)->withHeaders(confirmedHeaders($current->accessToken))->deleteJson('/auth/two-factor')->assertNoContent();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertOk();
+});
+
+it('signs nobody out when an enrolment is backed out of before it was confirmed', function () {
+    // The secret is pending: no sign-in was ever challenged with it and no session carries `mfa` for it.
+    // Ending the other devices' sessions for closing the QR screen is a logout nobody asked for.
+    Event::fake([TwoFactorAuthenticationDisabled::class]);
+    $user = User::factory()->create();
+    $other = $user->startSession();
+    $current = $user->startSession();
+    $headers = confirmedHeaders($current->accessToken);
+
+    $this->withToken($current->accessToken)->withHeaders($headers)->postJson('/auth/two-factor')->assertOk();
+    $this->withToken($current->accessToken)->withHeaders($headers)->deleteJson('/auth/two-factor')->assertNoContent();
+
+    $this->postJson('/auth/refresh', ['refresh_token' => $other->refreshToken])->assertOk();
+    // The secret is gone all the same, and the application is still told.
+    expect($user->refresh()->two_factor_secret)->toBeNull();
+    Event::assertDispatched(TwoFactorAuthenticationDisabled::class);
+});
+
+it('ends every session when the token that removed the factor names none of them', function () {
+    // A co-issuer's token carries no `fid`, so there is no session of the caller's to spare — as a
+    // password change decides it.
+    $user = User::factory()->create();
+    confirmedTwoFactor($user);
+    $a = $user->startSession();
+    $b = $user->startSession();
+    $cfg = Lukk::guardConfig();
+    $now = now()->getTimestamp();
+    $fidless = JWT::encode([
+        'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getKey(), 'jti' => (string) Str::uuid(),
+        'iat' => $now, 'nbf' => $now, 'exp' => $now + 900,
+    ], $cfg['secret'], 'HS256', head: ['typ' => 'at+jwt']);
+
+    Route::delete('/probe/two-factor', [TwoFactorAuthenticationController::class, 'destroy'])->middleware('auth:api');
+
+    $this->withToken($fidless)->deleteJson('/probe/two-factor')->assertNoContent();
+
+    foreach ([$a, $b] as $dead) {
+        $this->postJson('/auth/refresh', ['refresh_token' => $dead->refreshToken])->assertUnauthorized();
+    }
 });

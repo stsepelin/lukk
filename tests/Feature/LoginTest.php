@@ -1125,3 +1125,37 @@ it('signs in with a password that is not valid UTF-8, as registration and reset 
     $this->post('/auth/login', ['email' => $user->email, 'password' => "\xE9t\xE9"], ['Accept' => 'application/json'])
         ->assertOk()->assertJsonStructure(['access_token']);
 });
+
+it('pays the same derivations for a real and an unknown account when a password has two spellings', function () {
+    // A password not in Unicode normal form is checked as typed and then normalized (NFKC). Two checks
+    // for a real account against one `make` for an unknown one would be the 2x enumeration oracle this
+    // file exists to prevent, reachable by anyone who types a combining accent.
+    User::factory()->create(['email' => 'real@y.com']);
+    $hasher = countingHasher();
+    $twoSpellings = "cafe\u{0301}-not-the-password";
+
+    $work = [];
+    foreach (['unknown identifier' => 'nobody@y.com', 'wrong password' => 'real@y.com'] as $label => $email) {
+        $hasher->checked = [];
+        $hasher->makes = 0;
+        app('auth')->forgetGuards();
+        $this->postJson('/auth/login', ['email' => $email, 'password' => $twoSpellings])->assertStatus(422);
+        $work[$label] = kdfWork($hasher);
+    }
+
+    expect($work)->toBe([
+        'unknown identifier' => ['makes' => 2, 'checks' => 0],
+        'wrong password' => ['makes' => 0, 'checks' => 2],
+    ])->and($hasher->checked)->toBe([$twoSpellings, "caf\u{00E9}-not-the-password"]);
+});
+
+it('pays one derivation per spelling for a weak stored hash too', function () {
+    // The cost equalizer for a row hashed below the configured cost runs once per spelling, like the checks.
+    User::factory()->create(['email' => 'weak@y.com', 'password' => Hash::make('password', ['rounds' => 5])]);
+    $hasher = countingHasher();
+
+    app('auth')->forgetGuards();
+    $this->postJson('/auth/login', ['email' => 'weak@y.com', 'password' => "cafe\u{0301}-not-the-password"])->assertStatus(422);
+
+    expect(kdfWork($hasher))->toBe(['makes' => 2, 'checks' => 2]);
+});

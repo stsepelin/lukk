@@ -55,6 +55,16 @@ it('marks the JWKS response publicly cacheable', function () {
         ->and($response->headers->getCacheControlDirective('max-age'))->toBe('3600');
 });
 
+it('serves the JWK Set under its registered media type', function () {
+    // RFC 7517 §8.5.1. Still JSON to anything that parses the body.
+    useAsymmetric(rsaKeypair());
+
+    $response = $this->getJson('/auth/jwks')->assertOk();
+
+    expect($response->headers->get('Content-Type'))->toBe('application/jwk-set+json')
+        ->and($response->json('keys'))->toHaveCount(1);
+});
+
 it('serves an empty JWK set under a symmetric algorithm', function () {
     // The suite's default algorithm is HS256 — no public keys to publish.
     $this->getJson('/auth/jwks')->assertOk()->assertExactJson(['keys' => []]);

@@ -6,6 +6,7 @@ namespace Lukk\Support;
 
 use Closure;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Auth\UserProvider;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -49,10 +50,71 @@ class HashablePassword
         return ValidationException::withMessages([$field => [__('This password is longer than 72 bytes, which can no longer be checked in full. Reset your password to continue.')]]);
     }
 
+    /**
+     * A password as it is HASHED: Unicode-normalized to NFKC.
+     *
+     * NIST SP 800-63B-4 §3.1.1.2: a verifier accepting Unicode "SHOULD apply the normalization process
+     * for stabilized strings using either the NFKC or NFKD normalization". The same text reaches a server
+     * as different bytes depending on the keyboard and the platform — `é` as one code point or as `e` plus
+     * a combining accent, a full-width digit from an IME — and hashed as typed, a password set on one
+     * device was "incorrect" on another.
+     *
+     * Bytes that are not valid UTF-8 have no normal form and are hashed as they are; so is everything
+     * where PHP has no `Normalizer` (neither `ext-intl` nor Symfony's polyfill, which a Laravel
+     * application always carries).
+     */
+    public static function normalize(#[\SensitiveParameter] string $password): string
+    {
+        $normalized = class_exists(\Normalizer::class) ? \Normalizer::normalize($password, \Normalizer::FORM_KC) : false; // @pest-mutate-ignore: FalseToTrue
+
+        return is_string($normalized) ? $normalized : $password;
+    }
+
+    /**
+     * The spellings to try a presented password under: as typed, then normalized when that differs.
+     *
+     * As typed FIRST, and always: every hash stored before normalization was made from the bytes its
+     * owner typed, so checking only the normal form would lock out each of them whose password is not
+     * already in it. One entry for a password already in normal form — nearly all of them — so the common
+     * case costs exactly what it did.
+     *
+     * @return list<string>
+     */
+    public static function spellings(#[\SensitiveParameter] string $password): array
+    {
+        // `array_unique` can only drop the second entry, so the result is a list either way.
+        return array_values(array_unique([$password, self::normalize($password)])); // @pest-mutate-ignore: UnwrapArrayValues
+    }
+
+    /**
+     * Check a presented password under each of its spellings; the one that verified, or null.
+     *
+     * Each check is wrapped as sign-in always wrapped its one: a stored hash the active hasher refuses
+     * (another algorithm, a `$2b$` import with `hashing.bcrypt.verify` on) makes the check THROW, and
+     * that is a credential nobody can present — it fails closed, not as a 500.
+     *
+     * @param  array<string, mixed>  $credentials  as the provider takes them; `password` is replaced per spelling
+     */
+    public static function verified(UserProvider $users, Authenticatable $user, #[\SensitiveParameter] array $credentials): ?string
+    {
+        foreach (self::spellings((string) ($credentials['password'] ?? '')) as $spelling) {
+            try {
+                if ($users->validateCredentials($user, ['password' => $spelling] + $credentials)) {
+                    return $spelling;
+                }
+            } catch (\Throwable) {
+                // Fails closed; the next spelling may still be one this hash can check.
+            }
+        }
+
+        return null;
+    }
+
     public static function rule(): Closure
     {
         return function (string $attribute, mixed $value, Closure $fail): void {
-            if (config('hashing.driver', 'bcrypt') === 'bcrypt' && is_string($value) && strlen($value) > 72) {
+            // Measured as it will be hashed: normalization can lengthen a password (`㈱` becomes `(株)`).
+            if (config('hashing.driver', 'bcrypt') === 'bcrypt' && is_string($value) && strlen(self::normalize($value)) > 72) {
                 $fail(__('The :attribute may not be longer than 72 bytes.'));
             }
         };

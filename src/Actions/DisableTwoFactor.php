@@ -12,11 +12,17 @@ use Lukk\Events\TwoFactorAuthenticationDisabled;
  */
 class DisableTwoFactor
 {
-    public function __invoke(Authenticatable $user): void
+    /**
+     * @return bool whether a CONFIRMED second factor was removed. An enrolment backed out of before it was
+     *              confirmed removes a secret too, but never an authenticator: no session was signed in with
+     *              it and none carries `mfa` because of it, so nothing on another device needs ending.
+     */
+    public function __invoke(Authenticatable $user): bool
     {
         // Read the raw attribute: whether anything is bound is a fact about the row, and decrypting
         // the secret (`twoFactorSecret()`) can fail on a rotated key — which must not stop a disable.
         $hadSecret = ($user->getAttribute('two_factor_secret') ?? '') !== '';
+        $wasConfirmed = $hadSecret && $user->getAttribute('two_factor_confirmed_at') !== null;
 
         $user->forceFill([
             'two_factor_secret' => null,
@@ -29,5 +35,7 @@ class DisableTwoFactor
         if ($hadSecret) {
             event(new TwoFactorAuthenticationDisabled($user));
         }
+
+        return $wasConfirmed;
     }
 }

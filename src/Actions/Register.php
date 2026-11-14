@@ -7,8 +7,12 @@ namespace Lukk\Actions;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use Lukk\Lukk;
+use Lukk\Support\HashablePassword;
 use RuntimeException;
 
 /**
@@ -74,12 +78,35 @@ class Register
             }
         }
 
-        return $this->model::create([
-            'name' => $payload['name'],
-            $this->username => $payload[$this->username],
-            // `Hash::make` goes through the facade's untyped `__callStatic`, so a non-string is coerced
-            // either way; the cast states the type.
-            'password' => Hash::make((string) $payload['password']), // @pest-mutate-ignore: RemoveStringCast
-        ]);
+        $connection = $this->model::query()->getConnection();
+
+        try {
+            // In a transaction of its own — a SAVEPOINT when the caller already holds one — so that a
+            // failed INSERT leaves the connection usable for the lookup below. On PostgreSQL it otherwise
+            // aborts the caller's transaction: every later statement raises 25P02, and the caller's
+            // COMMIT silently becomes a ROLLBACK.
+            return $connection->transaction(fn () => $this->model::create([
+                'name' => $payload['name'],
+                $this->username => $payload[$this->username],
+                // `Hash::make` goes through the facade's untyped `__callStatic`, so a non-string is coerced
+                // either way; the cast states the type.
+                'password' => Hash::make(HashablePassword::normalize((string) $payload['password'])), // @pest-mutate-ignore: RemoveStringCast
+            ]));
+        } catch (UniqueConstraintViolationException $e) {
+            // `Rule::unique` checks and the INSERT writes, and a key derivation sits between them: two
+            // posts of one address (a double-clicked sign-up) both pass the rule, and the loser's INSERT
+            // was a 500 where the form promises a 422. The rule is simply asked again, so it answers only
+            // when a row with this identifier now EXISTS — a violation on some other unique column is
+            // the application's own and stays the error it was — and in the words, translation and
+            // attribute name validation would have used.
+            //
+            // One case it cannot reach: called inside a transaction of the CALLER's that has already read,
+            // on MySQL's REPEATABLE READ, the rule reads that transaction's snapshot, does not see the
+            // competing row, and the violation stays the exception it was. lukk's own route holds no
+            // such transaction.
+            Validator::make([$this->username => $payload[$this->username]], [$this->username => [Rule::unique($this->model, $this->username)]])->validate();
+
+            throw $e;
+        }
     }
 }

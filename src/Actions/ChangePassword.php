@@ -4,11 +4,16 @@ declare(strict_types=1);
 
 namespace Lukk\Actions;
 
+use Illuminate\Auth\Passwords\PasswordBroker;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Contracts\Auth\CanResetPassword;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\ValidationException;
 use Lukk\Actions\Concerns\CountsLockoutAttempts;
+use Lukk\Actions\Concerns\ReadsPasswordBroker;
 use Lukk\Actions\Concerns\ThrowsWhenLocked;
 use Lukk\Auth\LoginRateLimiter;
 use Lukk\Contracts\LockoutRepository;
@@ -29,13 +34,14 @@ use Lukk\Support\HashablePassword;
  * deliberately the same budget as step-up confirmation rather than a second one — two independent
  * allowances for guessing one password is just a larger allowance.
  *
- * Requires an ELOQUENT user model: the write is `forceFill()->save()`, neither of which is on the
+ * Requires an ELOQUENT user model: the write is a query on the model's own table, which is not on the
  * `Authenticatable` contract. Same assumption as `ResetPassword` (and as Fortify), but worth saying
  * out loud for anyone who has swapped `lukk.user_provider` for a non-Eloquent one.
  */
 class ChangePassword
 {
     use CountsLockoutAttempts;
+    use ReadsPasswordBroker;
     use ThrowsWhenLocked;
 
     public function __construct(
@@ -45,6 +51,8 @@ class ChangePassword
         // Null unless `features.lockout` is on.
         private readonly ?LockoutRepository $lockouts = null,
         private readonly ?string $guard = null,
+        // `lukk.password_reset.broker`; null is the default broker.
+        private readonly ?string $passwordBroker = null,
     ) {}
 
     public function __invoke(Authenticatable $user, #[\SensitiveParameter] string $current, #[\SensitiveParameter] string $password, ?string $currentFamilyId): void
@@ -63,16 +71,18 @@ class ChangePassword
         }
 
         // The lock lands only once the check has failed — see `CountsLockoutAttempts`.
+        // The write is inside the same `try`: it checks the current password again when the stored hash
+        // moved under it, and a failure there is a wrong guess like any other.
         try {
             $this->verifyCurrent($user, $current);
+            $this->store($user, $current, $password);
         } catch (ValidationException $e) {
             $this->attemptFailed($this->lockouts, 'confirm', $subject);
 
             throw $e;
         }
 
-        // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
-        $user->forceFill([$user->getAuthPasswordName() => Hash::make($password)])->save();
+        $this->forgetPendingReset($user);
 
         // BOTH counters. The failures they hold were against a password that no longer exists, and
         // the reset path already releases both for exactly that reason. Releasing only `confirm`
@@ -104,23 +114,120 @@ class ChangePassword
         event(new PasswordChanged($user));
     }
 
-    private function verifyCurrent(Authenticatable $user, #[\SensitiveParameter] string $current): void
+    /**
+     * Write the new hash — over the password that was CHECKED, or not at all.
+     *
+     * The current password is verified against the hash the guard loaded when the request began. A
+     * recovery reset that commits after that check and before this write used to be overwritten: the
+     * owner's reset answered "password-reset", revoked every session, and a moment later the password
+     * was whatever the holder of the OLD one had asked for. A reset exists to shut exactly that caller
+     * out (NIST SP 800-63B-4 §4.2), and the window is as wide as two key derivations.
+     *
+     * So the write is ONE conditional UPDATE — `where password = <the hash that was checked>` — as the
+     * sign-in rehash does it. A hash that changed is not automatically a refusal — a concurrent sign-in
+     * may have rehashed the SAME password at a new cost — so the current password is checked again,
+     * against what is stored now, and the write retried over that; only a failed check answers as a wrong
+     * current password does.
+     *
+     * No transaction and no row lock, on purpose. An earlier revision locked the row and called
+     * `save()` inside the transaction, which ran the application's model observers and (in the re-check)
+     * a key derivation under the lock — and on PostgreSQL an observer that swallowed a failed query left
+     * the transaction aborted, so `COMMIT` became `ROLLBACK`: the change answered "password-changed",
+     * revoked the other sessions, and stored nothing.
+     */
+    private function store(Authenticatable $user, #[\SensitiveParameter] string $current, #[\SensitiveParameter] string $password): void
     {
-        // Wrapped as sign-in wraps it: a stored hash the active hasher refuses (another algorithm, a `$2b$`
-        // import with `hashing.bcrypt.verify` on) makes the check THROW, and that is a credential nobody
-        // can present — fail closed with the ordinary answer, not a 500.
-        try {
-            $valid = $this->users->validateCredentials($user, ['password' => $current]);
-        } catch (\Throwable) {
-            $valid = false;
+        // Every provider lukk signs in through hands back a model here; this states the type.
+        assert($user instanceof Model); // @pest-mutate-ignore: RemoveFunctionCall,InstanceOfToTrue
+
+        // The column the model names (`getAuthPasswordName()`), as sign-in reads it.
+        $column = $user->getAuthPasswordName();
+        $checked = $user->getAuthPassword();
+        $hash = Hash::make(HashablePassword::normalize($password));
+        $row = fn () => $user->newQueryWithoutScopes()->whereKey($user->getKey());
+
+        while ($row()->where($column, $checked)->update([$column => $hash]) !== 1) {
+            // A row deleted meanwhile reads null, which no check accepts.
+            $checked = $row()->value($column);
+
+            // Already what was being written: MySQL counts rows CHANGED, not rows matched, so an UPDATE
+            // that matched and set the value it found reports 0 — and retrying it would never report
+            // anything else.
+            if ($checked === $hash) {
+                break;
+            }
+
+            $this->verifyCurrent((clone $user)->setRawAttributes([...$user->getAttributes(), $column => $checked]), $current);
         }
 
-        if (! $valid) {
+        $this->written($user, $column, $hash);
+    }
+
+    /**
+     * Bring the model in line with the row, and tell the application's observers.
+     *
+     * The write was a query, not `save()`, so Eloquent fired nothing. `updated` and `saved` are fired
+     * here — after the write, outside any transaction of lukk's — with the password reading as changed,
+     * so an audit observer on the user model still sees a password change. `saving` and `updating` are
+     * not: they run before a write and may veto or rewrite it, and this write had to be conditional.
+     *
+     * Through Eloquent's own `fireModelEvent()`, which is protected: it is what reaches observers,
+     * closure listeners AND the classes a model maps in `$dispatchesEvents`, and naming the events by
+     * hand reached only the first two.
+     */
+    private function written(Model $user, string $column, string $hash): void
+    {
+        $user->setRawAttributes([...$user->getAttributes(), $column => $hash]);
+        $user->syncChanges();
+
+        $fire = \Closure::bind(fn (string $event) => $user->fireModelEvent($event, false), null, Model::class);
+
+        foreach (['updated', 'saved'] as $event) {
+            $fire($event);
+        }
+
+        // Already stored: left dirty, a later `save()` of this instance would write it again, over a
+        // reset that landed meanwhile.
+        $user->syncOriginalAttribute($column);
+    }
+
+    /**
+     * Drop a reset link requested before this change.
+     *
+     * A reset token stays valid until it expires (an hour by default) whatever happens to the password
+     * meanwhile. Someone who asked for one — the owner, or whoever was in their mailbox — could let the
+     * owner change the password and then undo it with the older link: the change answered
+     * "password-changed" and the account was one click from a password the owner did not choose.
+     *
+     * Best effort, and never a reason to fail a change that has already been written: only where the
+     * broker's table exists (a cache-backed broker has none to sweep, and its token simply expires), and
+     * a failure is reported, not thrown.
+     */
+    private function forgetPendingReset(Authenticatable $user): void
+    {
+        try {
+            if ($user instanceof CanResetPassword && $this->resetTableExists()) {
+                /** @var PasswordBroker $broker */
+                $broker = Password::broker($this->passwordBroker);
+                $broker->deleteToken($user);
+            }
+        } catch (\Throwable $e) {
+            report($e);
+        }
+    }
+
+    private function verifyCurrent(Authenticatable $user, #[\SensitiveParameter] string $current): void
+    {
+        // Under each spelling of it (as typed, then normalized), each check failing closed if the stored
+        // hash is one the active hasher refuses; see `HashablePassword::verified()`.
+        $verified = HashablePassword::verified($this->users, $user, ['password' => $current]);
+
+        if ($verified === null) {
             throw ValidationException::withMessages(['current_password' => [__('The provided password is incorrect.')]]);
         }
 
         // A bcrypt row longer than 72 bytes verifies only in part; see `HashablePassword::mustReset()`.
-        if (HashablePassword::verifiesOnlyInPart($user, $current)) {
+        if (HashablePassword::verifiesOnlyInPart($user, $verified)) {
             throw HashablePassword::mustReset('current_password');
         }
     }

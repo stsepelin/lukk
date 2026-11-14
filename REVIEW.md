@@ -76,7 +76,7 @@ Each row: the clause → what it requires of lukk → what a review checks. When
 | Clause | Requirement in lukk | Review checks |
 |---|---|---|
 | RFC 9700 §4.14 | Protect refresh tokens. | Tokens are opaque and random, stored only as `sha256`, never logged, and never serialised into a response body except the token pair itself. |
-| RFC 9700 §4.14.2 | Rotation, and replay → revoke. | A replay after the grace window revokes the **whole family**. A false family revoke under normal concurrency is a release blocker. The grace window is a deliberate deviation (§6). |
+| RFC 9700 §4.14.2 | Rotation, and replay → revoke. | A replay after the grace window revokes the **whole family**. A false family revoke under normal concurrency is a release blocker. The grace window is a deliberate deviation (§6). `rotated_at` is a zone-less local string, so it is read through `RepeatedHour` (latest instant not in the future), never as a bare timestamp. |
 | RFC 6749 §5.1 | Token responses. | `Cache-Control: no-store, private` on every response that carries a token (`EmitsTokens`). |
 | RFC 7009 §2.1, §2.2 | Revocation. | Logout works without a valid access token. Revoking an unknown token is not an error. A revoke covers the **longest** access-token lifetime still alive (`LongestAccessTtl`), not the configured one. |
 | OWASP ASVS 5.0 V7.4.1 | Logout really invalidates. | `DELETE /auth/sessions` revokes every family plus the presented bearer, including a co-issuer token with no `fid`. A bulk revoke acts on the families it read, never on sessions started meanwhile. |
@@ -88,7 +88,7 @@ Each row: the clause → what it requires of lukk → what a review checks. When
 |---|---|---|
 | 800-63B-4 §2.2.1 | AAL2 needs two **different** factors. | Two possession factors are not `mfa`. A password or biometric comparison is required for two single-factor authenticators to count. |
 | 800-63B-4 §2.2.3 | Reauthentication. | Password step-up in an `mfa` session is allowed only within `confirm.mfa_max_age` of the real `auth_time`. A session with no stored sign-in time fails closed. |
-| 800-63B-4 §3.1.1.2 | Password verifiers. | No composition rules. Long passwords are accepted. Never truncate silently: bcrypt's 72-byte limit is refused, not cut. Compare in constant time. A rehash at login must never revert a concurrent password change (it is a conditional UPDATE on the checked hash). |
+| 800-63B-4 §3.1.1.2 | Password verifiers. | No composition rules. Long passwords are accepted. Never truncate silently: bcrypt's 72-byte limit is refused, not cut, and measured on the normalized password. New passwords are hashed in NFKC (`HashablePassword::normalize()`); a presented one is checked as typed FIRST, then normalized, so older hashes keep verifying. Sign-in pays one derivation per spelling on every path, known account or not. Compare in constant time. No write of a password may revert a concurrent change: the login rehash is a conditional UPDATE on the checked hash, and so is `ChangePassword`'s write — no row lock, and no application code inside a transaction of lukk's. |
 | 800-63B-4 §3.1.4, §3.1.6 | OTP and possession authenticators. | TOTP is possession. A TOTP is single-use within its window (a replay cache using an atomic `add()`), and the challenge is single-use, short-TTL and throttled per account. |
 | 800-63B-4 §3.2.2 | Rate limiting. | The opt-in lockout caps *consecutive* failures. Each attempt is reserved before verification. A correct credential on the capping attempt does not lock, and `AccountLocked` fires exactly once. The account and the fold are both counted. |
 | 800-63B-4 §4.1.2.1 | Binding authenticators at the highest available AAL. | Any step-up that binds or removes an authenticator, changes the password, or exports or erases the account must meet the account's highest available level. A stored password counts as **present** unless lukk can *prove* nothing could ever match it (`crypt()`, stock provider and hasher only). Any doubt resolves toward the higher bar. |
@@ -117,7 +117,7 @@ Never hand-roll JWS, TOTP or WebAuthn. The only sanctioned libraries are `fireba
 | Clause | Requirement in lukk | Review checks |
 |---|---|---|
 | RFC 9110 §9.2.1 | Safe methods. | Nothing that changes state (rotation, logout, revoke) is reachable by GET. |
-| RFC 9110 §10.2.3 | `Retry-After`. | A 429 carries delay-seconds that don't reveal whether an account exists. |
+| RFC 9110 §10.2.3 | `Retry-After`. | A 429, and a 423 that releases by itself, carries delay-seconds that don't reveal whether an account exists. An action throws `RetryableValidationException` and `ForceJsonRequest` stamps the header; the exception never builds its own response. |
 | RFC 9110 §15.5.12, §15.5.16 | 411/415. | Cookie-mode token routes refuse (415) any body a cross-site form could produce. |
 | RFC 9111 §4.1, §4.2.2 | Caching. | Token and account responses are `no-store`. Nothing that varies by user can be heuristically cached. |
 | RFC 6265bis §5.6, §5.7 | Cookies. | The refresh cookie is `__Host-`, `Secure`, `HttpOnly` and `SameSite=Strict`. SameSite stops a cookie being *sent*, not *set* (§5.7), so login CSRF needs the JSON / `Sec-Fetch-Site` gate. |
@@ -129,7 +129,7 @@ Never hand-roll JWS, TOTP or WebAuthn. The only sanctioned libraries are `fireba
 |---|---|---|
 | RFC 3629 (UTF-8), RFC 8725 §3.7 | Valid UTF-8. | Invalid UTF-8 on any public input that reaches SQL is refused with a 422, never a 500. |
 | Unicode `\p{Cc}\p{Cf}\p{Me}`, RFC 5892 (CONTEXTJ) | Identifier spelling. | Control, format and enclosing characters plus NUL are refused (`Identifier::INVISIBLE`). ZWNJ, ZWJ and U+20E3 are allowed: Persian spelling and emoji need them. The throttle fold strips them, so a respelling never gets a fresh bucket. |
-| PostgreSQL / MySQL behaviour | NUL truncation, `PAD SPACE`, ignorable characters, case-insensitive collations. | Any identifier normalisation is at least as coarse as the database's own equality, or the respelling is refused outright. |
+| PostgreSQL / MySQL behaviour | NUL truncation, `PAD SPACE`, ignorable characters, case-insensitive collations, numeric columns. | Any identifier normalisation is at least as coarse as the database's own equality, or the respelling is refused outright. No fold reaches a collation's equality, so sign-in refuses a row found under a spelling that does not fold to its stored identifier (`AttemptLogin::spelledAsStored()`, stock providers by exact class). A new lookup by a user-typed value needs the same check, or exact comparison against what is stored (`PasskeyController::destroy()`). |
 
 ### 4.7 Privacy — GDPR
 
