@@ -69,7 +69,7 @@ $sessionRoutes = function (string $guardName, string $throttle = ''): void {
     // switched it off does not offer the endpoint at all. Read through the guard's RESOLVED config,
     // like `two_factor` on the extra-guard mount, so a per-guard override is honoured; `?? true`
     // because no key is guaranteed under a cached config (see `Lukk::guardConfig()`).
-    if ((bool) (Lukk::guardConfig($guardName)['features']['logout_all'] ?? true)) {
+    if (Lukk::guardConfig($guardName)['features']['logout_all'] ?? true) {
         Route::delete('sessions', [SessionController::class, 'destroy'])->middleware([$guard, $pinned.Abilities::SESSIONS]);
     }
 
@@ -123,7 +123,7 @@ foreach (is_array($extraGuards = config('lukk.guards')) ? $extraGuards : [] as $
 // `ForceJsonRequest` renders these routes' errors as JSON regardless of host config. This is the
 // DEFAULT guard — it carries every feature; `lukk.set-guard` resets the active guard each request.
 Route::domain(config('lukk.domain'))
-    ->prefix((string) (config('lukk.path') ?? 'auth'))
+    ->prefix((string) (config('lukk.path') ?? 'auth')) // @pest-mutate-ignore: RemoveStringCast
     ->middleware(['api', ForceJsonRequest::class, 'lukk.set-guard:'.Lukk::defaultGuard()])
     ->group(function () use ($sessionRoutes) {
         $guard = 'auth:'.Lukk::defaultGuard();
@@ -144,7 +144,7 @@ Route::domain(config('lukk.domain'))
         // `?? true` for the same reason `logout_all` has one: absent is a stale cached config, not a
         // decision to switch the feature off, and a silently unmounted route is a 404 on a documented
         // endpoint with nothing in the log to explain it.
-        if ((bool) (config('lukk.features.account_deletion') ?? true)) {
+        if (config('lukk.features.account_deletion') ?? true) {
             // Step-up confirmed AND gated on its own ability, which are two different controls doing
             // two different jobs.
             //
@@ -179,7 +179,7 @@ Route::domain(config('lukk.domain'))
             Route::delete('account', [AccountController::class, 'destroy'])->middleware([...$confirmed, $erasure]);
         }
 
-        if ((bool) (config('lukk.features.change_password') ?? true)) {
+        if (config('lukk.features.change_password') ?? true) {
             // Shares the confirm budget deliberately: it re-verifies the same secret, and two
             // independent allowances for guessing one password is just a larger allowance.
             //
@@ -250,7 +250,7 @@ Route::domain(config('lukk.domain'))
 // browser redirect vs a 204. Gated on the feature like the routes above.
 if (config('lukk.features.email_verification')) {
     Route::domain(config('lukk.domain'))
-        ->prefix((string) (config('lukk.path') ?? 'auth'))
+        ->prefix((string) (config('lukk.path') ?? 'auth')) // @pest-mutate-ignore: RemoveStringCast
         ->middleware(['api'])
         ->group(function () {
             Route::get('email/verify/{id}/{hash}', VerifyEmailController::class)

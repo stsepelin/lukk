@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A 401 from `/auth/refresh` no longer calls a valid access token invalid.** `WWW-Authenticate: Bearer error="invalid_token"` is stamped only when authentication is what refused the request (RFC 6750 §3.1); any other 401 carries the bare `Bearer` challenge.
 
+### Internal
+
+- **The mutation score is a measurement again, and the nightly run is green** (red since 2026-10-12). The plugin hands each mutant's covering tests to a child process as one `--filter` argument. Past ~35,000 bytes PCRE cannot compile it, PHPUnit matches nothing, the child exits non-zero having run no test, and the plugin counts that as a kill: 895 of 4,394 mutants — the service provider, the `Lukk` hub, the route manifest, the hot paths of login — had been reported caught without a test running. Past 131,072 bytes Linux refuses the argument and the run dies, which is what turned the nightly red. `.github/scripts/patch-pest-mutate.php` now has the filter built by `tests/Support/MutationFilter.php` (it must fit and compile), reports a child that ran no tests as untested, gives a mutant ten times the suite plus a minute, and lists timeouts; `.github/scripts/run-mutation.sh` fails a run on any timeout. Upstream: [pestphp/pest#1771](https://github.com/pestphp/pest/issues/1771).
+
+- **Measured for real the package was at 97.41%, and is now at 100%** (4,377 mutants, no timeouts). The 114 survivors were in exactly the code the false kills had covered. Among them: eleven middleware entries that could be deleted with the suite green — the throttles on `two-factor-challenge` and `passkeys/login`, `signed` on the verification link, `lukk.confirm` on the step-up group — now pinned route by route in `tests/Isolated/RouteManifestTest.php`; the provider's shipped defaults, its handling of config values that arrive from `env()` as strings, its publish groups, and the boot-time call to the guard-isolation check (`tests/Unit/ProviderDefaultsTest.php`); the `nbf` claim; the refresh secret's length; and the `WWW-Authenticate` challenge, which nothing stopped from being stamped on a response that was not a 401.
+
+- **The nightly run is sharded by path** (service provider, hub, routes, everything else), since a mutant in a boot file runs most of the suite and held up everything queued behind it. Pest ≤ 5.3.5 crashes under paratest 7.28.0, which the workflow holds back until a Pest release carries pestphp/pest#2025. `composer test:mutation` applies the patch itself. And a `LogoutTest` case that stamped `exp` from `time()` under a frozen clock flaked when the wall clock was a second ahead.
+
 ## [0.7.0] - 2026-10-19
 
 ### Added

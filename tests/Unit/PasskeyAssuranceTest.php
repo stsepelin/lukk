@@ -111,7 +111,32 @@ describe('the highest level an account can reach', function () {
         'a truncated bcrypt hash' => ['$2y$10$truncated'],
         'a sha-crypt value of the wrong length' => ['$6$rounds=5000$salt$x'],
         'a bcrypt-shaped value at the probed cost' => ['$2b$12$tooshort'],
+        // Two characters, like the `*0` / `*1` `crypt()` answers a value it cannot parse with: the same
+        // LENGTH as the refusal, so only the leading `*` tells them apart.
+        'a two-character placeholder' => ['!!'],
+        'crypt\'s own failure marker' => ['*0'],
     ]);
+
+    it('treats a placeholder as no password under each of the framework\'s hashers', function (string $driver) {
+        // The proof that nothing verifies it rests on `password_verify()`, which all three use. Left out of
+        // the list, an argon install's placeholder counted as a password and the account was held to a
+        // level it has no way to reach.
+        config(['hashing.driver' => $driver]);
+        Hash::forgetDrivers();
+        $user = User::factory()->create();
+        $user->forceFill(['password' => '!']);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeFalse();
+    })->with(['bcrypt', 'argon', 'argon2id']);
+
+    it('counts a hash PHP recognises without probing it', function () {
+        // An argon2id row on a bcrypt install — the app moved drivers, or is about to. `crypt()` cannot
+        // parse it and would call it absent; `Hash::info()` knows it, and that is enough.
+        $user = User::factory()->create();
+        $user->forceFill(['password' => password_hash('correct horse', PASSWORD_ARGON2ID)]);
+
+        expect(assurance()->canReachMultiFactor($user))->toBeTrue();
+    });
 
     it('counts a value naming more work than the defaults without running it', function (string $stored) {
         // `crypt()` honours the cost a value names: `$2b$31$…` takes hours, an extended-DES count up to

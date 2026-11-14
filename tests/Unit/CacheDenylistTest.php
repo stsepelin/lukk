@@ -38,3 +38,14 @@ it('reads any stored marker as denylisted, whatever the store hands back', funct
 
     expect((new CacheDenylist(['denylist_store' => 'array']))->has('jti', 'abc'))->toBeTrue();
 });
+
+it('keeps its markers in the configured store, not the default one', function () {
+    // The default cache is routinely a per-server `file` or `array` store; revocations have to be where
+    // every worker can see them.
+    config(['cache.stores.shared' => ['driver' => 'array']]);
+
+    (new CacheDenylist(['denylist_store' => 'shared']))->revokeJti('jti-1', 60);
+
+    expect((new CacheDenylist(['denylist_store' => 'shared']))->has('jti', 'jti-1'))->toBeTrue()
+        ->and((new CacheDenylist([]))->has('jti', 'jti-1'))->toBeFalse();
+});

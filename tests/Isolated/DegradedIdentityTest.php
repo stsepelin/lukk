@@ -33,3 +33,17 @@ it('mounts the routes at /auth and names the default guard api when path and gua
     expect($response->headers->getCookies()[0]->getName())->toBe('__Host-refresh')
         ->and(RefreshToken::query()->value('guard'))->toBeIn([null, 'api']);
 });
+
+it('still mounts the routes whose feature flag defaults on when the flag is missing', function (string $method, string $uri) {
+    // Absent is a config cached before the key existed, not a decision to switch the feature off: a
+    // silently unmounted route is a 404 on a documented endpoint with nothing in the log to explain it.
+    $mounted = collect(app('router')->getRoutes())
+        ->contains(fn ($route) => $route->uri() === $uri && in_array($method, $route->methods(), true));
+
+    expect($mounted)->toBeTrue();
+})->with([
+    'logout_all' => ['DELETE', 'auth/sessions'],
+    'account_deletion: erasure' => ['DELETE', 'auth/account'],
+    'account_deletion: export' => ['GET', 'auth/account/export'],
+    'change_password' => ['POST', 'auth/password'],
+]);

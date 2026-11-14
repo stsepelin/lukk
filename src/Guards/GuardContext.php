@@ -34,7 +34,8 @@ class GuardContext
         //
         // Only honoured for a guard lukk knows: a hybrid app's session `web` guard has no lukk
         // identity, and reading config for it would just be the default guard under another name.
-        $resolved = (string) app('auth')->getDefaultDriver();
+        // `getDefaultDriver()` returns a string; the cast states it.
+        $resolved = (string) app('auth')->getDefaultDriver(); // @pest-mutate-ignore: RemoveStringCast
         $default = Lukk::defaultGuard();
         // Not `(array)`: that turns `guards => false` into `[0 => false]`, a guard named "0".
         $guards = config('lukk.guards');

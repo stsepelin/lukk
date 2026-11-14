@@ -10,6 +10,7 @@ it('clamps the claim window to the access token lifetime plus leeway, and to a m
 })->with([
     'a window above the clamp is kept' => [['claim_seconds' => 1000, 'access_ttl' => 100, 'leeway' => 10], 1000],
     'clamped to access_ttl + leeway' => [['claim_seconds' => 70, 'access_ttl' => 100, 'leeway' => 10], 110],
+    'a fraction of a second is off, like 0 — not rounded up to a minute' => [['claim_seconds' => '0.5', 'access_ttl' => 100, 'leeway' => 10], 0],
     'clamped to a minute' => [['claim_seconds' => 10, 'access_ttl' => 20, 'leeway' => 5], 60],
     'access_ttl unset: 900' => [['claim_seconds' => 10, 'leeway' => 10], 910],
     'leeway unset: 5, what the verifier reads' => [['claim_seconds' => 10, 'access_ttl' => 100], 105],

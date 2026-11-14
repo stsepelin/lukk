@@ -10,7 +10,12 @@ name: mutation
 #
 # The full run is NIGHTLY, and that is the gate: a regression surfaces within a day, on a diff that
 # says which class moved. A PR can ask for the same check on the files it touches by carrying the
-# `mutation` label — ~18 minutes, so it is opt-in rather than a toll on every push.
+# `mutation` label — minutes for an action, most of an hour for the service provider, so it is opt-in
+# rather than a toll on every push.
+#
+# Both jobs patch the plugin first (`.github/scripts/patch-pest-mutate.php`) and run through
+# `.github/scripts/run-mutation.sh`. Without the patch the score is not a measurement: until 2026-11-14
+# about a fifth of the package's mutants were reported killed by child processes that had run no test.
 
 on:
   pull_request:
@@ -28,9 +33,11 @@ jobs:
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'mutation')
     runs-on: ubuntu-latest
     # `--class` is a PREFIX match, so a PR touching 20 classes can mutate 44 files / ~1,700 mutants.
-    # At the suite's cost-4 hashing that is ~18 minutes on a 4-vCPU runner (it was ~45 at cost 12).
-    # Cancelled mid-run reads as a failure and tells nobody anything, so the cap keeps 2.5x margin.
-    timeout-minutes: 45
+    # What it costs depends on WHICH classes: a mutant in an action runs a handful of tests, one in
+    # `LukkServiceProvider` or `Lukk` runs most of the suite (9 minutes for the provider alone on ten
+    # local processes when every mutant is caught, twice that when some survive — a 4-vCPU runner is
+    # three to four times slower). Cancelled mid-run reads as a failure and tells nobody anything.
+    timeout-minutes: 120
     name: Mutation score (changed files, label `mutation`)
     steps:
       - name: Checkout
@@ -47,18 +54,30 @@ jobs:
           coverage: xdebug
           ini-values: zend.assertions=1
 
+      # paratest 7.28.0 (2026-11-12) groups `SuiteLoader::$tests`, and Pest <= 5.3.5 crashes on it in every
+      # `--parallel` run (`WrapperRunner::getTestFiles(): Argument #1 must be of type string, array given`).
+      # Fixed upstream in pestphp/pest#2025; drop the `--with` once a Pest release carries it.
       - name: Install dependencies
-        run: composer update --prefer-dist --no-interaction --no-progress
+        run: composer update --prefer-dist --no-interaction --no-progress --with 'brianium/paratest:<7.28.0'
+
+      # Unpatched, the plugin reports kills it never measured: a mutant most of the suite covers gets a
+      # `--filter` PCRE cannot compile, its child runs no test at all, and the non-zero exit is scored as
+      # caught. The script explains itself, is idempotent, and fails the job if it cannot apply.
+      - name: Patch the mutation plugin so a mutant that ran no test is not a kill
+        run: php .github/scripts/patch-pest-mutate.php
 
       - name: Mutate the classes this PR touches
+        env:
+          # Through the environment, never interpolated into the script: a ref name is somebody's text.
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
-          base="$(git merge-base origin/${{ github.base_ref }} HEAD)"
+          base="$(git merge-base "origin/$BASE_REF" HEAD)"
           # `--class` takes PSR-4 names, so map `src/Foo/Bar.php` → `Lukk\Foo\Bar`. Only files that
           # still exist (a deleted one has no class to mutate), and only class files — `src/routes/*.php`
           # is a route manifest, not a class, and naming it would filter everything out.
           classes="$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- 'src/**.php' \
-            | grep -E '^src/([A-Z][^/]*/)*[A-Z][^/]*\.php$' \
+            | { grep -E '^src/([A-Z][^/]*/)*[A-Z][^/]*\.php$' || true; } \
             | sed -E 's#^src/#Lukk/#; s#\.php$##; s#/#\\#g' \
             | paste -sd, -)"
           if [ -z "$classes" ]; then
@@ -66,21 +85,39 @@ jobs:
             exit 0
           fi
           echo "Mutating: $classes"
-          # The SAME floor the nightly run uses, not 100. A demand for 100 here would fail nearly every
+          # The SAME floor the nightly run uses (`run-mutation.sh` holds it), not 100. A demand for 100 here would fail nearly every
           # pull request — a new class arrives with survivors before its tests do — and a gate that is always red gets
           # switched off, which is worse than no gate. This one fires when a change makes the classes it
           # touches measurably worse. Paying the debt down is done by raising the floor, deliberately.
-          XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --min=99 \
-            --class="$classes"
+          .github/scripts/run-mutation.sh --class="$classes"
 
   full:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Measured at 20 minutes on 10 local processes (37 before the suite stopped hashing at production
-    # cost); a 4-vCPU runner takes roughly two and a half times that. A job killed by its timeout
-    # prints no score at all, so the margin is deliberate.
-    timeout-minutes: 90
-    name: Mutation score (whole package)
+    # Sharded by path, because three files are not like the rest. The service provider, the `Lukk` hub
+    # and the route manifest run on every request, so nearly every test covers their lines: a mutant
+    # there has to run most of the suite to be judged, where a mutant in an action runs a handful of
+    # tests. In one job those three set the pace for everything queued behind them; apart, each shard
+    # finishes on its own clock and a red one names where to look. `fail-fast` is off so one shard's
+    # survivors do not cancel the others' answers.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: service provider
+            args: --path=src/LukkServiceProvider.php
+          - shard: Lukk hub
+            args: --path=src/Lukk.php
+          - shard: routes
+            args: --path=src/routes
+          - shard: everything else
+            args: --ignore=src/LukkServiceProvider.php,src/Lukk.php,src/routes
+    # A job killed by its timeout prints no score at all, so the margin is deliberate. Measured on ten
+    # local processes, 2026-11-14: provider 9-19 minutes, hub 2-3, routes 5-16, everything else 19 — the
+    # longer figure when mutants survive, since a survivor runs all of its tests and a kill stops at
+    # the first failure. A 4-vCPU runner has taken 3.7x the local time.
+    timeout-minutes: 150
+    name: Mutation score (${{ matrix.shard }})
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -94,12 +131,20 @@ jobs:
           coverage: xdebug
           ini-values: zend.assertions=1
 
+      # paratest 7.28.0 (2026-11-12) groups `SuiteLoader::$tests`, and Pest <= 5.3.5 crashes on it in every
+      # `--parallel` run (`WrapperRunner::getTestFiles(): Argument #1 must be of type string, array given`).
+      # Fixed upstream in pestphp/pest#2025; drop the `--with` once a Pest release carries it.
       - name: Install dependencies
-        run: composer update --prefer-dist --no-interaction --no-progress
+        run: composer update --prefer-dist --no-interaction --no-progress --with 'brianium/paratest:<7.28.0'
 
-      # The measured floor: 99.94% on 2026-09-19, with exactly these flags (3,266 mutants; timeouts
-      # count as caught here, as they do in Pest's own score), set just below for noise. The two
-      # survivors that run measured are now tested, so the package is at 100% by class. Raise it
-      # as the score rises — never lower it to turn a build green. The PR job above uses the same number.
+      # Unpatched, the plugin reports kills it never measured: a mutant most of the suite covers gets a
+      # `--filter` PCRE cannot compile, its child runs no test at all, and the non-zero exit is scored as
+      # caught. The script explains itself, is idempotent, and fails the job if it cannot apply.
+      - name: Patch the mutation plugin so a mutant that ran no test is not a kill
+        run: php .github/scripts/patch-pest-mutate.php
+
+      # The floor is 99 (`run-mutation.sh`), just under what the package measures. Raise it as the score
+      # rises — never lower it to turn a build green. The PR job above uses the same number. A timeout
+      # fails the shard: it is not a kill.
       - name: Mutation score
-        run: XDEBUG_MODE=coverage vendor/bin/pest --mutate --parallel --covered-only --everything --min=99
+        run: .github/scripts/run-mutation.sh --everything ${{ matrix.args }}
