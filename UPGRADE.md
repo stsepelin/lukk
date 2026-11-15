@@ -49,7 +49,8 @@ passwords outside lukk (its own `Hash::check`) should try both spellings the sam
 (`HashablePassword::spellings()`), or a password set after this release under a decomposed spelling will
 not match there.
 
-The password policy is asked about the spelling that is stored. lukk's own rules do that in one pass.
+The password policy is asked about the spelling that is stored. lukk's own policy rule does that by
+itself; its `max:255` is now judged on the stored spelling too, which normalization can lengthen.
 For `Lukk::registerValidation()` and a rebound `RegisterRequest` that overrides `rules()` it means your
 rules for `password` run a second time when normalization changes the password — on the normalized
 spelling, with any field that repeats the password respelled alongside it — so a rule there that has a

@@ -11,6 +11,7 @@ use Illuminate\Validation\Rules\Password as PasswordRule;
 use Lukk\Http\Requests\RegisterRequest;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
+use Lukk\Tests\Fixtures\StricterRegisterRequest;
 use Lukk\Tests\Fixtures\User;
 use Lukk\Tests\Fixtures\WordedRegisterRequest;
 
@@ -212,6 +213,21 @@ it('does not ask lukk\'s own rules twice: they judge the stored spelling themsel
     }
 
     expect($asked)->toBe(1);
+});
+
+it('asks a rule a subclass adds to lukk\'s own, though lukk\'s own were its starting point', function () {
+    // `parent::rules()` plus a `min:12`: lukk's policy rule judges the stored spelling by itself, the
+    // added one does not. Ten decomposed letters are twenty characters typed and ten stored.
+    config(['lukk.features.registration' => true]);
+    app()->bind(RegisterRequest::class, StricterRegisterRequest::class);
+    $register = fn (string $email, string $password) => $this->postJson('/auth/register', [
+        'name' => 'Ada', 'email' => $email, 'password' => $password, 'password_confirmation' => $password,
+    ]);
+
+    $response = $register('stricter-short@example.test', str_repeat("e\u{0301}", 10))->assertStatus(422);
+    expect($response->json('errors.password'))->toBe(['The password field must be at least 12 characters.']);
+
+    $register('stricter-long@example.test', str_repeat("e\u{0301}", 12))->assertSuccessful();
 });
 
 it('answers for a rebound request in that request\'s own words', function () {

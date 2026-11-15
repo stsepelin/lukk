@@ -18,7 +18,7 @@ namespace Lukk\Support;
  * variable is set. Something that is no number takes the default rather than 0, which would mint tokens
  * already expired.
  */
-final class AccessTtl
+class AccessTtl
 {
     public const DEFAULT = 900;
 

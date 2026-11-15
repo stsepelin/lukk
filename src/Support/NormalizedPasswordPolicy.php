@@ -24,6 +24,9 @@ use Illuminate\Validation\Rules\Password;
  */
 class NormalizedPasswordPolicy implements ValidationRule
 {
+    /** The stored spelling this rule has already asked the policy about, if any. */
+    private ?string $asked = null;
+
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
         // Not a string is the `string` rule's to refuse; there is nothing here to normalize.
@@ -31,7 +34,18 @@ class NormalizedPasswordPolicy implements ValidationRule
             return;
         }
 
-        $judged = Validator::make([$attribute => HashablePassword::normalize($value)], [$attribute => [Password::defaults()]]);
+        $stored = HashablePassword::normalize($value);
+
+        // Once per stored spelling. Registration runs a rule set's password rules a second time, on the
+        // stored spelling (`RegisterRequest::judgeAsStored()`), and this rule judged that spelling the
+        // first time: asked again it would only run the application's policy twice — two breach-list
+        // lookups for one password, with `uncompromised()`.
+        if ($stored === $this->asked) {
+            return;
+        }
+        $this->asked = $stored;
+
+        $judged = Validator::make([$attribute => $stored], [$attribute => [Password::defaults()]]);
 
         foreach ($judged->errors()->all() as $message) {
             $fail($message);

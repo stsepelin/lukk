@@ -26,9 +26,6 @@ use Lukk\Support\NormalizedPasswordPolicy;
  */
 class RegisterRequest extends FormRequest
 {
-    /** Whether the rules in force are lukk's own — which already judge the password as it is stored. */
-    private bool $defaultRules = false;
-
     public function authorize(): bool
     {
         return true;
@@ -45,7 +42,6 @@ class RegisterRequest extends FormRequest
         }
 
         $field = Lukk::usernameField();
-        $this->defaultRules = true;
 
         return [
             // Valid UTF-8 (a `u` pattern matches nothing else): PostgreSQL refuses an invalid sequence
@@ -111,12 +107,7 @@ class RegisterRequest extends FormRequest
             // any hook that hashes would 500 on either.
             if (Lukk::$registerUsing === null) {
                 (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', str_replace(':attribute', 'password', $message)));
-
-                // lukk's own rules have judged the stored spelling already (`NormalizedPasswordPolicy`): asked
-                // again they would only run the policy twice — two breach-list lookups, with `uncompromised()`.
-                if (! $this->defaultRules) {
-                    $this->judgeAsStored($validator, $password);
-                }
+                $this->judgeAsStored($validator, $password);
             }
         }];
     }
@@ -135,6 +126,9 @@ class RegisterRequest extends FormRequest
      * say is said in their words. Nothing else is asked again, and the input is left as it was typed: a
      * rule on another field, the validated data and `registerUsing()` all see what was sent. Only while
      * lukk's own create runs — a `registerUsing()` hook stores what it likes, as typed if it likes.
+     *
+     * For lukk's own rules too, which is where their length bound (`max:255`) comes to be judged on what
+     * is hashed: normalization can lengthen a password as well as shorten one.
      */
     private function judgeAsStored(Validator $validator, string $password): void
     {
@@ -155,7 +149,10 @@ class RegisterRequest extends FormRequest
                 $value = $stored;
             }
         });
-        // Only the set's rules for `password`, and none at all where it has none.
+        // Only the set's rules for `password`, and none at all where it has none. Judged by the rules in
+        // force, not by whose `rules()` ran: a subclass that calls `parent::rules()` and appends a `min:12`
+        // has lukk's rules and one of its own, and its own is asked. (lukk's policy rule, which judges the
+        // stored spelling by itself, knows it has answered for this one: `NormalizedPasswordPolicy`.)
         $again = ValidatorFacade::make($data, Arr::only($validator->getRules(), ['password']), $this->messages(), $this->attributes());
 
         foreach ($again->errors()->all() as $message) {
