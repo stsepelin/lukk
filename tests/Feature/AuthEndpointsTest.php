@@ -520,9 +520,13 @@ it('denylists a presented co-issuer token only for the rest of its life', functi
     $this->freezeSecond();
     $user = User::factory()->create();
     $cfg = Lukk::guardConfig();
+    // Stamped from the FROZEN clock, the one the revoke subtracts from. `time()` is the real one, and
+    // when the second ticked over between the freeze and this line the entry came out a second longer
+    // than expected: seen once in a few thousand runs, under a loaded machine.
+    $at = now()->getTimestamp();
     $token = JWT::encode([
         'iss' => $cfg['issuer'], 'aud' => $cfg['audience'], 'sub' => (string) $user->getAuthIdentifier(),
-        'jti' => 'co-issued-ttl', 'iat' => time(), 'nbf' => time(), 'exp' => time() + 600,
+        'jti' => 'co-issued-ttl', 'iat' => $at, 'nbf' => $at, 'exp' => $at + 600,
     ], $cfg['secret'], $cfg['algorithm'], head: ['typ' => 'at+jwt']);
     $denylist = new class(app(Denylist::class)) implements Denylist
     {

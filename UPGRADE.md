@@ -49,6 +49,13 @@ passwords outside lukk (its own `Hash::check`) should try both spellings the sam
 (`HashablePassword::spellings()`), or a password set after this release under a decomposed spelling will
 not match there.
 
+The password policy is asked about the spelling that is stored. lukk's own rules do that in one pass.
+For `Lukk::registerValidation()` and a rebound `RegisterRequest` that overrides `rules()` it means your
+rules for `password` run a second time when normalization changes the password — on the normalized
+spelling, with any field that repeats the password respelled alongside it — so a rule there that has a
+side effect (a counter, a call to an outside service) sees such a password twice. Not when
+`Lukk::registerUsing()` does the create.
+
 ### The JWK Set's content type changed
 
 **Low impact.** `GET {path}/jwks` answers `application/jwk-set+json`. Only a consumer that requires the

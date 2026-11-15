@@ -8,8 +8,11 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\Rules\Password as PasswordRule;
+use Lukk\Http\Requests\RegisterRequest;
+use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
 use Lukk\Tests\Fixtures\User;
+use Lukk\Tests\Fixtures\WordedRegisterRequest;
 
 /*
  * NIST SP 800-63B-4 §3.1.1.2: a verifier that accepts Unicode SHOULD normalize (NFKC or NFKD) before
@@ -110,6 +113,135 @@ it('holds a new password to the policy as it will be stored, not as it was typed
         ]);
     }],
 ]);
+
+it('holds a password to a custom registration rule set as it will be stored too', function (Closure $rules) {
+    // `registerValidation()` replaces the rules wholesale, lukk's own judging of the stored spelling
+    // included: an application's `min:8` was answered about the eight characters typed, and four stored.
+    config(['lukk.features.registration' => true]);
+    Lukk::registerValidation($rules());
+    $register = fn (string $email, string $password) => $this->postJson('/auth/register', [
+        'name' => 'Ada', 'email' => $email, 'password' => $password, 'password_confirmation' => $password,
+    ]);
+
+    try {
+        $response = $register('custom-short@example.test', str_repeat("e\u{0301}", 4))->assertStatus(422);
+        // In the rule's own words, once.
+        expect($response->json('errors.password'))->toBe(['The password field must be at least 8 characters.'])
+            ->and(User::where('email', 'custom-short@example.test')->exists())->toBeFalse();
+
+        // Eight letters under the same accents are eight either way; so is a password with nothing to
+        // normalize, which is not asked about twice.
+        $register('custom-long@example.test', str_repeat("e\u{0301}", 8))->assertSuccessful();
+        $register('custom-plain@example.test', 'plain-ascii-1')->assertSuccessful();
+    } finally {
+        Lukk::$registerValidation = null;
+    }
+})->with([
+    'a string rule' => [fn () => fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed', 'min:8']]],
+    'a rule object' => [fn () => fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed', PasswordRule::min(8)]]],
+]);
+
+it('compares the confirmation as stored too, and leaves the input as it was typed', function () {
+    config(['lukk.features.registration' => true]);
+    $seen = [];
+    $asked = [];
+    $names = 0;
+    // A rule on the password that reads the request: it must still see what was sent. And one that
+    // compares it with a field of the set's own naming, which has to be there, and respelled with it.
+    Lukk::registerValidation(function ($request) use (&$seen, &$asked, &$names) {
+        // Only the password's rules are asked again: the name's run once per request, and the email stays
+        // the email, so `different:email` still has something else to differ from.
+        return ['name' => ['required', function () use (&$names) {
+            $names++;
+        }], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed', 'min:8', 'same:password_again', 'different:email', function (string $attribute, mixed $value) use ($request, &$seen, &$asked) {
+            $seen[] = $request->input('password');
+            $asked[] = $value;
+        }]];
+    });
+
+    try {
+        // Typed decomposed, confirmed the same way: equal as typed and equal as stored.
+        $this->postJson('/auth/register', [
+            'name' => 'Ada', 'email' => 'confirmed@example.test', 'password' => DECOMPOSED, 'password_confirmation' => DECOMPOSED, 'password_again' => DECOMPOSED,
+        ])->assertSuccessful();
+        $this->postJson('/auth/register', [
+            'name' => 'Ada', 'email' => 'plain@example.test', 'password' => 'plain-ascii-1', 'password_confirmation' => 'plain-ascii-1', 'password_again' => 'plain-ascii-1',
+        ])->assertSuccessful();
+    } finally {
+        Lukk::$registerValidation = null;
+    }
+
+    // Asked as typed, then as stored — and a password with nothing to normalize only once.
+    expect($seen)->toBe([DECOMPOSED, DECOMPOSED, 'plain-ascii-1'])
+        ->and($asked)->toBe([DECOMPOSED, COMPOSED, 'plain-ascii-1'])
+        ->and($names)->toBe(2)
+        ->and(Hash::check(COMPOSED, storedHash(User::where('email', 'confirmed@example.test')->firstOrFail())))->toBeTrue();
+});
+
+it('finds a repeated password wherever the rule set keeps it, a nested field included', function () {
+    config(['lukk.features.registration' => true]);
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'min:8', 'same:confirm.password']]);
+
+    try {
+        // Typed the same in both places: equal as typed, and so equal as stored.
+        $this->postJson('/auth/register', [
+            'name' => 'Ada', 'email' => 'nested@example.test', 'password' => DECOMPOSED, 'confirm' => ['password' => DECOMPOSED],
+        ])->assertSuccessful();
+    } finally {
+        Lukk::$registerValidation = null;
+    }
+});
+
+it('does not ask lukk\'s own rules twice: they judge the stored spelling themselves', function () {
+    // Asked again, `Password::defaults()` ran twice for such a password — with `uncompromised()`, two
+    // lookups of one password against the breach list.
+    config(['lukk.features.registration' => true]);
+    $asked = 0;
+    PasswordRule::defaults(function () use (&$asked) {
+        $asked++;
+
+        return PasswordRule::min(8);
+    });
+
+    try {
+        $this->postJson('/auth/register', [
+            'name' => 'Ada', 'email' => 'default-rules@example.test', 'password' => DECOMPOSED, 'password_confirmation' => DECOMPOSED,
+        ])->assertSuccessful();
+    } finally {
+        PasswordRule::$defaultCallback = null;
+    }
+
+    expect($asked)->toBe(1);
+});
+
+it('answers for a rebound request in that request\'s own words', function () {
+    config(['lukk.features.registration' => true]);
+    app()->bind(RegisterRequest::class, WordedRegisterRequest::class);
+    $short = str_repeat("e\u{0301}", 4);
+
+    $response = $this->postJson('/auth/register', [
+        'name' => 'Ada', 'email' => 'worded@example.test', 'password' => $short, 'password_confirmation' => $short,
+    ])->assertStatus(422);
+
+    expect($response->json('errors.password'))->toBe(['Your passphrase is too short.']);
+});
+
+it('leaves a password a registerUsing hook will store to the rules as typed', function () {
+    // The hook owns what is stored — as typed, if it likes — so the stored spelling is not lukk's to judge.
+    config(['lukk.features.registration' => true]);
+    Lukk::registerValidation(fn () => ['name' => ['required'], 'email' => ['required', 'email'], 'password' => ['required', 'confirmed', 'min:8']]);
+    Lukk::registerUsing(fn (array $payload) => User::create(['name' => $payload['name'], 'email' => $payload['email'], 'password' => Hash::make($payload['password'])]));
+
+    try {
+        $short = str_repeat("e\u{0301}", 4);
+        $this->postJson('/auth/register', [
+            'name' => 'Ada', 'email' => 'hook@example.test', 'password' => $short, 'password_confirmation' => $short,
+        ])->assertSuccessful();
+    } finally {
+        Lukk::$registerValidation = null;
+        Lukk::$registerUsing = null;
+    }
+});
 
 it('says what the application\'s own policy says, about the attribute it was asked about', function () {
     PasswordRule::defaults(fn () => PasswordRule::min(12));

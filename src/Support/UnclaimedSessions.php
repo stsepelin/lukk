@@ -46,7 +46,7 @@ class UnclaimedSessions
             return 0;
         }
 
-        $accessTtl = is_numeric($config['access_ttl'] ?? null) ? (int) $config['access_ttl'] : 900;
+        $accessTtl = AccessTtl::seconds($config);
         // 5, not 0, when absent or unusable. Short by `leeway`, the clamp landed inside the token's real
         // acceptance band, and a session whose first use was its original access token in that gap was
         // judged late and had its whole family revoked. A number is clamped as the verifier clamps it

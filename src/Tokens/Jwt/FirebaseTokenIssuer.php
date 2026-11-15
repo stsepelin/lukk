@@ -9,6 +9,7 @@ use Illuminate\Support\Str;
 use Lukk\Contracts\TokenIssuer;
 use Lukk\Lukk;
 use Lukk\Support\Abilities;
+use Lukk\Support\AccessTtl;
 use Lukk\Support\TokenContext;
 
 /**
@@ -109,7 +110,7 @@ class FirebaseTokenIssuer implements TokenIssuer
     }
 
     /**
-     * `access_ttl` in whole seconds, read the way `UnclaimedSessions::window()` reads it.
+     * `access_ttl` in whole seconds, read the way every other reader does (`AccessTtl`).
      *
      * An integer whatever the config holds: a per-guard `env('…_ACCESS_TTL', 300)` is a STRING once the
      * variable is set, and `expires_in` reaches `TokenPair`'s `int` parameter under `strict_types`. That was
@@ -119,9 +120,7 @@ class FirebaseTokenIssuer implements TokenIssuer
      */
     private function accessTtl(): int
     {
-        $ttl = $this->config['access_ttl'] ?? null;
-
-        return is_numeric($ttl) ? (int) $ttl : 900;
+        return AccessTtl::seconds($this->config);
     }
 
     /**
