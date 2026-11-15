@@ -44,6 +44,10 @@ it('outlives the last access token a revoked family can present', function (arra
     'access_ttl unset' => [['leeway' => 10], 910],
     'leeway unset' => [['access_ttl' => 300], 305],
     'fractional strings from env' => [['access_ttl' => '300.5', 'leeway' => '10.5'], 310],
+    // What the issuer mints for it (`AccessTtl`): cast, `'15m'` is 15 and `'abc'` 0, and the entry
+    // outlived the leeway alone while the tokens lived a quarter of an hour.
+    'a value that is no number is the default the issuer minted with' => [['access_ttl' => 'abc', 'leeway' => 10], 910],
+    'null, a per-guard env that is not set' => [['access_ttl' => null, 'leeway' => 10], 910],
 ]);
 
 it('covers a token that outlives the configured window, rather than under-covering it', function () {

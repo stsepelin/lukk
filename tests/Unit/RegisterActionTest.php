@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Auth\GenericUser;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -72,6 +73,87 @@ it('answers the unique rule\'s 422 to the registration that lost a race, not a 5
     }
 
     expect(User::query()->where('email', 'dup@example.com')->count())->toBe(1);
+});
+
+it('answers the lost race in the application\'s own wording of "taken", the value included', function () use ($payload) {
+    // Validation's own message for the rule, with everything it may name: the attribute as the
+    // application calls it, and the value that was sent.
+    app('translator')->addLines(['validation.unique' => ':attribute :input is spoken for.', 'validation.attributes.email' => 'address'], 'en');
+    loseTheRaceFor('dup@example.com');
+
+    try {
+        registerAction()($payload);
+        $this->fail('The losing registration was accepted.');
+    } catch (ValidationException $e) {
+        expect($e->errors())->toBe(['email' => ['address dup@example.com is spoken for.']]);
+    }
+});
+
+/** Every "is there such a row" lukk asks while `$during` runs: the SQL's transaction level, in order. */
+function registerLookupsDuring(Closure $during, ?Closure $onLookup = null): array
+{
+    $levels = [];
+    DB::beforeExecuting(function (string $query) use (&$levels, $onLookup) {
+        if (str_starts_with($query, 'select exists')) {
+            $levels[] = DB::transactionLevel();
+            $onLookup?->__invoke(count($levels));
+        }
+    });
+
+    try {
+        $during();
+    } catch (Throwable $thrown) {
+        return [$levels, $thrown];
+    }
+
+    return [$levels, null];
+}
+
+it('asks once when the plain read already shows the row, and takes no lock for it', function () use ($payload) {
+    // The ordinary lost race. A locking read here would be a lock nobody needs — and on PostgreSQL at
+    // REPEATABLE READ a failure (40001) on the very row the plain read simply shows.
+    loseTheRaceFor('dup@example.com');
+
+    [$levels, $thrown] = registerLookupsDuring(fn () => registerAction()($payload));
+
+    expect($thrown)->toBeInstanceOf(ValidationException::class)
+        ->and($levels)->toHaveCount(1);
+});
+
+it('asks again among what is committed, in a savepoint, when the plain read saw no row', function () use ($payload) {
+    // A caller's transaction on MySQL's REPEATABLE READ reads its snapshot: no row. Stood in for here by
+    // a violation with no row yet, and the winner arriving between the two reads.
+    User::creating(fn () => throw new UniqueConstraintViolationException('sqlite', 'insert into "users"', [], new Exception('UNIQUE constraint failed: users.email')));
+    $outside = DB::transactionLevel();
+
+    [$levels, $thrown] = registerLookupsDuring(fn () => registerAction()($payload), function (int $lookup) {
+        if ($lookup === 2) {
+            DB::table('users')->insert(['name' => 'First', 'email' => 'dup@example.com', 'password' => 'x']);
+        }
+    });
+
+    expect($thrown)->toBeInstanceOf(ValidationException::class)
+        ->and($thrown->errors())->toBe(['email' => [__('validation.unique', ['attribute' => 'email'])]])
+        // The second one a level deeper: a locking read that fails must not cost the caller's transaction.
+        ->and($levels)->toBe([$outside, $outside + 1])
+        ->and(DB::transactionLevel())->toBe($outside);
+});
+
+it('reads a locking read that fails as no answer, and leaves the violation the error it was', function () use ($payload) {
+    // No privilege to lock, a lock timeout, PostgreSQL's 40001: none of them is "taken".
+    $violation = new UniqueConstraintViolationException('sqlite', 'insert into "users"', [], new Exception('UNIQUE constraint failed: users.email'));
+    User::creating(fn () => throw $violation);
+    $outside = DB::transactionLevel();
+
+    [$levels, $thrown] = registerLookupsDuring(fn () => registerAction()($payload), function (int $lookup) {
+        if ($lookup === 2) {
+            throw new QueryException('sqlite', 'select exists(…) for share', [], new Exception('permission denied for table users'));
+        }
+    });
+
+    expect($thrown)->toBe($violation)
+        ->and($levels)->toHaveCount(2)
+        ->and(DB::transactionLevel())->toBe($outside);
 });
 
 it('leaves a unique violation on some other column the error it was', function () use ($payload) {

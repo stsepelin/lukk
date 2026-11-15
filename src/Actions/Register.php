@@ -6,11 +6,14 @@ namespace Lukk\Actions;
 
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Database\ConnectionInterface;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Lukk\Lukk;
 use Lukk\Support\HashablePassword;
 use RuntimeException;
@@ -95,18 +98,49 @@ class Register
         } catch (UniqueConstraintViolationException $e) {
             // `Rule::unique` checks and the INSERT writes, and a key derivation sits between them: two
             // posts of one address (a double-clicked sign-up) both pass the rule, and the loser's INSERT
-            // was a 500 where the form promises a 422. The rule is simply asked again, so it answers only
-            // when a row with this identifier now EXISTS — a violation on some other unique column is
-            // the application's own and stays the error it was — and in the words, translation and
-            // attribute name validation would have used.
-            //
-            // One case it cannot reach: called inside a transaction of the CALLER's that has already read,
-            // on MySQL's REPEATABLE READ, the rule reads that transaction's snapshot, does not see the
-            // competing row, and the violation stays the exception it was. lukk's own route holds no
-            // such transaction.
-            Validator::make([$this->username => $payload[$this->username]], [$this->username => [Rule::unique($this->model, $this->username)]])->validate();
+            // was a 500 where the form promises a 422. So the question the rule asked is asked again —
+            // is there a row with this identifier — and answered `unique`'s way only when one now
+            // EXISTS: a violation on some other unique column is the application's own and stays the
+            // error it was. Asked of the table, as the rule asks it: under no model scope, so a
+            // soft-deleted row holding the identifier counts, as it did for the index.
+            $holder = fn () => $this->model::query()->withoutGlobalScopes()->where($this->username, $payload[$this->username]);
+
+            if ($holder()->exists() || $this->committedSince($connection, $holder)) {
+                // Validation's own message for the rule: its translation, the attribute's name, the value.
+                $answer = Validator::make([$this->username => $payload[$this->username]], []);
+                $answer->addFailure($this->username, 'unique');
+
+                throw new ValidationException($answer);
+            }
 
             throw $e;
+        }
+    }
+
+    /**
+     * Is there such a row among what is COMMITTED now, though this transaction's plain read saw none?
+     *
+     * The one case the plain read cannot reach: inside a transaction of the CALLER's that has already
+     * read, on MySQL's REPEATABLE READ, it answers from that transaction's snapshot, taken before the
+     * competing row was committed — it saw no row, and the violation stayed a 500. A locking read is not
+     * a snapshot read there: it answers from what is committed now, which is what the index answered from.
+     *
+     * Only after the plain read, and never instead of it. A locking read takes a lock and needs the
+     * privilege to, and on PostgreSQL at REPEATABLE READ it fails outright (40001) on a row that changed
+     * since the snapshot — the very row a plain read would simply have shown. In a savepoint of its own
+     * for the same reason the INSERT is: a failed statement must not cost the caller their transaction.
+     * And any failure is "no answer", which leaves the violation the exception it was. (PostgreSQL at
+     * REPEATABLE READ or above reads its snapshot even with a lock, so a row committed since stays
+     * unseen there, and the violation stays the exception.)
+     *
+     * @param  \Closure(): Builder<Model>  $holder
+     */
+    private function committedSince(ConnectionInterface $connection, \Closure $holder): bool
+    {
+        try {
+            return $connection->transaction(fn () => $holder()->sharedLock()->exists());
+        } catch (QueryException) {
+            return false;
         }
     }
 }

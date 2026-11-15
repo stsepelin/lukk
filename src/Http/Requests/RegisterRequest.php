@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Lukk\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Validator as ValidatorFacade;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
 use Illuminate\Validation\Validator;
@@ -105,8 +107,57 @@ class RegisterRequest extends FormRequest
             // any hook that hashes would 500 on either.
             if (Lukk::$registerUsing === null) {
                 (HashablePassword::rule())('password', $password, fn (string $message) => $validator->errors()->add('password', str_replace(':attribute', 'password', $message)));
+                $this->judgeAsStored($validator, $password);
             }
         }];
+    }
+
+    /**
+     * Ask the rule set in force about the password AS IT WILL BE STORED, where that is not as typed.
+     *
+     * lukk's create hashes the NFKC spelling (`HashablePassword::normalize()`), and normalization can
+     * shorten a password: four `e` each followed by a combining accent are eight characters as typed and
+     * four once composed. The default rules judge the stored spelling themselves
+     * (`NormalizedPasswordPolicy`), but a set from `registerValidation()` — or a rebound subclass's — is
+     * the application's own, and its `min:12` or `Password::min(12)->mixedCase()` was answered about the
+     * typed one. NIST SP 800-63B-4 §3.1.1.2 sets the minimum on the secret the verifier keeps.
+     *
+     * So the set's own rules for `password` are run once more, on the stored spelling, and whatever they
+     * say is said in their words. Nothing else is asked again, and the input is left as it was typed: a
+     * rule on another field, the validated data and `registerUsing()` all see what was sent. Only while
+     * lukk's own create runs — a `registerUsing()` hook stores what it likes, as typed if it likes.
+     *
+     * For lukk's own rules too, which is where their length bound (`max:255`) comes to be judged on what
+     * is hashed: normalization can lengthen a password as well as shorten one.
+     */
+    private function judgeAsStored(Validator $validator, string $password): void
+    {
+        $stored = HashablePassword::normalize($password);
+
+        // The ordinary case: nothing to normalize, so the answer already given stands.
+        if ($stored === $password) {
+            return;
+        }
+
+        // Every field that repeats the password is respelled with it — the confirmation, under whatever
+        // name the set compares it by (`confirmed`, `same:password_again`, `same:confirm.password`): each
+        // has already passed on what was typed, and left as typed it would now differ from the spelling
+        // it is compared with. At any depth, since a rule may name a nested field.
+        $data = $this->all();
+        array_walk_recursive($data, function (mixed &$value) use ($password, $stored): void {
+            if ($value === $password) {
+                $value = $stored;
+            }
+        });
+        // Only the set's rules for `password`, and none at all where it has none. Judged by the rules in
+        // force, not by whose `rules()` ran: a subclass that calls `parent::rules()` and appends a `min:12`
+        // has lukk's rules and one of its own, and its own is asked. (lukk's policy rule, which judges the
+        // stored spelling by itself, knows it has answered for this one: `NormalizedPasswordPolicy`.)
+        $again = ValidatorFacade::make($data, Arr::only($validator->getRules(), ['password']), $this->messages(), $this->attributes());
+
+        foreach ($again->errors()->all() as $message) {
+            $validator->errors()->add('password', $message);
+        }
     }
 
     /**

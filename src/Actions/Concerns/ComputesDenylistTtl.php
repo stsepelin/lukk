@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lukk\Actions\Concerns;
 
 use Lukk\Lukk;
+use Lukk\Support\AccessTtl;
 use Lukk\Support\LongestAccessTtl;
 use Lukk\Support\VerifiedToken;
 
@@ -37,7 +38,7 @@ trait ComputesDenylistTtl
         // The leeway the VERIFIER allows (`Lukk::leeway()`, clamped 0..300), not the raw value: a negative
         // one shortened the entry below the token's real life, so a revoked family's access token verified
         // again for its last minutes.
-        $configured = max((int) ($config['access_ttl'] ?? 900), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + Lukk::leeway($config);
+        $configured = max(AccessTtl::seconds($config), LongestAccessTtl::current($guard, $config['denylist_store'] ?? null)) + Lukk::leeway($config);
 
         // The configured window is only exact while every access token's `exp` really is
         // `iat + lukk.access_ttl`. Two ordinary things break that, and both under-cover the revoke:
